@@ -1,0 +1,35 @@
+# ============================================================
+# Cluster Labels — Semi-Automatic Cell Typing
+# ============================================================
+# HOW TO USE:
+#  1. Run cell typing with mode: "semi_automatic" and
+#     cluster_labels_file: null
+#  2. Inspect the UMAP plots saved in cell_typing_plots/
+#     and cluster_sizes.csv
+#  3. Copy this file, rename it for your experiment
+#     (e.g. cluster_labels_Day12_Slide3.yaml)
+#  4. Fill in each cluster ID → cell type name below
+#  5. Set cluster_labels_file in your config and re-run
+#
+# TIPS:
+#  - Cluster IDs are strings ("0", "1", etc.)
+#  - Cell type names must match what you want in downstream
+#    analysis (triad detection uses "Dendritic cells",
+#    "CD4 T cells", "CD8 T cells" by default)
+#  - Use "Unknown" for clusters you cannot confidently assign
+#  - You can use the same label for multiple clusters
+#    (e.g. two CD4 T cell clusters)
+# ============================================================
+
+cluster_labels:
+  "0": "CD4 T cells"           # ← replace with your assignment
+  "1": "CD8 T cells"
+  "2": "Dendritic cells"
+  "3": "B cells"
+  "4": "Monocytes/Macrophages"
+  "5": "NK cells"
+  "6": "CD4 Tregs"
+  "7": "Unknown"
+  # Add more clusters as needed based on your Leiden resolution
+  # "8": "..."
+  # "9": "..."

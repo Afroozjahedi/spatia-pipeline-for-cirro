@@ -1,0 +1,207 @@
+# ============================================================
+# SPATIA Pipeline Configuration
+# One file per experiment run. All hardcoded values live here.
+# ============================================================
+
+experiment:
+  name: "PirB_D14"                       # Used in output filenames and plot titles
+  description: "LILRB2 KO vs WT Day 14"  # Free text, shown in reports
+
+  # List all condition labels exactly as they appear in your filenames.
+  # For multi-timepoint experiments, add a timepoints key.
+  conditions: ["WT", "KO"]
+  # timepoints: ["D9", "D12", "D14"]    # optional — uncomment if needed
+  # regions: null                        # optional — list region IDs or null
+
+  # Map image_id prefix → condition label.
+  # Overrides auto-detection (which checks if filename starts with condition name).
+  # Leave empty {} to rely on auto-detection.
+  image_condition_map: {}
+
+imaging:
+  microns_per_pixel: 0.5064
+
+  # Tissue area per condition (µm²) — used to compute triad density (triads/mm²).
+  # Required if you want density-normalized comparisons.
+  condition_areas_um2:
+    WT: 4692960.4739
+    KO: 3281308.0925
+  # For multi-timepoint, nest by timepoint:
+  # condition_areas_um2:
+  #   D9:
+  #     WT: 3200000.0
+  #     KO: 2900000.0
+  #   D14:
+  #     WT: 4692960.4739
+  #     KO: 3281308.0925
+
+paths:
+  # Preprocessing input: folder containing slide sub-folders with *_mesmer_result.csv files.
+  # If tif_conversion/roi_masking/segmentation below are enabled, this directory is
+  # WRITTEN by the segmentation step rather than assumed to pre-exist.
+  segmentation_results_dir: "/rsrch6/scratch/trans_mol_path/ajahedi/PirB_D14/segmentation_results"
+
+  # Cell typing input: combined h5ad produced by preprocessing (04-0 output)
+  input_dir: "/rsrch6/scratch/trans_mol_path/ajahedi/PirB_D14-3_1_liberal_20260512_1208/matched_cells"
+
+  # Output: all results, plots, and CSVs written here
+  output_dir: "/rsrch6/scratch/trans_mol_path/ajahedi/PirB_D14-3_1_liberal_20260512_1208/results"
+
+  # ── New upstream-step paths (only needed if tif_conversion/roi_masking/segmentation
+  #    below are enabled=true; otherwise ignored) ──────────────────────────────
+  # raw_image_dir:       directory of raw scanner output (.qptiff / .ome.tiff)
+  # converted_tif_dir:   defaults to <output_dir>/converted_tif/ if unset
+  # qupath_roi_dir:      output of the QuPath ROI/TMA export (manual
+  #                      00_ROI_extract_mask_project.groovy, or automatic
+  #                      qupath_scripts/00b_auto_tma_dearray.groovy for TMAs)
+  # masked_roi_dir:      defaults to <output_dir>/masked_rois/ if unset
+  # channel_file:        path to channelnames.txt matching this panel
+
+# ── Upstream steps (OFF by default -- existing configs that already point at a
+#    populated segmentation_results_dir need no changes) ───────────────────────
+tif_conversion:
+  enabled: false
+  image_format: ".qptiff"
+  preserve_metadata: true
+  overwrite: false
+
+roi_masking:
+  enabled: false
+
+segmentation:
+  enabled: false
+  seg_method: "mesmer"       # or "cellpose"
+  nuclei_channel: "DAPI"
+  membrane_channel_list: ["CD45"]
+  compartment: "whole-cell"
+  input_format: "Multichannel"
+  resize_factor: 1
+  size_cutoff: 0
+  generate_overlays: true
+
+preprocessing:
+  # The last antibody marker in your panel — used to split marker columns from
+  # metadata columns when calling spacec functions.
+  # IMPORTANT: Update this whenever your panel changes.
+  last_marker: "SIGLEC F"
+
+  # QC filter: cells below these percentiles are removed before normalisation.
+  # 1 = 1st percentile (removes only extreme outliers).
+  qc_filter:
+    size_percentile: 1   # removes cells smaller than this area percentile
+    dapi_percentile: 1   # removes cells with lower DAPI than this percentile
+
+  # Noise removal: auto-detects z_count + z_sum cutoffs via knee detection.
+  # cut_off is the percentile fallback if knee detection fails (0.01 = 99th pct).
+  noise:
+    cut_off:   0.01
+    count_bin: 50
+
+cell_typing:
+  # ── Mode ─────────────────────────────────────────────────────
+  # "automatic"    → GMM thresholds + cell_type_definitions.yaml → assigns types directly
+  # "semi_automatic" → GMM thresholds + Leiden clustering → STOPS for human review
+  #                    → fill cluster_labels_file → re-run to assign labels
+  mode: "automatic"
+
+  # Input: .h5ad file from preprocessing (04-0 output)
+  input_file: "/rsrch6/scratch/trans_mol_path/ajahedi/PirB_D14/combined_all_conditions.h5ad"
+
+  # Used in output filenames — fix to match your actual slide/day (avoid Day12/Day14 mix-up)
+  analysis_name: "PirB_D14"
+
+  # ── Markers ──────────────────────────────────────────────────
+  markers:
+    # Full antibody panel used in this experiment
+    panel:
+      - CD4
+      - CD8a
+      - CD24
+      - CD11b
+      - "F4/80"
+      - CX3CR1
+      - CD38
+      - CD3
+      - Ly6g
+      - TCRb
+      - CD31
+      - B220
+      - CD11c
+      - CD19
+      - Ly-6C
+      - CD68
+      - CD169
+      - SIGLEC F
+      - CD45
+      - NKP46
+      - MHC II
+      - PD-1
+      - Ki67
+      - LAG-3
+      - CTLA4
+      - Granzyme B
+      - PRF1
+      - CD206
+      - INOS
+      - FOXP3     # include only if present in your panel
+
+    # Markers used only for gating, not for cell type assignment
+    gating_only: [CD45]
+
+  # ── GMM thresholding ─────────────────────────────────────────
+  gmm:
+    n_components: 2
+    random_state: 42
+
+    # CD45 gate: how many std deviations above the low-expression peak
+    # Semi-auto historically used 8 (very tight); auto used 3 (more permissive)
+    # Set this explicitly so the choice is documented and reproducible
+    cd45_std_multiplier: 3.0
+
+    # Default multiplier for all other markers
+    default_std_multiplier: 2.0
+
+    # Per-marker overrides — only specify markers that differ from default
+    per_marker_overrides:
+      CD11c: 1.5    # DCs express CD11c at lower levels — more liberal gate
+      MHC II: 1.5
+
+  # ── Clustering (semi_automatic mode only) ────────────────────
+  clustering:
+    n_neighbors: 15
+    leiden_resolution: 0.5
+
+  # ── Automatic mode ────────────────────────────────────────────
+  # Path to cell_type_definitions.yaml (relative or absolute)
+  cell_type_definitions_file: "../spatia/cell_type_definitions.yaml"
+
+  # ── Semi-automatic mode ───────────────────────────────────────
+  # Set to null on first run (pipeline stops after clustering + saves UMAP plots)
+  # After filling in cluster labels, set this path and re-run
+  cluster_labels_file: null
+  # cluster_labels_file: "../spatia/cluster_labels_Day14.yaml"
+
+analysis:
+  # ── Triad detection ──────────────────────────────────────────
+  triad:
+    enabled: true
+    radius_um: 20.0
+
+    # Set anchor + partners to detect a specific triad type.
+    # Set all three to null to run all permutations of detected cell types.
+    anchor_type: "Dendritic cells"
+    partner_type_1: "CD4 T cells"
+    partner_type_2: "CD8 T cells"
+
+    # Only count cells flagged as matched=True in the CSV.
+    matched_only: true
+
+    # Minimum number of triads to include a combination in outputs.
+    min_triad_size: 1
+
+  # ── TLS detection (future) ───────────────────────────────────
+  tls:
+    enabled: false
+    # radius_um: 100.0
+    # min_cluster_size: 10
+    # required_cell_types: ["B cells", "T cells", "FDC"]

@@ -1,0 +1,169 @@
+# ============================================================
+# CRC TMA — Cell Type Definitions for Automatic GMM Typing
+# ============================================================
+# Rules use short marker names matching MARKER_RENAME in
+# prepare_crc_for_celltyping.py.  Each marker FOO becomes
+# FOO_pos (bool) in adata.obs after GMM thresholding.
+#
+# Scoring (higher wins):
+#   required  : ALL must be true — if any false, score = 0
+#   required_any : at least ONE must be true
+#   excluded  : if ANY true, score = 0
+#   preferred : each true adds +1 bonus
+#
+# More specific rules (more required markers) beat generic ones.
+# Ordering within a cell type: more specific first.
+#
+# Expert types not defined here (will be "Unassigned"):
+#   dirt, undefined, immune cells, immune cells / vasculature,
+#   tumor cells / immune cells, adipocytes
+#   — these are ambiguous or lack distinguishing markers.
+# ============================================================
+
+cell_type_definitions:
+
+  # ── EPITHELIAL / TUMOUR ───────────────────────────────────
+  tumor cells:
+    # CDX2 is highly specific for intestinal epithelium
+    - required:  [CDX2_pos]
+      excluded:  [CD45_pos]
+      preferred: [CK_pos, MUC1_pos, EGFR_pos, p53_pos]
+    # Fall back to cytokeratin if CDX2 not expressed
+    - required:  [CK_pos]
+      excluded:  [CD45_pos, CDX2_pos]
+      preferred: [MUC1_pos, EGFR_pos, p53_pos]
+
+  # ── MACROPHAGES (most specific first) ────────────────────
+  # GzmB-expressing macrophages — rarest, highest specificity
+  "CD68+ macrophages GzmB+":
+    required:  [CD68_pos, GzmB_pos, CD45_pos]
+    excluded:  [CD8_pos]          # GzmB is also high in CD8+ T cells
+    preferred: [CD163_pos, HLA_DR_pos]
+
+  # CD11b+CD68+ (inflammatory macrophages)
+  "CD11b+CD68+ macrophages":
+    required:  [CD11b_pos, CD68_pos, CD45_pos]
+    excluded:  [GzmB_pos]         # handled above
+    preferred: [HLA_DR_pos]
+
+  # M2-like (CD68+CD163+) — most abundant macrophage subset
+  "CD68+CD163+ macrophages":
+    required:  [CD68_pos, CD163_pos, CD45_pos]
+    excluded:  [CD11b_pos, GzmB_pos]
+    preferred: [HLA_DR_pos, ICOS_pos]
+
+  # CD163+ without CD68 (rare)
+  "CD163+ macrophages":
+    required:  [CD163_pos, CD45_pos]
+    excluded:  [CD68_pos, CD11b_pos]
+    preferred: []
+
+  # Generic CD68+ macrophage (catch-all after subtypes)
+  "CD68+ macrophages":
+    required:  [CD68_pos, CD45_pos]
+    excluded:  [CD163_pos, CD11b_pos, GzmB_pos]
+    preferred: [HLA_DR_pos]
+
+  # ── MONOCYTES ─────────────────────────────────────────────
+  "CD11b+ monocytes":
+    required:  [CD11b_pos, CD45_pos]
+    excluded:  [CD68_pos, CD163_pos, CD15_pos]
+    preferred: [HLA_DR_pos]
+
+  # ── T CELLS (most specific first) ────────────────────────
+  # GATA3+ Th2 CD4
+  "CD4+ T cells GATA3+":
+    required:  [CD4_pos, GATA3_pos, CD45_pos]
+    excluded:  [FOXP3_pos, CD8_pos]
+    preferred: [CD3_pos, ICOS_pos]
+
+  # Regulatory T cells
+  Tregs:
+    required:  [FOXP3_pos, CD45_pos]
+    excluded:  [CD8_pos]
+    preferred: [CD4_pos, CD25_pos, CD45RO_pos]
+
+  # Memory CD4+
+  "CD4+ T cells CD45RO+":
+    required:  [CD4_pos, CD45RO_pos, CD45_pos]
+    excluded:  [FOXP3_pos, GATA3_pos, CD8_pos]
+    preferred: [CD3_pos, CD5_pos, PD1_pos]
+
+  # Naive / generic CD4+
+  "CD4+ T cells":
+    required:  [CD4_pos, CD45_pos]
+    excluded:  [FOXP3_pos, CD45RO_pos, GATA3_pos, CD8_pos]
+    preferred: [CD3_pos, CD5_pos, CD2_pos]
+
+  # CD8+ cytotoxic T cells
+  "CD8+ T cells":
+    required:  [CD8_pos, CD45_pos]
+    excluded:  [FOXP3_pos, CD4_pos]
+    preferred: [CD3_pos, CD5_pos, GzmB_pos, PD1_pos]
+
+  # CD3+ but CD4-/CD8- (rare double-negative or gamma-delta)
+  "CD3+ T cells":
+    required:  [CD3_pos, CD45_pos]
+    excluded:  [CD4_pos, CD8_pos, FOXP3_pos]
+    preferred: [CD7_pos, CD2_pos]
+
+  # ── NK CELLS ──────────────────────────────────────────────
+  "NK cells":
+    required:  [CD56_pos, CD45_pos]
+    excluded:  [CD3_pos, CD8_pos]
+    preferred: [CD57_pos, GzmB_pos]
+
+  # ── B CELLS ───────────────────────────────────────────────
+  "B cells":
+    required:  [CD20_pos, CD45_pos]
+    excluded:  [CD3_pos, CD68_pos, CD138_pos]
+    preferred: [CD21_pos, CD38_pos]
+
+  # ── PLASMA CELLS ─────────────────────────────────────────
+  "plasma cells":
+    required:  [CD138_pos, CD45_pos]
+    excluded:  [CD20_pos]
+    preferred: [CD38_pos]
+
+  # ── DENDRITIC CELLS ──────────────────────────────────────
+  "CD11c+ DCs":
+    required:  [CD11c_pos, CD45_pos]
+    excluded:  [CD68_pos, CD163_pos, CD3_pos, CD20_pos]
+    preferred: [HLA_DR_pos, CD21_pos]
+
+  # ── GRANULOCYTES ─────────────────────────────────────────
+  granulocytes:
+    required:  [CD15_pos, CD45_pos]
+    excluded:  [CD3_pos, CD20_pos, CD68_pos, CD138_pos]
+    preferred: []
+
+  # ── STROMAL / STRUCTURAL (CD45-negative) ─────────────────
+  # Smooth muscle
+  "smooth muscle":
+    required:  [aSMA_pos]
+    excluded:  [CD45_pos, CD31_pos, CK_pos]
+    preferred: [Vimentin_pos]
+
+  # Vasculature (blood vessels)
+  vasculature:
+    required:  [CD31_pos]
+    excluded:  [CD45_pos, Podoplanin_pos]
+    preferred: [CD34_pos]
+
+  # Lymphatic endothelium
+  lymphatics:
+    required:  [Podoplanin_pos]
+    excluded:  [CD45_pos, CD31_pos]
+    preferred: []
+
+  # Stromal fibroblasts
+  stroma:
+    required:  [Vimentin_pos]
+    excluded:  [CD45_pos, CK_pos, aSMA_pos, CD31_pos, Podoplanin_pos]
+    preferred: [CD44_pos, CollagenIV_pos]
+
+  # Peripheral nerves
+  nerves:
+    required:  [GFAP_pos]
+    excluded:  [CD45_pos, CK_pos]
+    preferred: [Synaptophysin_pos, ChromoA_pos]

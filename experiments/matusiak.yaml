@@ -1,0 +1,157 @@
+# ============================================================
+# SPATIA Pipeline Configuration — Matusiak_38552005 (Breast + Colon, CODEX)
+# Entry point: triads only (preprocessing + cell_typing skipped —
+# Matusiak ships with pre-annotated cell types).
+#
+# STATUS: Column labels VERIFIED against the real file 2026-07-01 via
+# prepare_matusiak_data.py --inspect on
+# Matusiak_data/CODEX_AnnData_combined_expression_and_metadata.h5ad
+# (588,194 cells x 36 markers). Real cell_type values differ from the
+# original draft's guesses — see notes inline. condition_areas_um2 is
+# STILL a placeholder (0.0) — density outputs are not trustworthy yet.
+#
+# Run with (after prepare_matusiak_data.py has produced matched_cells/):
+#   python run_pipeline.py --config experiments/matusiak.yaml \
+#       --skip preprocessing --skip cell_typing
+# ============================================================
+
+experiment:
+  name: "Matusiak_38552005"
+  description: "Breast + Colon cancer, CODEX, pan-cancer triad pilot"
+
+  # CONFIRMED — obs['sample'] values are exactly "Breast" / "Colon".
+  conditions: ["Breast", "Colon"]
+
+  image_condition_map: {}
+
+imaging:
+  # ⚙ STILL UNVERIFIED — obs has no pixel-size/metadata field at all.
+  # 0.377 µm/px is the Akoya CODEX instrument default carried over from
+  # the draft config, NOT confirmed from this dataset's acquisition
+  # metadata. Triad radius_um -> radius_px conversion depends entirely on
+  # this number — treat all µm-based results as provisional until Afrouz
+  # confirms the real value (check original Matusiak et al. methods /
+  # supplementary, or CODEX run metadata if available).
+  microns_per_pixel: 0.377
+
+  # UPDATED 2026-07-01 (Afrouz instruction: "these are TMA images, area
+  # should be the same for each one"). Verified this against the actual
+  # per-core coordinate bounding boxes (all 48 cores) rather than assuming
+  # it blindly: median bbox area = 2.237 mm², CV = 6.3% across 48 cores —
+  # the "same nominal punch size" assumption holds well EXCEPT for 5-6
+  # visibly smaller cores (down to 1.63 mm²) that are almost certainly
+  # partial/damaged punches, not a different design. Used the median
+  # (2.237 mm²) as ONE constant per-core area x 24 cores/condition.
+  # CAVEAT: this is a bounding-box estimate (width x height of the cell
+  # coordinate extent), not a segmented tissue-mask area — TMA cores are
+  # round punches, so true tissue area is roughly bbox_area x (pi/4) =
+  # ~78.5% of this if cells fill a circular core. Relative Breast-vs-Colon
+  # comparisons are unaffected by that correction (same factor both sides);
+  # only matters if this number is ever quoted as an absolute area.
+  # NOTE ALSO: because n_images (24) and per-core area are equal for both
+  # conditions, total condition area is IDENTICAL for Breast and Colon —
+  # which means triads/mm2 here is just raw triad count rescaled by the
+  # same constant. It reproduces the raw-count comparison (Breast > Colon),
+  # NOT the permutation-enrichment result (Breast ~= Colon) — these are two
+  # different, both-valid statistics answering different questions; do not
+  # read the density plot as if it were the enrichment result.
+  condition_areas_um2:
+    Breast: 53687256.0   # 24 cores x 2,236,969 um2/core (median bbox)
+    Colon: 53687256.0    # same n_cores x same per-core area
+
+paths:
+  segmentation_results_dir: ""
+
+  # Output of prepare_matusiak_data.py — run that script first (Phase 1
+  # --inspect, then Phase 2 convert with confirmed column names).
+  input_dir: "data/matusiak/matched_cells"
+
+  output_dir: "data/matusiak/results"
+
+preprocessing:
+  last_marker: null
+  qc_filter:
+    size_percentile: 1
+    dapi_percentile: 1
+  noise:
+    cut_off: 0.01
+    count_bin: 50
+
+cell_typing:
+  mode: "automatic"
+  input_file: ""
+  analysis_name: "Matusiak_38552005"
+  markers:
+    panel: []
+    gating_only: []
+  gmm:
+    n_components: 2
+    random_state: 42
+    cd45_std_multiplier: 3.0
+    default_std_multiplier: 2.0
+    per_marker_overrides: {}
+  clustering:
+    n_neighbors: 15
+    leiden_resolution: 0.5
+  cell_type_definitions_file: ""
+  cluster_labels_file: null
+
+analysis:
+  triad:
+    enabled: true
+
+    # Radius sweep decided (PAN_CANCER_TRIADS_LOG.md, Q4): 8-30 um.
+    # run_triad_analysis() only takes ONE radius_um per run — sweep by
+    # running this config once per radius (or extend run_pipeline.py to
+    # loop, matching sweep/ pattern from the LILRB2 SPATIA project).
+    radius_um: 20.0
+    report_radius_um: 20.0
+    trajectory_min_um: 8.0
+
+    # CONFIRMED via --inspect against the real h5ad, 2026-07-01.
+    # Real labels do NOT match the original draft's guesses:
+    #   draft guessed "DC"  -> real value is "DCs" (plural — "DC" would
+    #     have silently matched zero cells and produced an empty run).
+    #   draft guessed "CD4T"/"CD4_T" -> real value IS "CD4T" (guess happened
+    #     to be right).
+    #   draft guessed "CD8T"/"CD8_T" -> real value IS "CD8T" (guess happened
+    #     to be right).
+    # Full real cell_type vocabulary (24 types): Epi, PDGFRb_Fibro, CD4T,
+    # CA9_Epi, CD8T, CD68_MACs, Muscle, Bcells, FAP_Fibro, Endo, Neutro, PC,
+    # DCs, Lymphatics, CD163_MACs, FOLR2_MACs, MastCells, MyoEpi, Treg,
+    # CD34_Fibro, Nerves, LYVE1_MACs, SPP1_MACs, NK.
+    # Macrophage subtypes are already split out from DCs (CD68_MACs,
+    # CD163_MACs, FOLR2_MACs, LYVE1_MACs, SPP1_MACs) — no DC/macrophage
+    # contamination risk in this dataset's typing.
+    anchor_type:    "DCs"
+    partner_type_1: "CD4T"
+    partner_type_2: "CD8T"
+
+    anchor_name:   "DC"
+    partner_1_name: "CD4"
+    partner_2_name: "CD8"
+
+    # Matusiak has no 'matched' column (unlike CRC TMA) — include all cells.
+    matched_only: false
+
+    min_triad_size: 1
+
+  functional:
+    enabled: true
+    report_radius_um: 20.0
+
+    # CONFIRMED via --inspect. PD-1 / LAG3 confirmed ABSENT from this
+    # 36-marker panel (matches prior log finding) — exhausted-state
+    # scoring is not available for this cohort. Only cytotoxic (GzmB) and
+    # regulatory (Treg cell-type / FoxP3) states can be scored.
+    markers:
+      GzmB:  "granzymeb"   # confirmed exact var_name
+      FOXP3: "FoxP3"       # draft guessed lowercase "foxp3" — real var_name is "FoxP3"
+
+  survival:
+    enabled: false
+    # ⚙ No patient-level clinical annotation file identified yet for
+    # Matusiak in the project log — enable once one is confirmed.
+
+  tls:
+    enabled: false

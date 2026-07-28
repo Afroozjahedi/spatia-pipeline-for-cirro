@@ -1,0 +1,148 @@
+# ============================================================
+# SPATIA Pipeline Configuration — CRC TMA Hackathon Dataset
+# Entry point: triads only (preprocessing + cell_typing skipped)
+#
+# Run with:
+#   python run_pipeline.py --config experiments/crc_tma.yaml \
+#       --skip preprocessing --skip cell_typing
+# ============================================================
+
+experiment:
+  name: "CRC_TMA"
+  description: "CRC TMA hackathon — triad detection (CD11c+ DC / CD4+ T / CD8+ T)"
+
+  # Group 1 = CLR (Crohn's-like reaction),  Group 2 = DII (diffuse inflammatory infiltration)
+  # TMA_AB (A/B) is a replicate copy of the same cores — NOT a biological condition.
+  # Files are named CLR_reg001_A_matched_with_boundaries.csv etc.
+  conditions: ["CLR", "DII"]
+
+  # Auto-detection reads condition from filename prefix — no map needed
+  image_condition_map: {}
+
+imaging:
+  # ⚠️  Verify this value from your acquisition metadata (20x CyCIF on Zeiss ≈ 0.65 µm/px)
+  # Affects only triad radius conversion (radius_um / microns_per_pixel = radius_px)
+  microns_per_pixel: 0.65
+
+  # 68 CLR cores, 72 DII cores (17 CLR patients × 4 cores, 18 DII patients × 4 cores)
+  # Area per core = 1920 × 1440 × (0.65)² = 1,168,128 µm²
+  condition_areas_um2:
+    CLR: 79432704.0
+    DII: 84105216.0
+
+paths:
+  # Not used — triads reads directly from input_dir CSVs
+  segmentation_results_dir: ""
+
+  # Output of prepare_crc_data.py (run that script first)
+  # Local:
+  input_dir: "data/crc_tma/matched_cells"
+  # On Seadragon (update this path):
+  # input_dir: "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA/matched_cells"
+
+  # All triad outputs go here
+  output_dir: "data/crc_tma/results"
+  # On Seadragon:
+  # output_dir: "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA/results"
+
+# ── Preprocessing (skipped — data already prepared) ─────────
+preprocessing:
+  last_marker: null
+  qc_filter:
+    size_percentile: 1
+    dapi_percentile: 1
+  noise:
+    cut_off: 0.01
+    count_bin: 50
+
+# ── Cell typing (skipped — ClusterName used directly) ────────
+cell_typing:
+  mode: "automatic"
+  input_file: ""
+  analysis_name: "CRC_TMA"
+  markers:
+    panel: []
+    gating_only: []
+  gmm:
+    n_components: 2
+    random_state: 42
+    cd45_std_multiplier: 3.0
+    default_std_multiplier: 2.0
+    per_marker_overrides: {}
+  clustering:
+    n_neighbors: 15
+    leiden_resolution: 0.5
+  cell_type_definitions_file: ""
+  cluster_labels_file: null
+
+# ── Analysis ─────────────────────────────────────────────────
+analysis:
+  triad:
+    enabled: true
+
+    # Search radius (maximum) — triads within this range are captured for trajectory
+    radius_um: 30.0
+
+    # Primary reporting threshold — vertical line on trajectory, used in comparison plots
+    report_radius_um: 20.0
+
+    # Distance trajectory x-axis range
+    trajectory_min_um: 8.0
+
+    # CRC triad: DC anchoring CD4+ and CD8+ T cells
+    # These must match ClusterName values EXACTLY (case-sensitive)
+    anchor_type:    "CD11c+ DCs"
+    partner_type_1: "CD4+ T cells"
+    partner_type_2: "CD8+ T cells"
+
+    # Short display names — used in plot labels, output filenames, and combo labels
+    anchor_name:   "DC"
+    partner_1_name: "CD4"
+    partner_2_name: "CD8"
+
+    # No 'matched' column in CRC data — all cells are included
+    matched_only: false
+
+    # Minimum triads to include an image in summary output
+    min_triad_size: 1
+
+  functional:
+    enabled: true
+
+    # Cells are classified "in-triad" at this radius (should match report_radius_um).
+    # Only cells in triads at this threshold are compared against out-of-triad cells.
+    report_radius_um: 20.0
+
+    # Map short display name → exact column name in the per-image CSVs.
+    # These come from the CyCIF marker panel (CRC_clusters_neighborhoods_markers.csv).
+    markers:
+      GzmB:   "Granzyme B - cytotoxicity:Cyc_13_ch_2"
+      PD-1:   "PD-1 - checkpoint:Cyc_12_ch_4"
+      LAG-3:  "LAG-3 - checkpoint:Cyc_8_ch_4"
+      FOXP3:  "FOXP3 - regulatory T cells:Cyc_2_ch_3"
+      ICOS:   "ICOS - costimulator:Cyc_14_ch_4"
+      Ki67:   "Ki67 - proliferation:Cyc_5_ch_4"
+      HLA-DR: "HLA-DR - MHC-II:Cyc_5_ch_2"
+      PD-L1:  "PD-L1 - checkpoint:Cyc_5_ch_3"
+      CD25:   "CD25 - IL-2 Ra:Cyc_11_ch_4"
+
+  survival:
+    enabled: true
+
+    # Patient-level clinical annotation — must contain:
+    #   Patient, Group, TMA spot / region, OS, OS_Censor, DFS, DFS_Censor
+    patient_annotation_file: "/Users/ajahedi/Library/CloudStorage/OneDrive-InsideMDAnderson/Hackathon/day_of_hackathon/patient_with_tls_class.csv"
+
+    # Each TMA core area = 1920 × 1440 × 0.65² µm²
+    area_per_image_um2: 1168128.0
+
+    # Split patients into HIGH vs LOW by median triad density (triads/mm²).
+    # Or set a numeric threshold: e.g. split_by: 0.05
+    split_by: "median"
+
+    # OS_Censor=1 → censored (patient alive at last follow-up)
+    # OS_Censor=0 → event (death)
+    censor_is_one: true
+
+  tls:
+    enabled: false

@@ -1,0 +1,199 @@
+# ============================================================
+# SPATIA Pipeline Configuration — CRC TMA, FULL PIPELINE (raw image -> triads)
+#
+# Companion to experiments/crc_tma.yaml, which deliberately starts at triads
+# using the hackathon's already-segmented, already-cell-typed CSV. THIS config
+# is for demonstrating the new upstream steps end-to-end against the raw CRC
+# TMA core images (OneDrive Hackathon/TMA_A, TMA_B, DII_TMA_A, DII_TMA_B).
+#
+# HONEST STATUS (see SPATIA_PIPELINE_LOG.md for the full write-up):
+#   - tif_conversion / roi_masking / segmentation modules are written and,
+#     for tif_conversion + roi_masking, smoke-tested end-to-end against a
+#     synthetic 92-channel image built from the REAL channelNames.txt panel.
+#   - segmentation.py's CSV-export logic (the part downstream code depends
+#     on) is verified against a synthetic segmentation mask. The actual
+#     spacec/Mesmer call itself is NOT verified -- spacec could not be
+#     installed in the build sandbox (pulls torch, ~900MB, exhausted disk).
+#   - NOT run against real CRC pixels: the sandbox used to build this could
+#     not fetch .tif files from OneDrive at all (tool limitation, confirmed
+#     on files from 3.6MB to 508MB). Real validation needs to happen where
+#     the raw cores are actually reachable (local machine / Seadragon).
+#   - Nuance worth flagging: the raw per-core files already in OneDrive
+#     (e.g. TMA_A/reg011_X01_Y01_Z09.tif) appear to be POST-core-extraction
+#     already (each is a single ~1920x1440x92ch core, not a whole-TMA-slide
+#     grid) -- so for THIS historical dataset, tif_conversion and
+#     roi_masking may have little or nothing to do (files are already plain
+#     .tif, already per-core). segmentation is the step that would actually
+#     need to run to reproduce data/crc_tma/matched_cells/*.csv from raw
+#     pixels. Treat raw_image_dir below as segmentation's direct input for
+#     this dataset specifically, not assumed to need tif_conversion/roi_masking
+#     first -- confirm with Afrouz before assuming otherwise.
+#
+# Run with:
+#   python run_pipeline.py --config experiments/crc_tma_full_pipeline.yaml \
+#       --steps segmentation preprocessing
+# ============================================================
+
+experiment:
+  name: "CRC_TMA_full"
+  description: "CRC TMA — full pipeline demo from raw core images through triads"
+  conditions: ["CLR", "DII"]
+  image_condition_map: {}
+
+imaging:
+  microns_per_pixel: 0.65
+  condition_areas_um2:
+    CLR: 79432704.0
+    DII: 84105216.0
+
+paths:
+  # Raw per-core TIFFs already on OneDrive (see status note above re: whether
+  # these need tif_conversion/roi_masking at all, or go straight to segmentation).
+  raw_image_dir: "/Users/ajahedi/Library/CloudStorage/OneDrive-InsideMDAnderson/Hackathon/TMA_A"
+
+  # If tif_conversion IS needed: standard-TIFF output goes here.
+  converted_tif_dir: "data/crc_tma_full/converted_tif"
+
+  # QuPath ROI/TMA export. For this dataset, cores already appear pre-extracted
+  # (see status note) -- qupath_roi_dir may end up unused if roi_masking is
+  # skipped in favor of segmentation reading raw_image_dir directly.
+  qupath_roi_dir: "data/crc_tma_full/qupath_roi"
+  masked_roi_dir: "data/crc_tma_full/masked_rois"
+
+  # Real 92-channel CRC panel (pulled from OneDrive/channelNames.txt).
+  channel_file: "data/crc_tma_full/channelNames.txt"
+
+  # Segmentation writes here; preprocessing reads from here -- same directory,
+  # no separate wiring needed.
+  segmentation_results_dir: "data/crc_tma_full/segmentation_results"
+  input_dir: "data/crc_tma_full/segmentation_results"
+  output_dir: "data/crc_tma_full/results"
+
+tif_conversion:
+  enabled: false   # see status note -- likely a no-op for this dataset's pre-extracted cores
+  image_format: ".qptiff"
+  preserve_metadata: true
+
+roi_masking:
+  enabled: false   # see status note -- cores already appear pre-extracted
+
+segmentation:
+  enabled: true
+  seg_method: "mesmer"
+  nuclei_channel: "DAPI"
+  membrane_channel_list: ["CD45 - hematopoietic cells"]
+  compartment: "whole-cell"
+  input_format: "Multichannel"
+  resize_factor: 1
+  size_cutoff: 0
+  generate_overlays: true
+
+preprocessing:
+  last_marker: "DRAQ5"   # last channel in the real 92-channel panel (channelNames.txt)
+  qc_filter:
+    size_percentile: 1
+    dapi_percentile: 1
+  noise:
+    cut_off: 0.01
+    count_bin: 50
+
+cell_typing:
+  mode: "automatic"
+  input_file: ""
+  analysis_name: "CRC_TMA_full"
+  markers:
+    # TODO-was: "fill in from channelNames.txt once segmentation output is
+    # validated". This sandbox still cannot reach
+    # OneDrive/Hackathon/channelNames.txt directly (confirmed again on
+    # 2026-07-22 -- outside this session's connected folders). However the
+    # SAME underlying CRC dataset's short marker names are already known
+    # and pipeline-verified via the pre-segmented-CSV route: this is the
+    # exact 50-name panel from experiments/crc_tma_celltyping.yaml /
+    # prepare_crc_for_celltyping.py's MARKER_RENAME dict, which already ran
+    # successfully (see crc_accuracy_report.csv, crc_confusion_matrix.png,
+    # dated 2026-07-01). Copied here as a reuse of an already-established
+    # name list, not a new marker-selection decision -- flag to Afrouz:
+    # please confirm this 50-marker list is complete/correct for the raw
+    # 92-channel image too (92 raw channels include blanks/DAPI-per-cycle
+    # not present as named markers here).
+    panel:
+      - CD45
+      - CD44
+      - FOXP3
+      - CDX2
+      - CD8
+      - p53
+      - GATA3
+      - Tbet
+      - betacatenin
+      - HLA_DR
+      - PDL1
+      - Ki67
+      - CD45RA
+      - CD4
+      - CD21
+      - MUC1
+      - CD30
+      - CD2
+      - Vimentin
+      - CD20
+      - LAG3
+      - CD5
+      - IDO1
+      - CK
+      - CD11b
+      - CD56
+      - aSMA
+      - BCL2
+      - CD25
+      - CollagenIV
+      - CD11c
+      - PD1
+      - GzmB
+      - EGFR
+      - VISTA
+      - CD15
+      - CCR4
+      - ICOS
+      - MMP9
+      - Synaptophysin
+      - CD71
+      - GFAP
+      - CD7
+      - CD3
+      - ChromoA
+      - CD163
+      - CD57
+      - CD45RO
+      - CD68
+      - CD31
+      - Podoplanin
+      - CD34
+      - CD38
+      - CD138
+      - MMP12
+    gating_only: []
+  gmm:
+    n_components: 2
+    random_state: 42
+    # NOT copied from crc_tma_celltyping.yaml (which uses 2.0 here, plus a
+    # non-empty per_marker_overrides block and a cell_type_definitions_file).
+    # Those are threshold/gating judgment calls on top of the marker list,
+    # not a name-reuse -- left as this file's original placeholder values
+    # and surfaced as an open decision (Q-FullPipeline-GMMThresholds) rather
+    # than silently copied.
+    cd45_std_multiplier: 3.0
+    default_std_multiplier: 2.0
+    per_marker_overrides: {}
+  clustering:
+    n_neighbors: 15
+    leiden_resolution: 0.5
+  cell_type_definitions_file: ""   # open -- see Q-FullPipeline-GMMThresholds below
+  cluster_labels_file: null
+
+analysis:
+  triad:
+    enabled: false   # turn on once segmentation + cell_typing are validated against
+                      # the existing data/crc_tma/matched_cells/ ground truth
+  tls:
+    enabled: false

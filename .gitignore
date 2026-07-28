@@ -1,0 +1,27 @@
+# This repo is scoped on purpose: it tracks only the core pipeline code
+# (spatia/analysis modules + run_pipeline.py) and its yaml configs
+# (cell-typing definitions + per-step run parameters).
+# Everything else in the working directory (notebooks, slides, data,
+# QuPath/Groovy scripts, Cirro manifest, docs, etc.) is intentionally
+# untracked here — it still exists on disk, just not in git.
+#
+# Full project history is preserved locally on the
+# 'backup/full-project-2026-07-28' branch.
+
+*
+
+!.gitignore
+
+!spatia/
+!spatia/__init__.py
+!spatia/analysis/
+!spatia/analysis/*.py
+!spatia/*.yaml
+
+!run_pipeline.py
+
+!cell_type_definitions/
+!cell_type_definitions/*.yaml
+
+!experiments/
+!experiments/*.yaml

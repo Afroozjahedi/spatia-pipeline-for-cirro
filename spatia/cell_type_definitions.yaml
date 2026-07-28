@@ -1,0 +1,135 @@
+# ============================================================
+# SPATIA Cell Type Definitions
+# Used by automatic cell typing mode (mode: "automatic")
+#
+# Structure per cell type:
+#   required:      ALL of these marker_pos columns must be True
+#   required_any:  AT LEAST ONE of these must be True
+#   preferred:     bonus score — does not disqualify; used to break ties
+#   excluded:      ANY of these being True disqualifies the rule
+#
+# Multiple rules per cell type = OR logic (best-scoring rule wins).
+# Rules are scored globally — a cell gets the cell type with the
+# highest-scoring matching rule across ALL cell types.
+# ============================================================
+
+cell_type_definitions:
+
+  CD4 T cells:
+    - required: [CD3_pos, CD4_pos]
+      excluded: [CD8a_pos, FOXP3_pos, FoxP3_pos]
+    - required: [CD3_pos, CD4_pos, CD38_pos]
+      excluded: [CD8a_pos, FOXP3_pos, FoxP3_pos]
+
+  CD8 T cells:
+    - required: [CD3_pos, CD8a_pos]
+      excluded: [CD4_pos]
+    - required: [CD3_pos, CD8a_pos, CD38_pos]
+      excluded: [CD4_pos]
+    - required: [CD3_pos, CD8a_pos, Granzyme B_pos]
+      preferred: [PRF1_pos]
+      excluded: [CD4_pos]
+    - required: [CD3_pos, CD8a_pos, PD-1_pos]
+      excluded: [CD4_pos]
+    - required: [CD3_pos, CD8a_pos, LAG-3_pos]
+      excluded: [CD4_pos]
+
+  CD4 Tregs:
+    - required: [CD3_pos, CD4_pos, FOXP3_pos]
+      excluded: [CD8a_pos]
+    - required: [CD3_pos, CD4_pos, FoxP3_pos]
+      excluded: [CD8a_pos]
+
+  DN T cells:
+    - required: [CD3_pos]
+      excluded: [CD4_pos, CD8a_pos]
+
+  Dendritic cells:
+    - required: [CD11c_pos, MHC II_pos]
+      excluded: [CD11b_pos, B220_pos, F4/80_pos, CD68_pos, CD3_pos]
+    - required: [CD11c_pos, MHC II_pos, CD11b_pos]
+      excluded: [F4/80_pos, CD68_pos, B220_pos, CD3_pos, Ly-6C_pos]
+    - required: [CD11c_pos, MHC II_pos]
+      excluded: [CD3_pos, B220_pos, Ly6g_pos]
+    - required: [CD11c_pos, CD11b_pos, Ly-6C_pos]
+      preferred: [MHC II_pos]
+      excluded: [F4/80_pos, CD68_pos, CD3_pos, B220_pos, Ly6g_pos]
+    - required: [CD11c_pos]
+      preferred: [MHC II_pos]
+      excluded: [CD3_pos, B220_pos, Ly6g_pos]
+    - required: [CD11c_pos, B220_pos]
+      preferred: [MHC II_pos]
+      excluded: [CD3_pos, CD19_pos]
+    - required: [CD11c_pos, SIGLEC F_pos]
+      preferred: [CD11b_pos]
+      excluded: [Ly6g_pos, CD3_pos, B220_pos]
+    - required: [CD11c_pos]
+      excluded: [CD3_pos, Ly6g_pos]
+    - required: [MHC II_pos]
+      required_any: [CD11b_pos, CD11c_pos]
+      excluded: [CD3_pos, B220_pos]
+
+  NK cells:
+    - required: [NKP46_pos]
+      excluded: [CD3_pos]
+
+  NK T cells:
+    - required: [CD3_pos, NKP46_pos]
+      excluded: []
+
+  Monocytes/Macrophages:
+    - required: [CD11b_pos]
+      preferred: [Ly-6C_pos, F4/80_pos, CD68_pos]
+      excluded: [CD3_pos, B220_pos, Ly6g_pos, CD11c_pos]
+    - required_any: [F4/80_pos, CD68_pos]
+      excluded: [CD3_pos, B220_pos, Ly6g_pos, CD11c_pos]
+    - required_any: [F4/80_pos, CD68_pos]
+      required: [CD206_pos]
+      excluded: [INOS_pos, CD3_pos, B220_pos, Ly6g_pos, CD11c_pos]
+    - required_any: [F4/80_pos, CD68_pos]
+      preferred: [INOS_pos, MHC II_pos]
+      excluded: [CD206_pos, CD3_pos, B220_pos, Ly6g_pos, CD11c_pos]
+    - required: [CD11b_pos, CX3CR1_pos]
+      excluded: [Ly-6C_pos, F4/80_pos, CD68_pos, Ly6g_pos, CD3_pos, CD11c_pos]
+    - required: [CD11b_pos, Ly-6C_pos]
+      excluded: [F4/80_pos, CD68_pos, Ly6g_pos, CD3_pos, B220_pos, CD11c_pos]
+
+  B cells:
+    - required_any: [B220_pos, CD19_pos]
+      required: [CD24_pos]
+      excluded: [CD3_pos]
+    - required: [B220_pos]
+      excluded: [CD3_pos]
+
+  Endothelial cells:
+    - required: [CD31_pos]
+      excluded: [CD45_pos]
+
+  Activated/Transitional cells:
+    - required: [CD38_pos, Ki67_pos]
+      excluded: [CD3_pos, B220_pos, CD11b_pos]
+
+  Myeloid-Lymphoid Doublets:
+    - required: [CD11b_pos, CD3_pos]
+      excluded: []
+    - required: [CD11b_pos, B220_pos]
+      excluded: []
+
+  T-B Doublets:
+    - required: [CD3_pos, B220_pos]
+      excluded: []
+    - required: [CD3_pos, CD19_pos]
+      excluded: []
+
+  CD3+ T cells (unspecified):
+    - required: [CD3_pos]
+      excluded: []
+
+  Myeloid cells (unspecified):
+    - required: [CD11b_pos]
+      excluded: [CD3_pos, B220_pos, CD19_pos]
+
+  # Catch-all — assigned last only if nothing else matched
+  CD45+ immune cells (unspecified):
+    - required: []
+      excluded: []

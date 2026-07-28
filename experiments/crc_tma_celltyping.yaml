@@ -1,0 +1,172 @@
+# ============================================================
+# SPATIA Pipeline — CRC TMA Automatic Cell Typing Validation
+#
+# Purpose: run GMM-based automatic cell typing on 258K CRC
+# cells and compare to expert-assigned ClusterName labels.
+#
+# Prerequisites:
+#   1. python prepare_crc_for_celltyping.py
+#
+# Run with:
+#   python run_pipeline.py \
+#       --config experiments/crc_tma_celltyping.yaml \
+#       --steps cell_typing
+#
+# After run:
+#   python compare_expert_vs_auto.py
+# ============================================================
+
+experiment:
+  name: "CRC_TMA_CellTyping"
+  description: "Automatic GMM cell typing on CRC TMA — validated against expert ClusterName labels"
+  conditions: ["CLR", "DII"]
+  image_condition_map: {}
+
+imaging:
+  microns_per_pixel: 0.65
+  condition_areas_um2:
+    CLR: 79432704.0
+    DII: 84105216.0
+
+paths:
+  segmentation_results_dir: ""
+  input_dir:  "data/crc_tma_celltyping"
+  output_dir: "data/crc_tma_celltyping/results"
+
+# ── Preprocessing (skipped — h5ad built by prepare_crc_for_celltyping.py) ──
+preprocessing:
+  last_marker: null
+  qc_filter:
+    size_percentile: 1
+    dapi_percentile: 1
+  noise:
+    cut_off: 0.01
+    count_bin: 50
+
+# ── Cell typing ──────────────────────────────────────────────
+cell_typing:
+  mode: "automatic"
+
+  # h5ad produced by prepare_crc_for_celltyping.py
+  input_file: "data/crc_tma_celltyping/crc_tma_for_celltyping.h5ad"
+
+  analysis_name: "CRC_TMA_CT"
+
+  markers:
+    # All markers fed to GMM for positivity thresholding.
+    # CD45 is included here (not in gating_only) so CD45_pos is computed
+    # as a regular column. CD45 gating is skipped via skip_cd45_gate below
+    # because we want to type BOTH immune and non-immune cells.
+    panel:
+      - CD45
+      - CD44
+      - FOXP3
+      - CDX2
+      - CD8
+      - p53
+      - GATA3
+      - Tbet
+      - betacatenin
+      - HLA_DR
+      - PDL1
+      - Ki67
+      - CD45RA
+      - CD4
+      - CD21
+      - MUC1
+      - CD30
+      - CD2
+      - Vimentin
+      - CD20
+      - LAG3
+      - CD5
+      - IDO1
+      - CK
+      - CD11b
+      - CD56
+      - aSMA
+      - BCL2
+      - CD25
+      - CollagenIV
+      - CD11c
+      - PD1
+      - GzmB
+      - EGFR
+      - VISTA
+      - CD15
+      - CCR4
+      - ICOS
+      - MMP9
+      - Synaptophysin
+      - CD71
+      - GFAP
+      - CD7
+      - CD3
+      - ChromoA
+      - CD163
+      - CD57
+      - CD45RO
+      - CD68
+      - CD31
+      - Podoplanin
+      - CD34
+      - CD38
+      - CD138
+      - MMP12
+    # Empty — no CD45 gating (see skip_cd45_gate below)
+    gating_only: []
+
+  gmm:
+    n_components: 2
+    random_state: 42
+    # skip_cd45_gate: true → run on ALL 258K cells (immune + tumor + stromal).
+    # Required so:
+    #   (a) CD45_pos is computed on the full population (not just CD45+ cells)
+    #   (b) CK/CD31/aSMA thresholds are computed on the full mixed population
+    #       (not near-zero on immune-only subset)
+    skip_cd45_gate: true
+    cd45_std_multiplier: 2.0   # used for CD45_pos threshold (liberal)
+    # Standard threshold for panel markers
+    default_std_multiplier: 2.0
+    # Tighter gates for markers prone to bleed-through
+    per_marker_overrides:
+      CD45: 2.0     # permissive — capture all immune cells
+      CD11c: 1.5    # DCs are rare — liberal gate
+      HLA_DR: 1.5   # broadly expressed at low levels
+      Vimentin: 1.5  # stromal bleed-through
+      GzmB: 2.0
+
+  clustering:
+    n_neighbors: 15
+    leiden_resolution: 0.5
+
+  cell_type_definitions_file: "cell_type_definitions/crc_tma.yaml"
+  cluster_labels_file: null
+
+# ── Analysis steps (disabled for this config) ────────────────
+analysis:
+  triad:
+    enabled: false
+    radius_um: 30.0
+    report_radius_um: 20.0
+    trajectory_min_um: 8.0
+    anchor_type:    "CD11c+ DCs"
+    partner_type_1: "CD4+ T cells"
+    partner_type_2: "CD8+ T cells"
+    anchor_name:    "DC"
+    partner_1_name: "CD4"
+    partner_2_name: "CD8"
+    matched_only: false
+    min_triad_size: 1
+  functional:
+    enabled: false
+    report_radius_um: 20.0
+    markers: {}
+  survival:
+    enabled: false
+    patient_annotation_file: ""
+    area_per_image_um2: 1168128.0
+    split_by: "median"
+    censor_is_one: true
+  tls:
+    enabled: false
