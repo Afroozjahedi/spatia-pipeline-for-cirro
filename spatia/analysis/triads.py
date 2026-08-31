@@ -4,7 +4,6 @@ spatia.analysis.triads
 Generalizable triad detection for spatial proteomics data.
 
 All parameters come from a config dict (loaded from config_example.yaml).
-No hardcoded paths, conditions, cell types, or pixel sizes.
 
 Usage
 -----
@@ -15,6 +14,7 @@ The config dict shape mirrors config_example.yaml.
 """
 
 import os
+import re
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -24,12 +24,12 @@ from itertools import combinations, permutations
 
 # ── Config helpers ────────────────────────────────────────────────────────────
 
-def _get_condition_areas(cfg: dict) -> dict:
+def _get_experiment_group_areas(cfg: dict) -> dict:
     """
-    Returns a flat {condition: area_um2} dict.
+    Returns a flat {experiment_group: area_um2} dict.
     Handles both flat and timepoint-nested config formats.
     """
-    raw = cfg["imaging"]["condition_areas_um2"]
+    raw = cfg["imaging"]["experiment_group_areas_um2"]
     # If values are dicts, it's timepoint-nested — flatten by summing areas.
     if raw and isinstance(next(iter(raw.values())), dict):
         flat = {}
@@ -40,17 +40,187 @@ def _get_condition_areas(cfg: dict) -> dict:
     return dict(raw)
 
 
-def _get_condition(image_id: str, image_condition_map: dict, conditions: list) -> str:
+def _get_experiment_group(image_id: str, image_experiment_group_map: dict, experiment_groups: list) -> str:
     """
-    Determine condition from image_id.
+    Determine experiment_group from image_id.
     Priority: explicit map → prefix match → 'Unknown'.
     """
-    if image_id in image_condition_map:
-        return image_condition_map[image_id]
-    for cond in conditions:
+    if image_id in image_experiment_group_map:
+        return image_experiment_group_map[image_id]
+    for cond in experiment_groups:
         if image_id.upper().startswith(cond.upper()):
             return cond
     return "Unknown"
+
+
+# ── Per-image tissue area from QuPath ROI extraction (optional) ────────────────
+
+def _load_roi_areas(roi_labels_dir: str, mpp: float, annotation_class: str = None) -> dict:
+    """
+    Reads every *_roi_labels.txt produced by the QuPath ROI-extraction script
+    (00_ROI_extract_mask_project.groovy) in roi_labels_dir, sums the Area_px2
+    column per image (optionally filtered to a single annotation Class), and
+    converts to um^2 using the pipeline's own microns_per_pixel — NOT QuPath's
+    internal pixel calibration, which may be unset or unverified. This keeps
+    area and triad-radius-in-pixels conversion using the same single source
+    of truth for calibration.
+
+    Returns {qupath_image_name: area_um2}. Returns {} if roi_labels_dir is
+    unset/missing (callers should treat that as "feature not in use").
+    """
+    areas = {}
+    if not roi_labels_dir or not os.path.isdir(roi_labels_dir):
+        return areas
+
+    label_files = sorted([
+        f for f in os.listdir(roi_labels_dir)
+        if f.endswith("_roi_labels.txt") and not f.startswith("._")
+    ])
+    for fname in label_files:
+        image_name = fname.replace("_roi_labels.txt", "")
+        path = os.path.join(roi_labels_dir, fname)
+        try:
+            tbl = pd.read_csv(path, sep="\t")
+        except Exception as e:
+            print(f"[SPATIA] ⚠️  Could not read ROI labels file {fname}: {e}")
+            continue
+
+        if "Area_px2" not in tbl.columns:
+            print(f"[SPATIA] ⚠️  {fname} has no Area_px2 column — re-run the "
+                  f"updated QuPath extraction script. Skipping this image.")
+            continue
+
+        sub = tbl
+        if annotation_class is not None:
+            if "Class" not in tbl.columns:
+                print(f"[SPATIA] ⚠️  {fname} has no Class column — cannot filter "
+                      f"to '{annotation_class}'. Skipping this image.")
+                continue
+            sub = tbl[tbl["Class"] == annotation_class]
+            if sub.empty:
+                print(f"[SPATIA] ⚠️  {fname}: no annotations with Class == "
+                      f"'{annotation_class}' — area for this image will be 0.")
+
+        areas[image_name] = float(sub["Area_px2"].sum()) * (mpp ** 2)
+
+    return areas
+
+
+def _normalize_name(s: str) -> str:
+    """Lowercase, strip everything but letters/digits — for fuzzy name matching."""
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+def _resolve_image_areas(image_ids: list, roi_areas_by_qupath_name: dict,
+                          image_id_map: dict = None):
+    """
+    Matches each image_id (from *_matched_with_boundaries.csv) to a
+    QuPath-derived area, in priority order:
+      1. Explicit imaging.image_id_map override ({qupath_name: image_id}).
+      2. Exact string match (image_id == qupath image name).
+      3. Normalized match (lowercase, alphanumeric-only).
+
+    Returns (matched: {image_id: area_um2}, unmatched: [image_id, ...]).
+    """
+    image_id_map = image_id_map or {}
+    override_lookup = {v: k for k, v in image_id_map.items()}  # image_id -> qupath_name
+
+    norm_lookup = {}
+    for qname in roi_areas_by_qupath_name:
+        norm_lookup.setdefault(_normalize_name(qname), qname)
+
+    matched, unmatched = {}, []
+    for image_id in image_ids:
+        qname = None
+        if image_id in override_lookup and override_lookup[image_id] in roi_areas_by_qupath_name:
+            qname = override_lookup[image_id]
+        elif image_id in roi_areas_by_qupath_name:
+            qname = image_id
+        else:
+            qname = norm_lookup.get(_normalize_name(image_id))
+
+        if qname is not None:
+            matched[image_id] = roi_areas_by_qupath_name[qname]
+        else:
+            unmatched.append(image_id)
+
+    return matched, unmatched
+
+
+def _resolve_per_image_group_areas(
+    image_ids: list,
+    image_id_to_group: dict,
+    roi_labels_dir: str,
+    mpp: float,
+    area_annotation_class,
+    image_id_map: dict,
+    fallback_group_areas: dict,
+) -> dict:
+    """
+    Builds per-experiment_group total area from QuPath-derived per-image ROI
+    areas, with a 3-tier per-image fallback:
+      1. Matched QuPath ROI-labels area (measured).
+      2. No match, but fallback_group_areas has a constant for that image's
+         group -> impute area = group_constant / n_images_in_group_this_run
+         (spreads the existing group total evenly across the images actually
+         present in this run, rather than the images assumed when the
+         constant was originally typed into the config).
+      3. Neither -> NaN; that image's area is excluded from the group total.
+         Its triads are NOT excluded from the count elsewhere, so that
+         group's density will be a slight overestimate — flagged loudly
+         below rather than silently.
+
+    Returns {experiment_group: area_um2}. Prints a per-image audit line so
+    the provenance of every density number is visible in the run log.
+    """
+    roi_areas_by_name = _load_roi_areas(roi_labels_dir, mpp, area_annotation_class)
+    matched, unmatched = _resolve_image_areas(image_ids, roi_areas_by_name, image_id_map)
+
+    if unmatched:
+        print(f"[SPATIA] ⚠️  {len(unmatched)} image(s) had no matching QuPath ROI "
+              f"area (tried exact name, normalized name, and imaging.image_id_map):")
+        for u in unmatched:
+            print(f"           - {u}")
+        print(f"           Add an entry to imaging.image_id_map ({{qupath_name: image_id}}) "
+              f"to fix a specific one; unresolved images fall back to a group average.")
+
+    # Count images per group (all images this run, matched + unmatched) — the
+    # denominator used to spread a group constant evenly when imputing.
+    group_counts = {}
+    for iid in image_ids:
+        g = image_id_to_group[iid]
+        group_counts[g] = group_counts.get(g, 0) + 1
+
+    per_image_area = {}
+    for iid in image_ids:
+        g = image_id_to_group[iid]
+        if iid in matched:
+            per_image_area[iid] = matched[iid]
+            print(f"[SPATIA] Area  {iid:<30s}: {matched[iid]:>14,.1f} µm²  (measured, QuPath ROI)")
+            continue
+
+        constant = fallback_group_areas.get(g)
+        has_constant = constant is not None and not (isinstance(constant, float) and np.isnan(constant))
+        if has_constant and group_counts.get(g, 0) > 0:
+            imputed = constant / group_counts[g]
+            per_image_area[iid] = imputed
+            print(f"[SPATIA] Area  {iid:<30s}: {imputed:>14,.1f} µm²  "
+                  f"(no QuPath match — imputed as group '{g}' average, "
+                  f"{constant:,.1f} / {group_counts[g]} images)")
+        else:
+            per_image_area[iid] = float("nan")
+            print(f"[SPATIA] Area  {iid:<30s}: {'NaN':>14s}  ⚠️  no QuPath match and no "
+                  f"imaging.experiment_group_areas_um2 for group '{g}' — excluded from "
+                  f"'{g}' density (triad counts for this image are NOT excluded, so "
+                  f"'{g}' density will be a slight overestimate).")
+
+    resolved_group_areas = {}
+    for iid, area in per_image_area.items():
+        if not np.isnan(area):
+            g = image_id_to_group[iid]
+            resolved_group_areas[g] = resolved_group_areas.get(g, 0.0) + area
+
+    return resolved_group_areas
 
 
 # ── Core detection ────────────────────────────────────────────────────────────
@@ -258,7 +428,7 @@ def plot_triad_qc(df, triad_df, image_id, combo_label, save_path, radius_um,
     plt.close()
 
 
-def plot_trajectory(all_triads_combined, output_dir, radius_um, condition_areas, conditions,
+def plot_trajectory(all_triads_combined, output_dir, radius_um, experiment_group_areas, experiment_groups,
                     report_radius_um=None, trajectory_min_um=0):
     """
     Distance accumulation trajectory plot.
@@ -272,8 +442,8 @@ def plot_trajectory(all_triads_combined, output_dir, radius_um, condition_areas,
     if all_triads_combined is None or all_triads_combined.empty:
         return
 
-    colors     = {c: col for c, col in zip(conditions, ["steelblue", "tomato", "seagreen", "darkorange"])}
-    linestyles = {c: ls  for c, ls  in zip(conditions, ["-", "--", "-.", ":"])}
+    colors     = {c: col for c, col in zip(experiment_groups, ["steelblue", "tomato", "seagreen", "darkorange"])}
+    linestyles = {c: ls  for c, ls  in zip(experiment_groups, ["-", "--", "-.", ":"])}
     thresholds = np.linspace(trajectory_min_um, radius_um, 300)
 
     atc = all_triads_combined.copy()
@@ -283,11 +453,11 @@ def plot_trajectory(all_triads_combined, output_dir, radius_um, condition_areas,
 
     fig, axes = plt.subplots(2, 1, figsize=(10, 12))
 
-    for cond in conditions:
-        sub = atc[atc["condition"] == cond]
+    for cond in experiment_groups:
+        sub = atc[atc["experiment_group"] == cond]
         if sub.empty:
             continue
-        area_mm2 = condition_areas.get(cond, np.nan) / 1e6
+        area_mm2 = experiment_group_areas.get(cond, np.nan) / 1e6
         raw_counts = [int((sub["max_anchor_dist_um"] <= t).sum()) for t in thresholds]
         densities  = [c / area_mm2 if area_mm2 > 0 else 0 for c in raw_counts]
         axes[0].plot(thresholds, raw_counts,  color=colors.get(cond, "gray"), linestyle=linestyles.get(cond, "-"), linewidth=2.5, label=f"{cond}  (n={len(sub)})")
@@ -306,7 +476,7 @@ def plot_trajectory(all_triads_combined, output_dir, radius_um, condition_areas,
         ax.spines["right"].set_visible(False)
 
     axes[0].set_ylabel("Cumulative number of triads", fontsize=12)
-    axes[0].set_title(f"Triad Accumulation by Distance\n({'  vs  '.join(conditions)})", fontsize=11)
+    axes[0].set_title(f"Triad Accumulation by Distance\n({'  vs  '.join(experiment_groups)})", fontsize=11)
     axes[1].set_ylabel("Cumulative triads per mm²", fontsize=12)
     axes[1].set_title("Triad Density Accumulation by Distance", fontsize=11)
 
@@ -315,23 +485,23 @@ def plot_trajectory(all_triads_combined, output_dir, radius_um, condition_areas,
     plt.close(fig)
 
 
-def plot_condition_comparison(summary_df, all_triads_combined, output_dir, radius_um, condition_areas, conditions,
+def plot_experiment_group_comparison(summary_df, all_triads_combined, output_dir, radius_um, experiment_group_areas, experiment_groups,
                               report_radius_um=None, trajectory_min_um=0):
-    colors = {c: col for c, col in zip(conditions, ["steelblue", "tomato", "seagreen", "darkorange"])}
-    summary_df = summary_df[summary_df["condition"].isin(conditions)].copy()
+    colors = {c: col for c, col in zip(experiment_groups, ["steelblue", "tomato", "seagreen", "darkorange"])}
+    summary_df = summary_df[summary_df["experiment_group"].isin(experiment_groups)].copy()
     if summary_df.empty:
         return
 
-    grp = summary_df.groupby(["condition", "combo_label"])["n_triads"].sum().reset_index()
-    grp["area_mm2"]       = grp["condition"].map(lambda c: condition_areas.get(c, np.nan) / 1e6)
+    grp = summary_df.groupby(["experiment_group", "combo_label"])["n_triads"].sum().reset_index()
+    grp["area_mm2"]       = grp["experiment_group"].map(lambda c: experiment_group_areas.get(c, np.nan) / 1e6)
     grp["triads_per_mm2"] = grp["n_triads"] / grp["area_mm2"]
 
     combos = sorted(grp["combo_label"].unique())
-    x, width = np.arange(len(combos)), 0.8 / max(len(conditions), 1)
+    x, width = np.arange(len(combos)), 0.8 / max(len(experiment_groups), 1)
 
     fig1, axes1 = plt.subplots(2, 1, figsize=(max(8, len(combos) * 3), 12))
-    for i, cond in enumerate(conditions):
-        sub_grp = grp[grp["condition"] == cond]
+    for i, cond in enumerate(experiment_groups):
+        sub_grp = grp[grp["experiment_group"] == cond]
         count_vals   = [sub_grp.loc[sub_grp["combo_label"] == c, "n_triads"].sum()       if c in sub_grp["combo_label"].values else 0 for c in combos]
         density_vals = [sub_grp.loc[sub_grp["combo_label"] == c, "triads_per_mm2"].sum() if c in sub_grp["combo_label"].values else 0 for c in combos]
         for ax, vals in zip(axes1, [count_vals, density_vals]):
@@ -348,7 +518,7 @@ def plot_condition_comparison(summary_df, all_triads_combined, output_dir, radiu
         ["Number of Triads", "Triads per mm²"],
         [f"Triad Counts (radius = {radius_um} µm)", "Triad Density"],
     ):
-        ax.set_xticks(x + width * (len(conditions) - 1) / 2)
+        ax.set_xticks(x + width * (len(experiment_groups) - 1) / 2)
         ax.set_xticklabels(combos, rotation=30, ha="right", fontsize=9)
         ax.set_ylabel(ylabel, fontsize=11)
         ax.set_title(title, fontsize=12)
@@ -358,13 +528,13 @@ def plot_condition_comparison(summary_df, all_triads_combined, output_dir, radiu
         ax.spines["right"].set_visible(False)
 
     plt.tight_layout(pad=3)
-    fig1.savefig(os.path.join(output_dir, "condition_comparison_counts_density.png"), dpi=150, bbox_inches="tight")
+    fig1.savefig(os.path.join(output_dir, "experiment_group_comparison_counts_density.png"), dpi=150, bbox_inches="tight")
     plt.close(fig1)
 
     if all_triads_combined is None or all_triads_combined.empty:
         return
 
-    atc = all_triads_combined[all_triads_combined["condition"].isin(conditions)].copy()
+    atc = all_triads_combined[all_triads_combined["experiment_group"].isin(experiment_groups)].copy()
     if atc.empty:
         return
 
@@ -377,8 +547,8 @@ def plot_condition_comparison(summary_df, all_triads_combined, output_dir, radiu
     xd = np.arange(len(pair_labels))
 
     fig2, ax2 = plt.subplots(figsize=(10, 7))
-    for i, cond in enumerate(conditions):
-        sub   = atc[atc["condition"] == cond]
+    for i, cond in enumerate(experiment_groups):
+        sub   = atc[atc["experiment_group"] == cond]
         means = [sub[col].mean() if not sub[col].empty else 0 for col in dist_cols]
         sems  = [sub[col].sem()  if not sub[col].empty else 0 for col in dist_cols]
         bars = ax2.bar(xd + i * width, means, width, label=f"{cond} (n={len(sub):,})",
@@ -389,7 +559,7 @@ def plot_condition_comparison(summary_df, all_triads_combined, output_dir, radiu
                 ax2.text(bar.get_x() + bar.get_width() / 2, m + s + 0.5,
                          f"{m:.1f} µm", ha="center", va="bottom", fontsize=9, fontweight="bold")
 
-    ax2.set_xticks(xd + width * (len(conditions) - 1) / 2)
+    ax2.set_xticks(xd + width * (len(experiment_groups) - 1) / 2)
     ax2.set_xticklabels(pair_labels, fontsize=11)
     ax2.set_ylabel("Mean Distance (µm)", fontsize=12)
     ax2.set_title(f"Mean Pairwise Distances in Triads (radius = {radius_um} µm, error bars = SEM)", fontsize=11)
@@ -398,252 +568,55 @@ def plot_condition_comparison(summary_df, all_triads_combined, output_dir, radiu
     ax2.spines["top"].set_visible(False)
     ax2.spines["right"].set_visible(False)
     plt.tight_layout()
-    fig2.savefig(os.path.join(output_dir, "condition_comparison_distances_um.png"), dpi=150, bbox_inches="tight")
+    fig2.savefig(os.path.join(output_dir, "experiment_group_comparison_distances_um.png"), dpi=150, bbox_inches="tight")
     plt.close(fig2)
 
-    grp.to_csv(os.path.join(output_dir, "condition_comparison_counts.csv"), index=False)
-    dist_summary = atc.groupby("condition")[dist_cols].agg(["mean", "std", "sem", "count"]).round(3)
+    grp.to_csv(os.path.join(output_dir, "experiment_group_comparison_counts.csv"), index=False)
+    dist_summary = atc.groupby("experiment_group")[dist_cols].agg(["mean", "std", "sem", "count"]).round(3)
     dist_summary.columns = ["__".join(c) for c in dist_summary.columns]
-    dist_summary.to_csv(os.path.join(output_dir, "condition_comparison_distances.csv"))
+    dist_summary.to_csv(os.path.join(output_dir, "experiment_group_comparison_distances.csv"))
 
-    plot_trajectory(atc, output_dir, radius_um, condition_areas, conditions,
+    plot_trajectory(atc, output_dir, radius_um, experiment_group_areas, experiment_groups,
                     report_radius_um=report_radius_um,
                     trajectory_min_um=trajectory_min_um)
 
 
-# ── Functional marker analysis ────────────────────────────────────────────────
+# ── Per-image result caching ────────────────────────────────────────────────
 
-def _run_functional_marker_analysis(
-    all_cells_df: pd.DataFrame,
-    output_dir: str,
-    func_cfg: dict,
-    report_radius_um: float,
-    anchor_type: str,
-    partner1_type: str,
-    partner2_type: str,
-    anchor_name: str,
-    partner1_name: str,
-    partner2_name: str,
-    conditions: list,
-) -> None:
+def _load_cached_triad_results(image_id: str, output_dir: str, radius_um: float, radius_px: float):
     """
-    Compare functional marker expression between in-triad vs not-in-triad cells.
+    Reconstructs the per-combo summary rows run_triad_analysis() would have
+    produced for one image, from its already-written {image_id}_triad_pairs.csv
+    — without re-running find_triads(). Backs the skip-if-already-processed
+    cache in run_triad_analysis() so adding one new image to a cohort doesn't
+    force every existing image's triad detection (which can be expensive —
+    see the exhaustive-search warning for unconfigured anchor/partner types)
+    to be redone.
 
-    For each cell type (anchor, partner1, partner2):
-      1. In-triad vs not-in-triad violin plots + Mann-Whitney U
-      2. Condition A vs B within in-triad cells
-
-    Parameters
-    ----------
-    all_cells_df : pd.DataFrame
-        Aggregated cell table across all images.  Must contain:
-          cell_type, condition, image_id,
-          _in_triad_anchor, _in_triad_partner1, _in_triad_partner2,
-          and all marker intensity columns listed in func_cfg["markers"].
+    Returns (image_summary: list[dict], triads_df: pd.DataFrame) — same shape
+    as a freshly-computed image would produce.
     """
-    from scipy.stats import mannwhitneyu
+    triads_df = pd.read_csv(os.path.join(output_dir, f"{image_id}_triad_pairs.csv"))
 
-    markers = func_cfg.get("markers", {})
-    if not markers:
-        print("[functional] No markers configured — skipping.")
-        return
-
-    func_out = os.path.join(output_dir, "functional_analysis")
-    os.makedirs(func_out, exist_ok=True)
-
-    COLOR_IN  = "#ff7f0e"   # orange  — in-triad
-    COLOR_OUT = "#1f77b4"   # blue    — out-of-triad
-    COND_COLORS = dict(zip(conditions, ["#2196F3", "#F44336", "#4CAF50", "#FF9800"]))
-
-    cell_role_map = [
-        (anchor_type,   anchor_name,   "_in_triad_anchor"),
-        (partner1_type, partner1_name, "_in_triad_partner1"),
-        (partner2_type, partner2_name, "_in_triad_partner2"),
-    ]
-
-    all_summary = []
-
-    for cell_type, display_name, flag_col in cell_role_map:
-        if flag_col not in all_cells_df.columns:
-            print(f"[functional] ⚠️  Flag column '{flag_col}' missing — skipping {display_name}")
-            continue
-
-        cells = all_cells_df[all_cells_df["cell_type"] == cell_type].copy()
-        if cells.empty:
-            print(f"[functional] ⚠️  No {display_name} cells in dataset.")
-            continue
-
-        # Only keep markers whose columns actually exist in the data
-        avail = {name: col for name, col in markers.items() if col in cells.columns}
-        missing = [name for name in markers if name not in avail]
-        if missing:
-            print(f"[functional]   Columns not found for {display_name}: {missing}")
-        if not avail:
-            print(f"[functional] ⚠️  No marker columns found for {display_name} — skipping.")
-            continue
-
-        in_triad     = cells[cells[flag_col] == True]
-        not_in_triad = cells[cells[flag_col] == False]
-        n_in  = len(in_triad)
-        n_out = len(not_in_triad)
-        print(f"\n[functional] {display_name}: {n_in:,} in-triad  |  {n_out:,} not-in-triad")
-
-        n_m = len(avail)
-
-        # ── Plot 1: In-triad vs Not-in-triad ─────────────────────────────────
-        fig1, axes1 = plt.subplots(1, n_m, figsize=(max(4 * n_m, 8), 6))
-        axes1 = [axes1] if n_m == 1 else list(axes1)
-
-        for ax, (marker_name, col) in zip(axes1, avail.items()):
-            vals_in  = in_triad[col].dropna().values.astype(float)
-            vals_out = not_in_triad[col].dropna().values.astype(float)
-
-            if len(vals_in) >= 3 and len(vals_out) >= 3:
-                stat, pval = mannwhitneyu(vals_in, vals_out, alternative="two-sided")
-            else:
-                stat, pval = np.nan, np.nan
-
-            if len(vals_out) > 0 and len(vals_in) > 0:
-                parts = ax.violinplot([vals_out, vals_in], positions=[0, 1],
-                                      showmedians=True, showextrema=False)
-                for pc, color in zip(parts["bodies"], [COLOR_OUT, COLOR_IN]):
-                    pc.set_facecolor(color)
-                    pc.set_alpha(0.75)
-                parts["cmedians"].set_color("black")
-                parts["cmedians"].set_linewidth(2)
-
-            sig = ("***" if pval < 0.001 else "**" if pval < 0.01
-                   else "*" if pval < 0.05 else "ns")
-            ax.set_xticks([0, 1])
-            ax.set_xticklabels(
-                [f"Out of triad\n(n={len(vals_out):,})", f"In triad\n(n={len(vals_in):,})"],
-                fontsize=8,
-            )
-            pval_str = f"{pval:.2e}" if not np.isnan(pval) else "n/a"
-            ax.set_title(f"{marker_name}\n{sig}  p={pval_str}", fontsize=9, fontweight="bold")
-            ax.set_ylabel("Expression (intensity)", fontsize=9)
-            ax.spines["top"].set_visible(False)
-            ax.spines["right"].set_visible(False)
-
-            all_summary.append({
-                "cell_type":       display_name,
-                "comparison":      "in_triad_vs_out",
-                "marker":          marker_name,
-                "marker_col":      col,
-                "group_A":         "in_triad",
-                "group_B":         "not_in_triad",
-                "n_A":             len(vals_in),
-                "n_B":             len(vals_out),
-                "mean_A":          float(np.mean(vals_in))   if len(vals_in)  else np.nan,
-                "mean_B":          float(np.mean(vals_out))  if len(vals_out) else np.nan,
-                "median_A":        float(np.median(vals_in)) if len(vals_in)  else np.nan,
-                "median_B":        float(np.median(vals_out))if len(vals_out) else np.nan,
-                "mannwhitney_U":   stat,
-                "p_value":         pval,
-                "significance":    sig,
-            })
-
-        fig1.suptitle(
-            f"{display_name}: In-triad vs Out-of-triad Marker Expression\n"
-            f"(triad threshold = {report_radius_um} µm)",
-            fontsize=12, fontweight="bold",
-        )
-        plt.tight_layout()
-        fig1.savefig(
-            os.path.join(func_out, f"functional_{display_name}_intriad_vs_out.png"),
-            dpi=150, bbox_inches="tight",
-        )
-        plt.close(fig1)
-
-        # ── Plot 2: Condition comparison (CLR vs DII) within in-triad ────────
-        if len(conditions) >= 2 and "condition" in cells.columns and n_in >= 2:
-            cond_sub = {c: in_triad[in_triad["condition"] == c] for c in conditions}
-            valid_conds = [c for c in conditions if len(cond_sub[c]) >= 3]
-
-            if len(valid_conds) >= 2:
-                fig2, axes2 = plt.subplots(1, n_m, figsize=(max(4 * n_m, 8), 6))
-                axes2 = [axes2] if n_m == 1 else list(axes2)
-
-                for ax, (marker_name, col) in zip(axes2, avail.items()):
-                    vals_per_cond = [
-                        cond_sub[c][col].dropna().values.astype(float)
-                        for c in valid_conds
-                    ]
-
-                    if len(vals_per_cond[0]) >= 3 and len(vals_per_cond[1]) >= 3:
-                        stat2, pval2 = mannwhitneyu(vals_per_cond[0], vals_per_cond[1],
-                                                    alternative="two-sided")
-                    else:
-                        stat2, pval2 = np.nan, np.nan
-
-                    if all(len(v) > 0 for v in vals_per_cond):
-                        parts2 = ax.violinplot(vals_per_cond,
-                                               positions=range(len(valid_conds)),
-                                               showmedians=True, showextrema=False)
-                        for pc, cond in zip(parts2["bodies"], valid_conds):
-                            pc.set_facecolor(COND_COLORS.get(cond, "#888888"))
-                            pc.set_alpha(0.75)
-                        parts2["cmedians"].set_color("black")
-                        parts2["cmedians"].set_linewidth(2)
-
-                    sig2 = ("***" if pval2 < 0.001 else "**" if pval2 < 0.01
-                            else "*" if pval2 < 0.05 else "ns")
-                    ax.set_xticks(range(len(valid_conds)))
-                    ax.set_xticklabels(
-                        [f"{c}\n(n={len(cond_sub[c]):,})" for c in valid_conds],
-                        fontsize=8,
-                    )
-                    pval2_str = f"{pval2:.2e}" if not np.isnan(pval2) else "n/a"
-                    ax.set_title(f"{marker_name}\n{sig2}  p={pval2_str}",
-                                 fontsize=9, fontweight="bold")
-                    ax.set_ylabel("Expression (intensity)", fontsize=9)
-                    ax.spines["top"].set_visible(False)
-                    ax.spines["right"].set_visible(False)
-
-                    all_summary.append({
-                        "cell_type":     display_name,
-                        "comparison":    f"{'_vs_'.join(valid_conds)}_in_triad",
-                        "marker":        marker_name,
-                        "marker_col":    col,
-                        "group_A":       valid_conds[0],
-                        "group_B":       valid_conds[1],
-                        "n_A":           len(vals_per_cond[0]),
-                        "n_B":           len(vals_per_cond[1]),
-                        "mean_A":        float(np.mean(vals_per_cond[0])) if len(vals_per_cond[0]) else np.nan,
-                        "mean_B":        float(np.mean(vals_per_cond[1])) if len(vals_per_cond[1]) else np.nan,
-                        "median_A":      float(np.median(vals_per_cond[0])) if len(vals_per_cond[0]) else np.nan,
-                        "median_B":      float(np.median(vals_per_cond[1])) if len(vals_per_cond[1]) else np.nan,
-                        "mannwhitney_U": stat2,
-                        "p_value":       pval2,
-                        "significance":  sig2,
-                    })
-
-                fig2.suptitle(
-                    f"{display_name}: {' vs '.join(valid_conds)} — In-triad cells only\n"
-                    f"(triad threshold = {report_radius_um} µm)",
-                    fontsize=12, fontweight="bold",
-                )
-                plt.tight_layout()
-                fig2.savefig(
-                    os.path.join(func_out,
-                                 f"functional_{display_name}_condition_compare.png"),
-                    dpi=150, bbox_inches="tight",
-                )
-                plt.close(fig2)
-
-    if all_summary:
-        summary_df = pd.DataFrame(all_summary)
-        n_tests = len(summary_df)
-        bonferroni_alpha = 0.05 / max(n_tests, 1)
-        summary_df["bonferroni_alpha"] = round(bonferroni_alpha, 8)
-        summary_df["sig_bonferroni"]   = summary_df["p_value"] < bonferroni_alpha
-        summary_df.to_csv(os.path.join(func_out, "functional_marker_summary.csv"), index=False)
-        sig_hits = summary_df["sig_bonferroni"].sum()
-        print(f"\n[functional] ✓  {n_tests} tests, Bonferroni α={bonferroni_alpha:.3e}, "
-              f"{sig_hits} hits after correction")
-        print(f"[functional]    Outputs → {func_out}")
-    else:
-        print("[functional] No results to save.")
+    image_summary = []
+    group_cols = ["experiment_group", "anchor_type", "partner1_type", "partner2_type", "triad_combo_label"]
+    for keys, grp in triads_df.groupby(group_cols):
+        experiment_group, at, p1t, p2t, combo_label = keys
+        image_summary.append({
+            "image_id":               image_id,
+            "experiment_group":       experiment_group,
+            "anchor_type":            at,
+            "partner1_type":          p1t,
+            "partner2_type":          p2t,
+            "combo_label":            combo_label,
+            "n_triads":               len(grp),
+            "radius_um":              radius_um,
+            "radius_px":              round(radius_px, 3),
+            "mean_dist_anchor_p1_um": round(grp["dist_anchor_p1_um"].mean(), 3),
+            "mean_dist_anchor_p2_um": round(grp["dist_anchor_p2_um"].mean(), 3),
+            "mean_dist_p1_p2_um":     round(grp["dist_p1_p2_um"].mean(), 3),
+        })
+    return image_summary, triads_df
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────
@@ -659,10 +632,10 @@ def run_triad_analysis(cfg: dict) -> None:
     """
     # ── Unpack config ─────────────────────────────────────────
     exp_name      = cfg["experiment"]["name"]
-    conditions    = cfg["experiment"]["conditions"]
-    img_cond_map  = cfg["experiment"].get("image_condition_map", {})
+    experiment_groups    = cfg["experiment"]["groups"]
+    img_group_map  = cfg["experiment"].get("image_experiment_group_map", {})
     mpp           = cfg["imaging"]["microns_per_pixel"]
-    cond_areas    = _get_condition_areas(cfg)
+    group_areas    = _get_experiment_group_areas(cfg)
 
     input_dir     = cfg["paths"]["input_dir"]
     output_dir    = cfg["paths"]["output_dir"]
@@ -677,26 +650,15 @@ def run_triad_analysis(cfg: dict) -> None:
     matched_only   = t_cfg.get("matched_only", True)
     min_triad_size = t_cfg.get("min_triad_size", 1)
 
-    # Short display names — used in labels, plot titles, output filenames.
-    # Fallback to the full cell type string if not set.
-    anchor_name   = t_cfg.get("anchor_name")   or (anchor_type   or "anchor")
-    partner1_name = t_cfg.get("partner_1_name") or (partner1_type or "partner1")
-    partner2_name = t_cfg.get("partner_2_name") or (partner2_type or "partner2")
-
     # Distance trajectory range
     report_radius_um   = t_cfg.get("report_radius_um", radius_um)
     trajectory_min_um  = t_cfg.get("trajectory_min_um", 0)
-
-    # Functional analysis is now a separate pipeline step (spatia/analysis/functional.py).
-    # triads.py no longer runs it inline — just set func_enabled=False to avoid the
-    # legacy embedded path.
-    func_enabled = False
 
     os.makedirs(output_dir,   exist_ok=True)
     os.makedirs(qc_plot_dir,  exist_ok=True)
 
     print(f"[SPATIA] Experiment : {exp_name}")
-    print(f"[SPATIA] Conditions : {conditions}")
+    print(f"[SPATIA] Experiment groups : {experiment_groups}")
     print(f"[SPATIA] Radius     : {radius_um} µm  →  {radius_px:.2f} px")
     print(f"[SPATIA] Input      : {input_dir}")
     print(f"[SPATIA] Output     : {output_dir}\n")
@@ -711,15 +673,62 @@ def run_triad_analysis(cfg: dict) -> None:
         return
     print(f"[SPATIA] Found {len(csv_files)} file(s).\n")
 
+    # Resolve experiment_group once per image up front (also reused inside the
+    # main loop below, instead of recomputing per image).
+    image_ids = [f.replace("_matched_with_boundaries.csv", "") for f in csv_files]
+    image_id_to_group = {
+        iid: _get_experiment_group(iid, img_group_map, experiment_groups)
+        for iid in image_ids
+    }
+
+    # ── Optional: per-image tissue area from QuPath ROI extraction ─────────
+    # If imaging.roi_labels_dir is set, area is measured per image from the
+    # QuPath ROI-extraction script's output (with a per-image fallback to a
+    # group-average estimate, see _resolve_per_image_group_areas). If unset,
+    # behavior is unchanged from before — group_areas stays the static
+    # imaging.experiment_group_areas_um2 constant read above.
+    roi_labels_dir         = cfg["imaging"].get("roi_labels_dir")
+    area_annotation_class  = cfg["imaging"].get("area_annotation_class")
+    image_id_map           = cfg["imaging"].get("image_id_map", {})
+    if roi_labels_dir:
+        print(f"[SPATIA] imaging.roi_labels_dir set — resolving per-image tissue area from QuPath ROI extraction ({roi_labels_dir})")
+        group_areas = _resolve_per_image_group_areas(
+            image_ids, image_id_to_group, roi_labels_dir, mpp,
+            area_annotation_class, image_id_map, group_areas,
+        )
+        print()
+
     all_summary_rows = []
     all_triad_dfs    = []
-    all_func_cell_dfs = []   # accumulated for functional analysis (only if enabled)
 
     for csv_file in csv_files:
         image_id  = csv_file.replace("_matched_with_boundaries.csv", "")
-        condition = _get_condition(image_id, img_cond_map, conditions)
+        experiment_group = image_id_to_group[image_id]
         print(f"{'='*65}")
-        print(f"Processing : {image_id}  [condition: {condition}]")
+        print(f"Processing : {image_id}  [experiment_group: {experiment_group}]")
+
+        # ── Skip if already processed ──────────────────────────
+        # Mirrors the skip-if-exists pattern tif_conversion.py / roi_masking.py /
+        # segmentation.py / preprocessing.py already use: if both per-image
+        # output files exist, load the cached triad_pairs.csv instead of
+        # re-running find_triads(), so adding one new image to a cohort
+        # doesn't force every existing image to be redetected. No staleness
+        # check against the source CSV — delete both cached files for an
+        # image to force it to be reprocessed. Images with zero triads never
+        # had these files written in the first place (see the "no triads
+        # found" branch below), so they're always reprocessed, not cached.
+        pairs_path = os.path.join(output_dir, f"{image_id}_triad_pairs.csv")
+        flags_path = os.path.join(output_dir, f"{image_id}_cells_with_triad_flags.csv")
+        if os.path.exists(pairs_path) and os.path.exists(flags_path):
+            print(f"  ⏭️  Already processed — loading cached results")
+            cached_summary, cached_triads_df = _load_cached_triad_results(
+                image_id, output_dir, radius_um, radius_px
+            )
+            if cached_summary:
+                all_triad_dfs.append(cached_triads_df)
+            all_summary_rows.extend(cached_summary)
+            print()
+            continue
 
         # ── Load CSV (try multiple encodings) ────────────────
         df = None
@@ -727,7 +736,7 @@ def run_triad_analysis(cfg: dict) -> None:
             try:
                 df = pd.read_csv(os.path.join(input_dir, csv_file), encoding=enc)
                 break
-            except (UnicodeDecodeError, Exception):
+            except UnicodeDecodeError:
                 continue
         if df is None:
             print(f"  ⚠️  Could not read {csv_file} — skipping.")
@@ -756,6 +765,9 @@ def run_triad_analysis(cfg: dict) -> None:
                 for trio in combinations(cell_types, 3)
                 for perm in permutations(trio)
             ))
+            print(f"  ⚠️  No anchor_type/partner_type_1/partner_type_2 configured — "
+                  f"running exhaustive search over {len(combos)} combo(s) "
+                  f"({len(cell_types)} cell types), this may be slow.")
 
         image_triad_dfs = []
         image_summary   = []
@@ -768,23 +780,16 @@ def run_triad_analysis(cfg: dict) -> None:
             if n < min_triad_size:
                 continue
 
-            # Use short names when anchor/partners match the configured types
-            def _short(full, configured, short):
-                return short if full == configured else full
-            al = _short(at,  anchor_type,   anchor_name)
-            p1l = _short(p1t, partner1_type, partner1_name)
-            p2l = _short(p2t, partner2_type, partner2_name)
-            combo_label = f"{al}__{p1l}__{p2l}"
+            combo_label = f"{at}__{p1t}__{p2t}"
             print(f"    {combo_label:<60}: {n:>6} triads")
 
-            # Overwrite the full-name label set inside find_triads with short names
             triad_df["triad_combo_label"] = combo_label
             triad_df["image_id"]  = image_id
-            triad_df["condition"] = condition
+            triad_df["experiment_group"] = experiment_group
             image_triad_dfs.append(triad_df)
             image_summary.append({
                 "image_id":             image_id,
-                "condition":            condition,
+                "experiment_group":            experiment_group,
                 "anchor_type":          at,
                 "partner1_type":        p1t,
                 "partner2_type":        p2t,
@@ -809,28 +814,6 @@ def run_triad_analysis(cfg: dict) -> None:
             df["is_triad_partner2"] = df["cell_id"].astype(str).isin(set(all_triads_df["partner2_cell_id"].astype(str)))
             df["in_any_triad"]      = df["cell_id"].astype(str).isin(triad_ids)
             df.to_csv(os.path.join(output_dir, f"{image_id}_cells_with_triad_flags.csv"), index=False)
-
-            # Accumulate cell-level data for functional analysis (in-triad flagged
-            # at func_radius so the comparison uses the tighter reporting threshold)
-            if func_enabled:
-                report_triads = all_triads_df[
-                    all_triads_df[["dist_anchor_p1_um", "dist_anchor_p2_um"]].max(axis=1)
-                    <= func_radius
-                ] if not all_triads_df.empty else all_triads_df
-
-                df_func = df.copy()
-                df_func["image_id"]  = image_id
-                df_func["condition"] = condition
-                df_func["_in_triad_anchor"]   = df_func["cell_id"].astype(str).isin(
-                    set(report_triads["anchor_cell_id"].astype(str))
-                )
-                df_func["_in_triad_partner1"] = df_func["cell_id"].astype(str).isin(
-                    set(report_triads["partner1_cell_id"].astype(str))
-                )
-                df_func["_in_triad_partner2"] = df_func["cell_id"].astype(str).isin(
-                    set(report_triads["partner2_cell_id"].astype(str))
-                )
-                all_func_cell_dfs.append(df_func)
 
             # QC plot for top combo — right panel filtered to report_radius_um (e.g. 15 µm)
             top_combo    = max(image_summary, key=lambda x: x["n_triads"])
@@ -863,32 +846,8 @@ def run_triad_analysis(cfg: dict) -> None:
     print("=" * 65)
     print(top20.to_string(index=False))
 
-    plot_condition_comparison(summary_df, all_triads_combined, output_dir, radius_um, cond_areas, conditions,
+    plot_experiment_group_comparison(summary_df, all_triads_combined, output_dir, radius_um, group_areas, experiment_groups,
                               report_radius_um=report_radius_um,
                               trajectory_min_um=trajectory_min_um)
-
-    # ── Functional marker analysis ─────────────────────────────
-    if func_enabled and all_func_cell_dfs:
-        print(f"\n{'='*65}")
-        print("[SPATIA] FUNCTIONAL MARKER ANALYSIS")
-        print(f"{'='*65}")
-        all_cells_df = pd.concat(all_func_cell_dfs, ignore_index=True)
-        print(f"[functional] Aggregated {len(all_cells_df):,} cells from "
-              f"{len(all_func_cell_dfs)} images")
-        _run_functional_marker_analysis(
-            all_cells_df     = all_cells_df,
-            output_dir       = output_dir,
-            func_cfg         = func_cfg,
-            report_radius_um = func_radius,
-            anchor_type      = anchor_type,
-            partner1_type    = partner1_type,
-            partner2_type    = partner2_type,
-            anchor_name      = anchor_name,
-            partner1_name    = partner1_name,
-            partner2_name    = partner2_name,
-            conditions       = conditions,
-        )
-    elif func_enabled:
-        print("[functional] No triad images — skipping functional analysis.")
 
     print(f"\n[SPATIA] All outputs saved to: {output_dir}")
