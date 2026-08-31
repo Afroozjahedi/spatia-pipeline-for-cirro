@@ -20,21 +20,21 @@ Input:
     qupath_roi_dir/
         {slide_id}_binary_mask.png     <- whole-tissue binary mask
         {slide_id}_roi_labels.txt      <- ROI coordinate table (tab-separated)
-        individual_masks/{slide_id}/{condition}_*.png
+        individual_masks/{slide_id}/{experiment_group}_*.png
 
 Output:
     masked_roi_dir/{slide_id}/
-        {condition}_{slide_id}_x{x}_y{y}_w{w}_h{h}_masked.tif
-        {condition}_{slide_id}_x{x}_y{y}_preview.png
-        {condition}_{slide_id}_x{x}_y{y}_channel_info.txt
+        {experiment_group}_{slide_id}_x{x}_y{y}_w{w}_h{h}_masked.tif
+        {experiment_group}_{slide_id}_x{x}_y{y}_preview.png
+        {experiment_group}_{slide_id}_x{x}_y{y}_channel_info.txt
     masked_roi_dir/roi_processing_summary.csv
 
 Entry point
 -----------
 run_roi_masking(cfg) -- accepts the parsed YAML config dict.
 
-Note: the original notebook prompted interactively for condition prefixes.
-That prompt is removed here -- conditions come from experiment.conditions
+Note: the original notebook prompted interactively for experiment_group prefixes.
+That prompt is removed here -- experiment_groups come from experiment.groups
 in the config, so this step can run headlessly (required for Cirro).
 """
 
@@ -137,11 +137,11 @@ def load_channel_names_from_json(tiff_path: str, metadata_dir: str) -> Optional[
         return None
 
 
-def get_slide_id(filename: str, conditions: List[str]) -> str:
-    """Strip condition prefix + coordinate suffix from a TIFF filename to get a stable slide ID."""
+def get_slide_id(filename: str, experiment_groups: List[str]) -> str:
+    """Strip experiment_group prefix + coordinate suffix from a TIFF filename to get a stable slide ID."""
     basename = os.path.splitext(os.path.basename(filename))[0]
-    for condition in conditions:
-        if basename.startswith(f"{condition}_"):
+    for experiment_group in experiment_groups:
+        if basename.startswith(f"{experiment_group}_"):
             parts = basename.split("_")
             prefix = parts[0] + "_"
             for part in parts[1:]:
@@ -217,10 +217,10 @@ def process_wsi(
     individual_masks_dir: str,
     output_dir: str,
     metadata_dir: str,
-    conditions: List[str],
+    experiment_groups: List[str],
 ) -> List[dict]:
     """Crop + mask every ROI in one whole-slide/whole-core TIFF. Returns one dict per ROI."""
-    slide_id = get_slide_id(wsi_path, conditions)
+    slide_id = get_slide_id(wsi_path, experiment_groups)
     print(f"\n===== Processing {slide_id} =====")
 
     if is_tissue_processed(output_dir, slide_id):
@@ -289,10 +289,10 @@ def process_wsi(
         return []
 
     roi_names = []
-    for pattern in [f"{condition}_*.png" for condition in conditions]:
+    for pattern in [f"{experiment_group}_*.png" for experiment_group in experiment_groups]:
         roi_names.extend(glob.glob(os.path.join(individual_masks_dir, pattern)))
     roi_names = [os.path.basename(n) for n in roi_names]
-    print(f"Found {len(roi_names)} ROI masks for conditions: {', '.join(conditions)}")
+    print(f"Found {len(roi_names)} ROI masks for experiment_groups: {', '.join(experiment_groups)}")
 
     processed_rois = []
     for i, roi_name in enumerate(roi_names):
@@ -300,14 +300,14 @@ def process_wsi(
             gc.collect()
             plt.close("all")
 
-        roi_condition = next((c for c in conditions if roi_name.startswith(f"{c}_")), "Unknown")
+        roi_experiment_group = next((c for c in experiment_groups if roi_name.startswith(f"{c}_")), "Unknown")
         coords = extract_roi_coordinates(roi_name.replace(".png", ""), roi_df)
         if not coords:
             print(f"Could not extract coordinates for {roi_name}, skipping")
             continue
 
         x, y, w, h = coords
-        print(f"Processing {roi_condition} ROI at x={x}, y={y}, w={w}, h={h}")
+        print(f"Processing {roi_experiment_group} ROI at x={x}, y={y}, w={w}, h={h}")
         x_end, y_end = min(x + w, width), min(y + h, height)
         x_width, y_height = x_end - x, y_end - y
 
@@ -344,7 +344,7 @@ def process_wsi(
                 except Exception as e:
                     print(f"Error processing channel {c}: {e}")
 
-        output_filename = f"{roi_condition}_{slide_id}_x{x}_y{y}_w{w}_h{h}_masked.tif"
+        output_filename = f"{roi_experiment_group}_{slide_id}_x{x}_y{y}_w{w}_h{h}_masked.tif"
         output_path = os.path.join(slide_output_dir, output_filename)
 
         if len(channel_names) != num_channels:
@@ -363,7 +363,7 @@ def process_wsi(
             output_path, roi_output, imagej=True, metadata=ijmetadata, photometric="minisblack",
         )
 
-        channel_info_path = os.path.join(slide_output_dir, f"{roi_condition}_{slide_id}_x{x}_y{y}_channel_info.txt")
+        channel_info_path = os.path.join(slide_output_dir, f"{roi_experiment_group}_{slide_id}_x{x}_y{y}_channel_info.txt")
         with open(channel_info_path, "w") as f:
             f.write("Channel Names:\n")
             for idx, name in enumerate(channel_names):
@@ -371,14 +371,14 @@ def process_wsi(
 
         fig = plt.figure(figsize=(8, 8))
         plt.imshow(roi_output[0], cmap="viridis")
-        plt.title(f"{roi_condition} ROI - {slide_id} - Channel 0\n{channel_names[0] if channel_names else ''}")
+        plt.title(f"{roi_experiment_group} ROI - {slide_id} - Channel 0\n{channel_names[0] if channel_names else ''}")
         plt.colorbar()
-        plt.savefig(os.path.join(slide_output_dir, f"{roi_condition}_{slide_id}_x{x}_y{y}_preview.png"))
+        plt.savefig(os.path.join(slide_output_dir, f"{roi_experiment_group}_{slide_id}_x{x}_y{y}_preview.png"))
         plt.close(fig)
 
         print(f"Saved {num_channels}-channel TIFF: {output_filename}")
         processed_rois.append({
-            "slide_id": slide_id, "roi_condition": roi_condition,
+            "slide_id": slide_id, "roi_experiment_group": roi_experiment_group,
             "x": x, "y": y, "width": w, "height": h,
             "output_file": output_path,
             "channel_names": ",".join(channel_names) if channel_names else "",
@@ -397,8 +397,8 @@ def run_roi_masking(cfg: dict) -> dict:
 
     Config keys
     -----------
-    experiment.conditions           -- reused from the existing config section
-                                        (no separate/duplicated condition list)
+    experiment.groups           -- reused from the existing config section
+                                        (no separate/duplicated experiment_group list)
     paths.converted_tif_dir         -- input. Defaults to <output_dir>/converted_tif/
                                         (tif_conversion step's output).
     paths.qupath_roi_dir            -- required. Output of either the manual
@@ -409,11 +409,11 @@ def run_roi_masking(cfg: dict) -> dict:
 
     Returns
     -------
-    dict with keys: processed_rois (list), condition_counts (dict),
+    dict with keys: processed_rois (list), experiment_group_counts (dict),
     summary_csv (path), output_dir (path)
     """
     paths = cfg.get("paths", {})
-    conditions = cfg["experiment"]["conditions"]
+    experiment_groups = cfg["experiment"]["groups"]
 
     tiff_dir = paths.get("converted_tif_dir") or os.path.join(
         paths.get("output_dir", "."), "converted_tif"
@@ -439,7 +439,7 @@ def run_roi_masking(cfg: dict) -> dict:
     print(f"TIFF dir      : {tiff_dir}")
     print(f"QuPath masks  : {masks_dir}")
     print(f"Output dir    : {output_dir}")
-    print(f"Conditions    : {conditions}")
+    print(f"Experiment groups : {experiment_groups}")
 
     tiff_files = find_tiff_files(tiff_dir)
     print(f"Found {len(tiff_files)} TIFF files")
@@ -451,7 +451,7 @@ def run_roi_masking(cfg: dict) -> dict:
 
     all_processed_rois: List[dict] = []
     for tiff_file in tiff_files:
-        slide_id = get_slide_id(tiff_file, conditions)
+        slide_id = get_slide_id(tiff_file, experiment_groups)
         print(f"\nProcessing WSI: {slide_id} ({os.path.basename(tiff_file)})")
         related = find_related_files(slide_id, masks_dir)
         if not related["binary_mask"]:
@@ -463,21 +463,21 @@ def run_roi_masking(cfg: dict) -> dict:
 
         processed = process_wsi(
             tiff_file, related["binary_mask"], related["roi_labels"],
-            related["individual_masks_dir"], output_dir, metadata_dir, conditions,
+            related["individual_masks_dir"], output_dir, metadata_dir, experiment_groups,
         )
         all_processed_rois.extend(processed)
         gc.collect()
         plt.close("all")
 
-    condition_counts = {
-        cond: sum(1 for roi in all_processed_rois if roi.get("roi_condition") == cond)
-        for cond in conditions
+    experiment_group_counts = {
+        cond: sum(1 for roi in all_processed_rois if roi.get("roi_experiment_group") == cond)
+        for cond in experiment_groups
     }
 
     print("\n===== ROI MASKING SUMMARY =====")
     print(f"Total WSI/core files scanned: {len(tiff_files)}")
     print(f"Total ROIs extracted: {len(all_processed_rois)}")
-    for cond, count in condition_counts.items():
+    for cond, count in experiment_group_counts.items():
         print(f"  {cond}: {count}")
 
     summary_csv = None
@@ -493,7 +493,7 @@ def run_roi_masking(cfg: dict) -> dict:
 
     return {
         "processed_rois": all_processed_rois,
-        "condition_counts": condition_counts,
+        "experiment_group_counts": experiment_group_counts,
         "summary_csv": summary_csv,
         "output_dir": output_dir,
     }
