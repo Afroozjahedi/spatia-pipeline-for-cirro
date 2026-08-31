@@ -37,19 +37,43 @@
 experiment:
   name: "CRC_TMA_full"
   description: "CRC TMA — full pipeline demo from raw core images through triads"
-  conditions: ["CLR", "DII"]
-  image_condition_map: {}
+  groups: ["CLR", "DII"]
+  # Keyed by slide_folder (immediate parent dir of each raw core .tif) --
+  # raw filenames like "reg011_X01_Y01_Z09.tif" carry no CLR/DII marker at
+  # all, only the folder does. See resolve_experiment_group() in
+  # spatia/analysis/preprocessing.py (added 2026-08-28) for the lookup that
+  # reads this. TMA_A/TMA_B are replicate scans of the same CLR cores;
+  # DII_TMA_A/DII_TMA_B are replicate scans of the same DII cores.
+  image_experiment_group_map:
+    TMA_A: "CLR"
+    TMA_B: "CLR"
+    DII_TMA_A: "DII"
+    DII_TMA_B: "DII"
 
 imaging:
   microns_per_pixel: 0.65
-  condition_areas_um2:
+  experiment_group_areas_um2:
     CLR: 79432704.0
     DII: 84105216.0
 
 paths:
-  # Raw per-core TIFFs already on OneDrive (see status note above re: whether
-  # these need tif_conversion/roi_masking at all, or go straight to segmentation).
-  raw_image_dir: "/Users/ajahedi/Library/CloudStorage/OneDrive-InsideMDAnderson/Hackathon/TMA_A"
+  # UPDATED 2026-08-28: raw data moved off OneDrive onto Seadragon (rsrch6).
+  # Inferred from the SMB path Afrouz gave for DII_TMA_A:
+  #   smb://d1prprsh6ccifs/home/trans_mol_path/ajahedi/SPATIA pipeline paper/data/DII_TMA_A
+  # -> mapped to the native Linux mount used everywhere else in this project
+  #    (matches /rsrch6/home/trans_mol_path/ajahedi/... in SPATIA_PIPELINE_LOG.md
+  #    and the triad-analysis project's own cluster paths).
+  # CONFIDENCE: high that the /rsrch6 prefix + rest-of-path mapping is right
+  # (exact account/lab path match), NOT verified with an actual `ls` on
+  # JupyterHub yet -- do that before running. Also NOT yet confirmed that
+  # TMA_A / TMA_B / DII_TMA_B sit as siblings of DII_TMA_A under the same
+  # data/ parent (assumed here since crc_tma_full_pipeline.yaml's own
+  # original description names all four together) -- worth a quick `ls`
+  # of the parent to confirm all four are actually there before running.
+
+  # Not read by segmentation.py directly (masked_roi_dir below is the real
+  # input) -- kept here for documentation of where the raw data lives.
+  raw_image_dir: "/rsrch6/home/trans_mol_path/ajahedi/SPATIA pipeline paper/data"
 
   # If tif_conversion IS needed: standard-TIFF output goes here.
   converted_tif_dir: "data/crc_tma_full/converted_tif"
@@ -58,16 +82,28 @@ paths:
   # (see status note) -- qupath_roi_dir may end up unused if roi_masking is
   # skipped in favor of segmentation reading raw_image_dir directly.
   qupath_roi_dir: "data/crc_tma_full/qupath_roi"
-  masked_roi_dir: "data/crc_tma_full/masked_rois"
 
-  # Real 92-channel CRC panel (pulled from OneDrive/channelNames.txt).
+  # THE real segmentation input (segmentation.py reads paths.masked_roi_dir,
+  # not raw_image_dir -- see 2026-08-27 finding). Points at the SAME parent
+  # as raw_image_dir above: segmentation.py walks this recursively and picks
+  # up TMA_A/, TMA_B/, DII_TMA_A/, DII_TMA_B/ as separate "slides" (their
+  # folder name becomes the slide_id) -- no roi_masking step needed since
+  # these cores are already pre-extracted (see status note at top of file).
+  masked_roi_dir: "/rsrch6/home/trans_mol_path/ajahedi/SPATIA pipeline paper/data"
+
+  # Real 92-channel CRC panel -- written 2026-08-28 from Afrouz's own channel
+  # list (spacec/QuPath scanner metadata), NOT reconstructed or guessed.
+  # Repo-relative: resolves correctly once this repo is on Seadragon and
+  # run_pipeline.py is run from the repo root.
   channel_file: "data/crc_tma_full/channelNames.txt"
 
   # Segmentation writes here; preprocessing reads from here -- same directory,
-  # no separate wiring needed.
-  segmentation_results_dir: "data/crc_tma_full/segmentation_results"
-  input_dir: "data/crc_tma_full/segmentation_results"
-  output_dir: "data/crc_tma_full/results"
+  # no separate wiring needed. Moved to scratch (not home) to match this
+  # project's existing convention for pipeline outputs (see crc_tma.yaml's
+  # commented Seadragon path).
+  segmentation_results_dir: "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA_full/segmentation_results"
+  input_dir: "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA_full/segmentation_results"
+  output_dir: "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA_full/results"
 
 tif_conversion:
   enabled: false   # see status note -- likely a no-op for this dataset's pre-extracted cores
@@ -80,7 +116,7 @@ roi_masking:
 segmentation:
   enabled: true
   seg_method: "mesmer"
-  nuclei_channel: "DAPI"
+  nuclei_channel: "HOECHST1"   # fixed 2026-08-28: real panel has no "DAPI" channel -- CyCIF nuclear stain is HOECHST, cycled every 4 channels (HOECHST1..23). Using cycle-1 (freshest signal, pre-bleach) as the segmentation nuclear channel.
   membrane_channel_list: ["CD45 - hematopoietic cells"]
   compartment: "whole-cell"
   input_format: "Multichannel"

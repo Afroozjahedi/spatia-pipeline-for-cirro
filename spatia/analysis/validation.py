@@ -77,12 +77,108 @@ def _check_obs_columns(adata, required_cols: List[str], path: str) -> List[str]:
 # STEP VALIDATORS
 # ─────────────────────────────────────────────────────────────────────────────
 
+def validate_segmentation(cfg: dict) -> Tuple[bool, List[ValidationError]]:
+    """
+    Checks after run_segmentation():
+    - segmentation_results_dir exists
+    - At least one *_mesmer_result.csv was produced
+    - Every masked ROI TIFF found in masked_roi_dir has a corresponding
+      *_mesmer_result.csv. A shortfall means some images silently failed
+      segmentation or were skipped for a channel mismatch --
+      run_cell_segmentation() collects those in its own return value, but
+      validate_step() here only receives cfg, not that return value (same as
+      every other validator), so this re-derives the same signal from disk:
+      TIFF count in vs. CSV count out.
+    - Each *_mesmer_result.csv is non-empty and has the columns
+      preprocessing.py's run_preprocessing() actually reads (label, x, y, area).
+
+    Note: this does NOT re-run the channel-order check itself -- that already
+    runs (and raises) inside run_cell_segmentation() when
+    segmentation.channel_check is enabled. This validator's job is to catch
+    the *other* failure mode: a generic per-image exception (e.g. a spacec/
+    Mesmer crash) that run_cell_segmentation() deliberately does NOT raise on,
+    so the pipeline doesn't halt over one bad image -- but also doesn't
+    silently continue with fewer cells than expected without this check.
+    """
+    errors: List[ValidationError] = []
+    step = "segmentation"
+
+    paths = cfg.get("paths", {})
+    seg_dir = paths.get("segmentation_results_dir")
+
+    if not seg_dir or not os.path.isdir(seg_dir):
+        errors.append(ValidationError(
+            step,
+            "segmentation_results_dir not found — did segmentation run?",
+            seg_dir or "",
+        ))
+        return False, errors
+
+    csv_files = []
+    for root, _dirs, files in os.walk(seg_dir):
+        for f in files:
+            if f.endswith("_mesmer_result.csv"):
+                csv_files.append(os.path.join(root, f))
+
+    if not csv_files:
+        errors.append(ValidationError(
+            step, "No *_mesmer_result.csv files found.", seg_dir,
+        ))
+        return False, errors
+
+    # Compare against masked ROI TIFFs actually available as input -- a
+    # shortfall here is the disk-based signal that some image(s) failed or
+    # were skipped, since we can't see run_cell_segmentation's in-memory
+    # errors list from here.
+    masked_dir = paths.get("masked_roi_dir") or os.path.join(
+        paths.get("output_dir", "."), "masked_rois"
+    )
+    if os.path.isdir(masked_dir):
+        tif_count = 0
+        for root, _dirs, files in os.walk(masked_dir):
+            for f in files:
+                if f.endswith(".tif") and "preview" not in f:
+                    tif_count += 1
+        if tif_count and len(csv_files) < tif_count:
+            errors.append(ValidationError(
+                step,
+                f"{tif_count} masked ROI TIFF(s) found in {masked_dir}, but "
+                f"only {len(csv_files)} *_mesmer_result.csv produced "
+                f"({tif_count - len(csv_files)} short). Check the segmentation "
+                f"step's console log for 'FAILED segmentation' or 'CHANNEL "
+                f"MISMATCH' entries for the missing image(s).",
+                seg_dir,
+            ))
+
+    # Per-CSV content checks
+    expected_cols = {"label", "x", "y", "area"}
+    for path in csv_files:
+        ok, msg = _file_exists_and_nonempty(path)
+        if not ok:
+            errors.append(ValidationError(step, msg, path))
+            continue
+        try:
+            import pandas as pd
+            df = pd.read_csv(path, nrows=5)
+            missing = expected_cols - set(df.columns)
+            if missing:
+                errors.append(ValidationError(
+                    step,
+                    f"Missing expected columns: {sorted(missing)}",
+                    path,
+                ))
+        except Exception as exc:
+            errors.append(ValidationError(step, f"Cannot read CSV: {exc}", path))
+
+    return len(errors) == 0, errors
+
+
 def validate_preprocessing(cfg: dict) -> Tuple[bool, List[ValidationError]]:
     """
     Checks after run_preprocessing():
-    - At least one *_combined_all_conditions.h5ad exists in individual_processed_data/
+    - At least one *_combined_all_experiment_groups.h5ad exists in individual_processed_data/
     - Each combined h5ad opens cleanly
-    - Each combined h5ad has a 'condition' column in obs
+    - Each combined h5ad has a 'experiment_group' column in obs
     - Each combined h5ad has > 0 cells
     """
     errors: List[ValidationError] = []
@@ -101,13 +197,13 @@ def validate_preprocessing(cfg: dict) -> Tuple[bool, List[ValidationError]]:
 
     combined_files = [
         f for f in os.listdir(tissues_dir)
-        if f.endswith("_combined_all_conditions.h5ad")
+        if f.endswith("_combined_all_experiment_groups.h5ad")
     ]
 
     if not combined_files:
         errors.append(ValidationError(
             step,
-            "No *_combined_all_conditions.h5ad files found.",
+            "No *_combined_all_experiment_groups.h5ad files found.",
             tissues_dir,
         ))
         return False, errors
@@ -130,7 +226,7 @@ def validate_preprocessing(cfg: dict) -> Tuple[bool, List[ValidationError]]:
                 step, f"h5ad has 0 cells after processing.", path
             ))
 
-        missing = _check_obs_columns(adata, ["condition", "image_ID"], path)
+        missing = _check_obs_columns(adata, ["experiment_group", "image_ID"], path)
         if missing:
             errors.append(ValidationError(
                 step,
@@ -138,14 +234,14 @@ def validate_preprocessing(cfg: dict) -> Tuple[bool, List[ValidationError]]:
                 path,
             ))
 
-        conditions = cfg["experiment"]["conditions"]
-        if "condition" in adata.obs.columns:
-            found = set(adata.obs["condition"].unique())
-            expected = set(conditions)
+        experiment_groups = cfg["experiment"]["groups"]
+        if "experiment_group" in adata.obs.columns:
+            found = set(adata.obs["experiment_group"].unique())
+            expected = set(experiment_groups)
             if not expected.issubset(found) and len(found) < 2:
                 errors.append(ValidationError(
                     step,
-                    f"Expected conditions {expected} but found {found} in obs['condition'].",
+                    f"Expected experiment_groups {expected} but found {found} in obs['experiment_group'].",
                     path,
                 ))
 
@@ -219,7 +315,7 @@ def validate_cell_typing(cfg: dict) -> Tuple[bool, List[ValidationError]]:
             step, "Cell-typed h5ad has 0 cells.", typed_path
         ))
 
-    missing = _check_obs_columns(adata, ["cell_type", "condition"], typed_path)
+    missing = _check_obs_columns(adata, ["cell_type", "experiment_group"], typed_path)
     if missing:
         errors.append(ValidationError(
             step,
@@ -256,7 +352,7 @@ def validate_triads(cfg: dict) -> Tuple[bool, List[ValidationError]]:
     """
     Checks after run_triad_analysis():
     - triad_summary.csv exists and is non-empty
-    - condition_comparison_counts.csv exists
+    - experiment_group_comparison_counts.csv exists
     - At least one *_triad_pairs.csv exists (at least one image had triads)
     - triad_summary.csv has expected columns
     """
@@ -268,7 +364,7 @@ def validate_triads(cfg: dict) -> Tuple[bool, List[ValidationError]]:
     # Required summary files
     required_files = [
         "triad_summary.csv",
-        "condition_comparison_counts.csv",
+        "experiment_group_comparison_counts.csv",
     ]
     for fname in required_files:
         path = os.path.join(output_dir, fname)
@@ -282,7 +378,7 @@ def validate_triads(cfg: dict) -> Tuple[bool, List[ValidationError]]:
         try:
             import pandas as pd
             df = pd.read_csv(summary_path)
-            expected_cols = ["image_id", "condition", "n_triads"]
+            expected_cols = ["image_id", "experiment_group", "n_triads"]
             missing = [c for c in expected_cols if c not in df.columns]
             if missing:
                 errors.append(ValidationError(
@@ -328,6 +424,7 @@ def _validate_passthrough(cfg: dict) -> Tuple[bool, List]:
 
 
 _VALIDATORS = {
+    "segmentation":  validate_segmentation,
     "preprocessing": validate_preprocessing,
     "cell_typing":   validate_cell_typing,
     "triads":        validate_triads,
@@ -342,7 +439,8 @@ def validate_step(step: str, cfg: dict) -> Tuple[bool, List[ValidationError]]:
 
     Parameters
     ----------
-    step : one of 'preprocessing', 'cell_typing', 'triads', 'functional', 'survival'
+    step : one of 'segmentation', 'preprocessing', 'cell_typing', 'triads',
+           'functional', 'survival'
     cfg  : parsed YAML config dict
 
     Returns

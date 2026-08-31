@@ -33,9 +33,10 @@ run_segmentation(cfg) -- accepts the parsed YAML config dict.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import pickle
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -43,6 +44,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from skimage.measure import regionprops_table
+import tifffile
 
 import spacec as sp
 
@@ -52,13 +54,119 @@ import spacec as sp
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _find_masked_tifs(processed_rois_dir: str) -> List[str]:
-    """Recursively find masked ROI TIFFs, excluding preview images."""
+    """
+    Recursively find masked ROI TIFFs, excluding preview images and OME-TIFF
+    exports (e.g. "*_combined_markers.ome.tif").
+
+    Added 2026-08-28: ".ome.tif" is a compound extension, so a naive
+    f.endswith(".tif") check also matches OME-TIFF files -- these are
+    QuPath-viewer exports (structured OME-XML metadata, not necessarily the
+    same channel order/count as the plain multichannel TIFFs this pipeline
+    is built around) and were never meant to be segmented. Without this
+    exclusion, an "*.ome.tif" sitting in the same folder as its plain-TIFF
+    counterpart would get segmented too -- wasted spacec/Mesmer compute at
+    best, a channel-order mismatch halt at worst.
+    """
     tif_files = []
     for root, _dirs, files in os.walk(processed_rois_dir):
         for f in files:
-            if f.endswith(".tif") and "preview" not in f:
+            if f.endswith(".tif") and "preview" not in f and ".ome.tif" not in f:
                 tif_files.append(os.path.join(root, f))
     return tif_files
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CHANNEL-ORDER VALIDATION
+# run_cell_segmentation applies ONE channel_file to every masked ROI TIFF in
+# the batch. That's only correct if every image really does share the same
+# channel count/order. roi_masking.py already derives the per-slide channel
+# order and writes it two ways -- embedded in the TIFF's own ImageJ 'Labels'
+# metadata, and as a sidecar "{roi}_channel_info.txt" -- so each image can be
+# checked against the global channel_file before trusting it, instead of
+# silently mislabeling markers when an image doesn't match.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _read_channel_file(channel_file_path: str) -> List[str]:
+    """Parse channelnames.txt: one channel name per line, in stack order."""
+    with open(channel_file_path) as f:
+        return [line.strip() for line in f if line.strip()]
+
+
+def _read_tiff_channel_labels(tiff_path: str) -> Optional[List[str]]:
+    """
+    Per-image channel order as written by roi_masking.py. Prefers the TIFF's
+    own embedded ImageJ 'Labels' metadata (travels with the file even if it's
+    moved/renamed); falls back to the sidecar "..._channel_info.txt" written
+    next to it. Returns None if neither is present (e.g. masked ROIs produced
+    before this check existed, or by some other tool) -- caller treats that
+    as "can't verify," not as a mismatch.
+    """
+    try:
+        with tifffile.TiffFile(tiff_path) as tif:
+            ij_meta = tif.imagej_metadata or {}
+            labels = ij_meta.get("Labels")
+            if labels:
+                # tifffile round-trips a single-element Labels list as a bare
+                # string, not a length-1 list -- e.g. ["DAPI"] comes back as
+                # "DAPI". list("DAPI") would silently explode that into
+                # ['D','A','P','I'], so a real single-channel image (nuclear-
+                # only panel, DAPI-only ROI) must be special-cased here.
+                if isinstance(labels, str):
+                    return [labels]
+                return list(labels)
+    except Exception:
+        pass
+
+    # Fallback: "{roi_experiment_group}_{slide_id}_x{x}_y{y}_channel_info.txt" --
+    # roi_masking.py writes this WITHOUT the "_w{w}_h{h}_masked" suffix the
+    # .tif filename itself has, so strip that suffix rather than assuming
+    # a simple extension swap.
+    basename = os.path.basename(tiff_path)
+    m = re.match(r"^(.*_x\d+_y\d+)_w\d+_h\d+_masked\.tif$", basename)
+    if not m:
+        return None
+    info_path = os.path.join(os.path.dirname(tiff_path), m.group(1) + "_channel_info.txt")
+    if not os.path.exists(info_path):
+        return None
+    try:
+        labels = {}
+        with open(info_path) as f:
+            for line in f:
+                cm = re.match(r"Channel (\d+):\s*(.*)", line.strip())
+                if cm:
+                    labels[int(cm.group(1))] = cm.group(2)
+        return [labels[i] for i in sorted(labels)] if labels else None
+    except Exception:
+        return None
+
+
+def _check_channel_order(tiff_path: str, expected_channels: List[str]) -> Tuple[Optional[bool], str]:
+    """
+    Compare this image's own channel order against the global channel_file.
+
+    Returns (True, msg) on match, (False, msg) on a real mismatch (count or
+    name/order -- the file gets skipped), (None, msg) if this image has no
+    per-image channel metadata to check against (proceeds unverified with a
+    warning, doesn't block -- same as the old, unchecked behavior).
+    """
+    actual = _read_tiff_channel_labels(tiff_path)
+    if actual is None:
+        return None, "no per-image channel metadata found (older ROI export?) — cannot verify"
+
+    if len(actual) != len(expected_channels):
+        return False, (
+            f"channel COUNT mismatch — channel_file has {len(expected_channels)} "
+            f"({expected_channels}), this image has {len(actual)} ({actual})"
+        )
+
+    mismatches = [
+        f"position {i}: channel_file says '{e}', image says '{a}'"
+        for i, (e, a) in enumerate(zip(expected_channels, actual)) if e != a
+    ]
+    if mismatches:
+        return False, "channel ORDER/NAME mismatch — " + "; ".join(mismatches)
+
+    return True, "channels match"
 
 
 def run_cell_segmentation(
@@ -72,11 +180,42 @@ def run_cell_segmentation(
     input_format: str = "Multichannel",
     resize_factor: int = 1,
     size_cutoff: int = 0,
-) -> Dict[str, dict]:
+    channel_check: bool = True,
+) -> Dict[str, object]:
     """
     Run spacec cell segmentation over every masked ROI TIFF found under
     processed_rois_dir. Idempotent: existing *_seg_output.pickle files are
     skipped. Ported from 03_segmentation.ipynb Part 1.
+
+    Returns
+    -------
+    dict with keys:
+        "outputs" : Dict[str, dict]   -- successful seg_output per image
+        "errors"  : List[dict]        -- [{"file", "error"}, ...] for images
+                                          that raised during sp.tl.cell_segmentation.
+                                          Not raised automatically (unlike a
+                                          channel mismatch, a one-off spacec/Mesmer
+                                          failure on a single image shouldn't
+                                          halt the whole batch) -- but always
+                                          summarized in the printed output, and
+                                          checked by validation.validate_segmentation
+                                          after the step runs.
+
+    channel_check : bool, default True
+        channel_file_path is a SINGLE file applied to every image in the
+        batch. If images don't all share the same channel count/order (e.g.
+        different scan batches or panel revisions), applying one global
+        channel_file silently mislabels markers for whichever images don't
+        match -- spacec maps names onto the channel stack positionally, with
+        no error. When True, each image's own channel order (embedded by
+        roi_masking.py in the TIFF's 'Labels' metadata, or its sidecar
+        "..._channel_info.txt") is checked against channel_file_path before
+        segmenting. A mismatched image is SKIPPED (not segmented with wrong
+        labels) and the whole run raises at the end so the mismatch can't
+        pass silently. Images with no per-image metadata to check against
+        (e.g. pre-existing ROI exports) proceed with a warning, unverified --
+        same as the behavior before this check existed. Set False to restore
+        that old, unchecked behavior entirely.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -85,6 +224,7 @@ def run_cell_segmentation(
             f"Channel file not found: {channel_file_path}. "
             "Segmentation cannot proceed without a channel-name mapping."
         )
+    expected_channels = _read_channel_file(channel_file_path)
 
     tif_files = _find_masked_tifs(processed_rois_dir)
     if not tif_files:
@@ -95,6 +235,10 @@ def run_cell_segmentation(
     print(f"Found {len(tif_files)} .tif files to process.")
 
     segmentation_outputs: Dict[str, dict] = {}
+    channel_mismatches: List[dict] = []
+    segmentation_errors: List[dict] = []
+    n_unverified = 0
+    n_already_done = 0
     print("Starting cell segmentation...")
 
     for input_file in tif_files:
@@ -107,7 +251,22 @@ def run_cell_segmentation(
         pickle_file = os.path.join(slide_output_dir, f"{output_fname}_seg_output.pickle")
         if os.path.exists(pickle_file):
             print(f"Segmentation output already exists, skipping: {pickle_file}")
+            n_already_done += 1
             continue
+
+        if channel_check:
+            ok, msg = _check_channel_order(input_file, expected_channels)
+            if ok is False:
+                print(f"  ❌ CHANNEL MISMATCH for {filename}: {msg}")
+                print(f"     Skipping this image — segmenting it against "
+                      f"channel_file_path as-is would mislabel its markers. "
+                      f"Fix channelnames.txt (or this image's channel order), "
+                      f"then re-run.")
+                channel_mismatches.append({"file": input_file, "reason": msg})
+                continue
+            elif ok is None:
+                n_unverified += 1
+                print(f"  ⚠️  {filename}: {msg} — proceeding unverified against the global channel_file.")
 
         print(f"Segmenting: {input_file}")
         try:
@@ -131,9 +290,49 @@ def run_cell_segmentation(
         except Exception as e:
             print(f"Error during segmentation for {filename}: {e}")
             print(f"Stack trace: {sys.exc_info()}")
+            segmentation_errors.append({"file": input_file, "error": str(e)})
 
     print("All segmentation processes completed!")
-    return segmentation_outputs
+
+    # Always-visible summary -- this used to require grepping the console log
+    # to find out whether anything failed; now it's one line, every run.
+    print(
+        f"\nSegmentation summary: {len(segmentation_outputs)} succeeded, "
+        f"{len(segmentation_errors)} failed, {n_already_done} already done "
+        f"(skipped), {len(channel_mismatches)} skipped for channel mismatch "
+        f"— {len(tif_files)} total files found."
+    )
+    if segmentation_errors:
+        print(f"⚠️  {len(segmentation_errors)} image(s) FAILED segmentation "
+              f"(see errors above) and produced no output:")
+        for err in segmentation_errors:
+            print(f"   {os.path.basename(err['file'])}: {err['error']}")
+        print("   These will show up as missing *_mesmer_result.csv files — "
+              "run_segmentation() does not raise on this automatically, but "
+              "validation.validate_segmentation() checks for it after the step runs.")
+
+    if n_unverified:
+        print(f"⚠️  {n_unverified} image(s) segmented without per-image channel "
+              f"verification (no embedded/sidecar channel metadata found).")
+
+    if channel_mismatches:
+        print("\n" + "=" * 72)
+        print(f"❌ {len(channel_mismatches)} image(s) SKIPPED due to channel mismatch:")
+        for m in channel_mismatches:
+            print(f"   {os.path.basename(m['file'])}: {m['reason']}")
+        print("=" * 72)
+        raise RuntimeError(
+            f"{len(channel_mismatches)} masked ROI TIFF(s) do not match "
+            f"channel_file_path ({channel_file_path}) and were skipped rather "
+            f"than segmented with wrong channel labels. See the list above. "
+            f"Either fix channelnames.txt to match, or split these images into "
+            f"a separate segmentation run with the correct channel_file. "
+            f"Pass channel_check=False to run_segmentation()/run_cell_segmentation() "
+            f"to bypass this check (not recommended unless channel order has "
+            f"been verified another way)."
+        )
+
+    return {"outputs": segmentation_outputs, "errors": segmentation_errors}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -299,11 +498,19 @@ def run_segmentation(cfg: dict) -> dict:
     segmentation.resize_factor             default 1
     segmentation.size_cutoff               default 0
     segmentation.generate_overlays         default True
+    segmentation.channel_check             default True -- verify each image's
+                                            own channel order (from roi_masking.py's
+                                            metadata) against channel_file before
+                                            segmenting it; see run_cell_segmentation's
+                                            docstring for what this catches.
 
     Returns
     -------
-    dict with keys: segmentation_outputs (dict), csv_files (list),
-    overlay_files (list), output_dir (path)
+    dict with keys: segmentation_outputs (dict), segmentation_errors (list of
+    {"file", "error"} for any image that raised during spacec segmentation --
+    not raised automatically, but always summarized in the printed output and
+    checked by validation.validate_segmentation() after this step runs),
+    csv_files (list), overlay_files (list), output_dir (path)
     """
     paths = cfg.get("paths", {})
     processed_rois_dir = paths.get("masked_roi_dir") or os.path.join(
@@ -332,6 +539,7 @@ def run_segmentation(cfg: dict) -> dict:
     resize_factor = seg_cfg.get("resize_factor", 1)
     size_cutoff = seg_cfg.get("size_cutoff", 0)
     do_overlays = seg_cfg.get("generate_overlays", True)
+    channel_check = seg_cfg.get("channel_check", True)
 
     print("=" * 72)
     print("SPATIA CELL SEGMENTATION")
@@ -344,7 +552,7 @@ def run_segmentation(cfg: dict) -> dict:
     if not os.path.isdir(processed_rois_dir):
         raise FileNotFoundError(f"masked_roi_dir not found: {processed_rois_dir}")
 
-    segmentation_outputs = run_cell_segmentation(
+    seg_result = run_cell_segmentation(
         processed_rois_dir=processed_rois_dir,
         channel_file_path=channel_file_path,
         output_dir=output_dir,
@@ -355,7 +563,10 @@ def run_segmentation(cfg: dict) -> dict:
         input_format=input_format,
         resize_factor=resize_factor,
         size_cutoff=size_cutoff,
+        channel_check=channel_check,
     )
+    segmentation_outputs = seg_result["outputs"]
+    segmentation_errors = seg_result["errors"]
 
     csv_files = export_segmentation_to_csv(output_dir)
 
@@ -366,6 +577,7 @@ def run_segmentation(cfg: dict) -> dict:
 
     return {
         "segmentation_outputs": segmentation_outputs,
+        "segmentation_errors": segmentation_errors,
         "csv_files": csv_files,
         "overlay_files": overlay_files,
         "output_dir": output_dir,

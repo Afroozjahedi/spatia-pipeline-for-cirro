@@ -63,9 +63,9 @@ class _DualLogger:
 # TISSUE IDENTIFIER UTILITIES
 # ─────────────────────────────────────────────────────────────────────────────
 
-def extract_tissue_identifier(image_id: str, conditions: List[str]) -> str:
+def extract_tissue_identifier(image_id: str, experiment_groups: List[str]) -> str:
     """
-    Strip condition labels and coordinate blocks from an image_id.
+    Strip experiment_group labels and coordinate blocks from an image_id.
 
     Example
     -------
@@ -74,7 +74,7 @@ def extract_tissue_identifier(image_id: str, conditions: List[str]) -> str:
     """
     tissue_id = image_id.strip().rstrip("_").strip()
 
-    for cond in conditions:
+    for cond in experiment_groups:
         patterns = [
             (rf"^{cond}[_\s]+", ""),        # prefix:  KO_…
             (rf"[_\s]+{cond}[_\s]*$", ""),  # suffix:  …_KO
@@ -91,9 +91,9 @@ def extract_tissue_identifier(image_id: str, conditions: List[str]) -> str:
     return tissue_id
 
 
-def detect_condition(image_id: str, conditions: List[str]) -> str:
+def detect_experiment_group(image_id: str, experiment_groups: List[str]) -> str:
     """
-    Return the condition label found in *image_id*, or 'Unknown'.
+    Return the experiment_group label found in *image_id*, or 'Unknown'.
 
     Detection order (most → least reliable):
       1. Prefix match  (KO_…  or  KO …)
@@ -101,24 +101,58 @@ def detect_condition(image_id: str, conditions: List[str]) -> str:
       3. Unambiguous substring match
     """
     uid = image_id.upper()
-    for cond in conditions:
+    for cond in experiment_groups:
         cu = cond.upper()
         if uid.startswith(f"{cu}_") or uid.startswith(f"{cu} "):
             return cond
 
-    for cond in conditions:
+    for cond in experiment_groups:
         cu = cond.upper()
         if uid.endswith(f"_{cu}") or uid.endswith(f" {cu}"):
             return cond
 
-    matches = [c for c in conditions if c.upper() in uid]
+    matches = [c for c in experiment_groups if c.upper() in uid]
     if len(matches) == 1:
         return matches[0]
     if len(matches) > 1:
-        print(f"  ⚠️  Ambiguous condition for '{image_id}' (found: {matches}) → 'Unknown'")
+        print(f"  ⚠️  Ambiguous experiment_group for '{image_id}' (found: {matches}) → 'Unknown'")
     else:
-        print(f"  ⚠️  No condition detected for '{image_id}' → 'Unknown'")
+        print(f"  ⚠️  No experiment_group detected for '{image_id}' → 'Unknown'")
     return "Unknown"
+
+
+def resolve_experiment_group(
+    image_id: str,
+    slide_folder: str,
+    image_experiment_group_map: dict,
+    experiment_groups: List[str],
+) -> str:
+    """
+    Determine experiment_group with an explicit-map override, added 2026-08-28.
+
+    Priority: image_experiment_group_map[image_id] -> image_experiment_group_map[slide_folder]
+    -> detect_experiment_group(image_id, ...) (filename prefix/suffix/substring match).
+
+    Why this exists: detect_experiment_group() only ever looks at the per-image
+    filename. That's correct for datasets where the condition is baked into every
+    filename (e.g. "CLR_reg038_B.tif" -- crc_tma.yaml's hackathon CSVs), but wrong
+    for a dataset where the condition is only knowable from which raw folder an
+    image came from (e.g. this pipeline's raw CRC TMA cores: "TMA_A/reg011_..." vs
+    "DII_TMA_A/reg011_...", where the filename itself, "reg011_...", carries no
+    CLR/DII marker at all). Every OTHER step that reads image_experiment_group_map
+    (functional.py, triads.py, survival.py's _get_experiment_group) already checks
+    an explicit map before falling back to filename matching -- this was the one
+    place in the pipeline that didn't. Both the exact image_id and the slide_folder
+    are checked against the map (in that order) since existing configs key by
+    image_id, while a raw-image dataset like this one is naturally keyed by
+    slide_folder (one entry covers every core in that folder, instead of one entry
+    per individual core).
+    """
+    if image_id in image_experiment_group_map:
+        return image_experiment_group_map[image_id]
+    if slide_folder in image_experiment_group_map:
+        return image_experiment_group_map[slide_folder]
+    return detect_experiment_group(image_id, experiment_groups)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -135,19 +169,43 @@ def _get_last_marker_col(df: pd.DataFrame, last_marker: str) -> int:
     spacec's remove_noise() and make_anndata() use a column index (col_sum /
     col_num) to split the DataFrame into marker columns vs metadata columns.
     Hardcoding 'SIGLEC F' breaks on any panel that doesn't include that marker.
+
+    This index-based split is inherently a bit fragile -- it's a workaround
+    for spacec's API needing a column index rather than names. If a panel
+    reorders columns, or spacec's own column ordering ever changes, the
+    wrong index would silently split markers from metadata. To surface that
+    as loudly as possible without changing default behavior, this function
+    (1) warns when it has to fall back instead of using an explicit
+    last_marker, and (2) sanity-checks that everything after the chosen
+    boundary is actually a known metadata column -- if a marker-looking
+    column shows up past the boundary, that's a strong signal the split is
+    wrong and should be investigated.
     """
     METADATA_COLS = {
-        "label", "area", "x", "y", "slide_folder", "image_ID", "condition",
+        "label", "area", "x", "y", "slide_folder", "image_ID", "experiment_group",
         "eccentricity", "perimeter", "convex_area",
         "axis_major_length", "axis_minor_length", "DAPI",
     }
     if last_marker and last_marker in df.columns:
-        return df.columns.get_loc(last_marker)
+        col_num = df.columns.get_loc(last_marker)
+    else:
+        marker_cols = [c for c in df.columns if c not in METADATA_COLS]
+        if not marker_cols:
+            raise ValueError("No marker columns found in DataFrame.")
+        col_num = df.columns.get_loc(marker_cols[-1])
+        if last_marker:
+            print(f"  ⚠️  last_marker '{last_marker}' not found in columns — "
+                  f"falling back to rightmost non-metadata column "
+                  f"('{marker_cols[-1]}', index {col_num}). Verify this is correct.")
 
-    marker_cols = [c for c in df.columns if c not in METADATA_COLS]
-    if not marker_cols:
-        raise ValueError("No marker columns found in DataFrame.")
-    return df.columns.get_loc(marker_cols[-1])
+    trailing_non_metadata = [c for c in df.columns[col_num + 1:] if c not in METADATA_COLS]
+    if trailing_non_metadata:
+        print(f"  ⚠️  Column(s) after the detected marker boundary (index {col_num}) "
+              f"look like marker columns, not metadata: {trailing_non_metadata}. "
+              f"The marker/metadata split may be wrong — check panel column order "
+              f"against METADATA_COLS in this function.")
+
+    return col_num
 
 
 def auto_detect_cutoffs(
@@ -198,12 +256,12 @@ def auto_detect_cutoffs(
     return float(z_count_cutoff), float(z_sum_cutoff)
 
 
-def _processed_files_exist(tissue_id: str, condition: Optional[str], out_dir: str) -> bool:
-    """Return True if the per-condition (or combined) CSV + h5ad both exist."""
-    if condition:
-        base = os.path.join(out_dir, f"{tissue_id}_{condition}")
+def _processed_files_exist(tissue_id: str, experiment_group: Optional[str], out_dir: str) -> bool:
+    """Return True if the per-experiment_group (or combined) CSV + h5ad both exist."""
+    if experiment_group:
+        base = os.path.join(out_dir, f"{tissue_id}_{experiment_group}")
     else:
-        base = os.path.join(out_dir, f"{tissue_id}_combined_all_conditions")
+        base = os.path.join(out_dir, f"{tissue_id}_combined_all_experiment_groups")
     return os.path.exists(base + ".csv") and os.path.exists(base + ".h5ad")
 
 
@@ -219,8 +277,8 @@ def run_preprocessing(cfg: dict) -> dict:
     -----
     1. Scan segmentation_results_dir for mesmer_result.csv files
     2. For each image: load → filter (size + DAPI) → z-score normalise →
-       auto-detect noise cutoffs → remove_noise → save per-condition files
-    3. Combine per-condition CSVs into a tissue-level combined h5ad
+       auto-detect noise cutoffs → remove_noise → save per-experiment_group files
+    3. Combine per-experiment_group CSVs into a tissue-level combined h5ad
     4. Generate marker-expression overlay visualisations
 
     Parameters
@@ -232,11 +290,19 @@ def run_preprocessing(cfg: dict) -> dict:
     dict with keys:
         all_processed_tissues : {tissue_id: [tissue_info_dict, ...]}
         processing_stats      : list of per-image dicts
-        output_dir            : path to combined_processed_data/
+        processing_errors     : list of {"file", "image_id", "error"} dicts for
+                                 images whose processing raised an exception --
+                                 same aggregation pattern as segmentation.py's
+                                 run_cell_segmentation(). Deliberately not
+                                 raised (one bad image doesn't stop the batch);
+                                 check this list (or the printed summary) to
+                                 know if anything needs attention.
+        output_dir             : path to combined_processed_data/
     """
 
     # ── Config extraction ─────────────────────────────────────────────────
-    conditions     = cfg["experiment"]["conditions"]
+    experiment_groups = cfg["experiment"]["groups"]
+    image_experiment_group_map = cfg["experiment"].get("image_experiment_group_map", {})
     seg_dir        = cfg["paths"]["segmentation_results_dir"]
     base_out       = cfg["paths"]["output_dir"]
 
@@ -262,353 +328,380 @@ def run_preprocessing(cfg: dict) -> dict:
     dual_log   = _DualLogger(log_file)
     sys.stdout = dual_log
 
-    print("=" * 80)
-    print("SPATIA PREPROCESSING PIPELINE")
-    print("=" * 80)
-    print(f"Started:    {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Conditions: {conditions}")
-    print(f"Seg dir:    {seg_dir}")
-    print(f"Output dir: {out_dir}")
-    print(f"Log file:   {log_file}")
-    print("=" * 80)
-
-    # ── Discover slide folders ────────────────────────────────────────────
-    if not os.path.isdir(seg_dir):
-        raise FileNotFoundError(f"segmentation_results_dir not found: {seg_dir}")
-
-    slide_folders = [
-        f for f in os.listdir(seg_dir)
-        if os.path.isdir(os.path.join(seg_dir, f))
-    ]
-    if not slide_folders:
-        raise FileNotFoundError(f"No slide folders found in {seg_dir}")
-
-    print(f"\nFound {len(slide_folders)} slide folder(s)")
-
-    # ── Main processing loop ──────────────────────────────────────────────
-    all_processed_tissues: Dict[str, list] = {}
-    overlay_mapping: Dict[str, dict]        = {}
-    processing_stats: List[dict]            = []
-
-    for slide_folder in slide_folders:
-        slide_dir = os.path.join(seg_dir, slide_folder)
-        print(f"\n{'=' * 80}")
-        print(f"Slide folder: {slide_folder}")
+    # Everything from here on runs under the redirected stdout. Wrapped in
+    # try/finally so an unhandled exception anywhere below (not just the
+    # per-image try/except inside the loop) still restores sys.stdout --
+    # previously an exception outside that inner loop would leave stdout
+    # silently pointed at a closed log file for the rest of the process
+    # (a real risk in the Streamlit UI or a notebook, which keep running
+    # after a single run_preprocessing() call fails).
+    try:
+        print("=" * 80)
+        print("SPATIA PREPROCESSING PIPELINE")
+        print("=" * 80)
+        print(f"Started:    {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Experiment groups: {experiment_groups}")
+        print(f"Seg dir:    {seg_dir}")
+        print(f"Output dir: {out_dir}")
+        print(f"Log file:   {log_file}")
         print("=" * 80)
 
-        csv_files = [f for f in os.listdir(slide_dir) if f.endswith("mesmer_result.csv")]
-        if not csv_files:
-            print(f"  No mesmer_result.csv found — skipping")
-            continue
+        # ── Discover slide folders ────────────────────────────────────────
+        if not os.path.isdir(seg_dir):
+            raise FileNotFoundError(f"segmentation_results_dir not found: {seg_dir}")
 
-        # Load overlay pickle files for visualisation
-        for pf in [f for f in os.listdir(slide_dir) if f.endswith("_seg_output.pickle")]:
-            try:
-                with open(os.path.join(slide_dir, pf), "rb") as fh:
-                    data = pickle.load(fh)
-                image_id = pf.replace("_seg_output.pickle", "")
-                overlay_mapping[image_id] = data
-                overlay_mapping[image_id + "_"] = data
-                print(f"  Loaded overlay: {image_id}")
-            except Exception as e:
-                print(f"  Error loading overlay {pf}: {e}")
+        slide_folders = [
+            f for f in os.listdir(seg_dir)
+            if os.path.isdir(os.path.join(seg_dir, f))
+        ]
+        if not slide_folders:
+            raise FileNotFoundError(f"No slide folders found in {seg_dir}")
 
-        for csv_file in csv_files:
-            file_path = os.path.join(slide_dir, csv_file)
-            print(f"\n--- {csv_file} ---")
+        print(f"\nFound {len(slide_folders)} slide folder(s)")
 
-            tissue_stats: dict = {
-                "filename":    csv_file,
-                "slide_folder": slide_folder,
-                "timestamp":   datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            }
+        # ── Main processing loop ──────────────────────────────────────────
+        all_processed_tissues: Dict[str, list] = {}
+        overlay_mapping: Dict[str, dict]        = {}
+        processing_stats: List[dict]            = []
+        processing_errors: List[dict]           = []
 
-            try:
-                df = pd.read_csv(file_path)
-                df["slide_folder"] = slide_folder
+        for slide_folder in slide_folders:
+            slide_dir = os.path.join(seg_dir, slide_folder)
+            print(f"\n{'=' * 80}")
+            print(f"Slide folder: {slide_folder}")
+            print("=" * 80)
 
-                base_name = csv_file.replace("_mesmer_result.csv", "").replace("mesmer_result.csv", "")
-                df["image_ID"] = base_name
-                image_id  = base_name
-                condition = detect_condition(image_id, conditions)
-                df["condition"] = condition
+            csv_files = [f for f in os.listdir(slide_dir) if f.endswith("mesmer_result.csv")]
+            if not csv_files:
+                print(f"  No mesmer_result.csv found — skipping")
+                continue
 
-                tissue_id = extract_tissue_identifier(image_id, conditions)
-                tissue_stats.update({
-                    "image_id":       image_id,
-                    "condition":      condition,
-                    "tissue_id":      tissue_id,
-                    "original_cells": df.shape[0],
-                })
+            # Load overlay pickle files for visualisation
+            for pf in [f for f in os.listdir(slide_dir) if f.endswith("_seg_output.pickle")]:
+                try:
+                    with open(os.path.join(slide_dir, pf), "rb") as fh:
+                        data = pickle.load(fh)
+                    image_id = pf.replace("_seg_output.pickle", "")
+                    overlay_mapping[image_id] = data
+                    overlay_mapping[image_id + "_"] = data
+                    print(f"  Loaded overlay: {image_id}")
+                except Exception as e:
+                    print(f"  Error loading overlay {pf}: {e}")
 
-                print(f"  image_ID:  {image_id}")
-                print(f"  tissue_id: {tissue_id}")
-                print(f"  condition: {condition}")
+            for csv_file in csv_files:
+                file_path = os.path.join(slide_dir, csv_file)
+                print(f"\n--- {csv_file} ---")
 
-                # ── Skip if already processed ───────────────────────────
-                if _processed_files_exist(tissue_id, condition, tissues_dir):
-                    print(f"  ⏭️  Already processed — loading from disk")
-                    tissue_stats["status"] = "SKIPPED - Already processed"
-                    processing_stats.append(tissue_stats)
+                tissue_stats: dict = {
+                    "filename":    csv_file,
+                    "slide_folder": slide_folder,
+                    "timestamp":   datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
 
-                    df_clean = pd.read_csv(
-                        os.path.join(tissues_dir, f"{tissue_id}_{condition}.csv")
+                try:
+                    df = pd.read_csv(file_path)
+                    df["slide_folder"] = slide_folder
+
+                    base_name = csv_file.replace("_mesmer_result.csv", "").replace("mesmer_result.csv", "")
+                    df["image_ID"] = base_name
+                    image_id  = base_name
+                    experiment_group = resolve_experiment_group(
+                        image_id, slide_folder, image_experiment_group_map, experiment_groups
                     )
-                    col_num = _get_last_marker_col(df_clean, last_marker)
+                    df["experiment_group"] = experiment_group
+
+                    tissue_id = extract_tissue_identifier(image_id, experiment_groups)
+                    tissue_stats.update({
+                        "image_id":       image_id,
+                        "experiment_group": experiment_group,
+                        "tissue_id":      tissue_id,
+                        "original_cells": df.shape[0],
+                    })
+
+                    print(f"  image_ID:  {image_id}")
+                    print(f"  tissue_id: {tissue_id}")
+                    print(f"  experiment_group: {experiment_group}")
+
+                    # ── Skip if already processed ───────────────────────
+                    if _processed_files_exist(tissue_id, experiment_group, tissues_dir):
+                        print(f"  ⏭️  Already processed — loading from disk")
+                        tissue_stats["status"] = "SKIPPED - Already processed"
+                        processing_stats.append(tissue_stats)
+
+                        df_clean = pd.read_csv(
+                            os.path.join(tissues_dir, f"{tissue_id}_{experiment_group}.csv")
+                        )
+                        col_num = _get_last_marker_col(df_clean, last_marker)
+
+                        all_processed_tissues.setdefault(tissue_id, []).append({
+                            "data":      df_clean,
+                            "experiment_group": experiment_group,
+                            "image_id":  image_id,
+                            "col_num":   col_num,
+                            "skipped":   True,
+                        })
+                        continue
+
+                    # ── QC: size + DAPI filter ──────────────────────────
+                    area_thresh = np.percentile(df["area"], size_pct)
+                    dapi_thresh = np.percentile(df["DAPI"],  dapi_pct)
+                    print(f"  {size_pct}% thresholds — area: {area_thresh:.2f}, DAPI: {dapi_thresh:.2f}")
+
+                    tissue_stats["area_threshold"] = area_thresh
+                    tissue_stats["dapi_threshold"] = dapi_thresh
+
+                    df_filt = sp.pp.filter_data(
+                        df,
+                        nuc_thres=dapi_thresh,
+                        size_thres=area_thresh,
+                        nuc_marker="DAPI",
+                        cell_size="area",
+                        log_scale=False,
+                    )
+                    n_after_filt = df_filt.shape[0]
+                    n_removed_filt = df.shape[0] - n_after_filt
+                    print(f"  After filter: {n_after_filt} cells  "
+                          f"(removed {n_removed_filt}, "
+                          f"{n_removed_filt / df.shape[0] * 100:.2f}%)")
+
+                    tissue_stats.update({
+                        "cells_after_size_dapi_filter": n_after_filt,
+                        "cells_removed_by_filter":      n_removed_filt,
+                        "percent_removed_by_filter":    n_removed_filt / df.shape[0] * 100,
+                    })
+
+                    # ── Normalisation ────────────────────────────────────
+                    print("  Normalising (z-score)…")
+                    df_norm = sp.pp.format(
+                        data=df_filt,
+                        list_out=[
+                            "eccentricity", "perimeter", "convex_area",
+                            "axis_major_length", "axis_minor_length", "label",
+                        ],
+                        list_keep=["DAPI", "x", "y", "area", "image_ID", "experiment_group", "slide_folder"],
+                        method="zscore",
+                    )
+
+                    col_num = _get_last_marker_col(df_norm, last_marker)
+
+                    # ── Noise removal ────────────────────────────────────
+                    print(f"  Detecting noise cutoffs (last marker col: {col_num})…")
+                    z_count_cut, z_sum_cut = auto_detect_cutoffs(
+                        df_norm, col_num,
+                        cut_off=noise_cut_off,
+                        count_bin=noise_bins,
+                    )
+                    print(f"  Cutoffs — z_count: {z_count_cut:.2f}, z_sum: {z_sum_cut:.2f}")
+
+                    tissue_stats["z_count_cutoff"] = z_count_cut
+                    tissue_stats["z_sum_cutoff"]   = z_sum_cut
+
+                    df_clean, _ = sp.pp.remove_noise(
+                        df=df_norm,
+                        col_num=col_num,
+                        z_count_thres=z_count_cut,
+                        z_sum_thres=z_sum_cut,
+                    )
+                    n_after_noise  = df_clean.shape[0]
+                    n_removed_noise = df_norm.shape[0] - n_after_noise
+                    print(f"  After noise removal: {n_after_noise} cells  "
+                          f"(removed {n_removed_noise}, "
+                          f"{n_removed_noise / df_norm.shape[0] * 100:.2f}%)")
+
+                    total_removed = df.shape[0] - n_after_noise
+                    tissue_stats.update({
+                        "cells_after_noise_removal":  n_after_noise,
+                        "cells_removed_by_noise":     n_removed_noise,
+                        "percent_removed_by_noise":   n_removed_noise / df_norm.shape[0] * 100,
+                        "total_cells_removed":        total_removed,
+                        "total_percent_removed":      total_removed / df.shape[0] * 100,
+                        "final_cells":                n_after_noise,
+                        "status":                     "PROCESSED",
+                    })
+                    processing_stats.append(tissue_stats)
 
                     all_processed_tissues.setdefault(tissue_id, []).append({
                         "data":      df_clean,
-                        "condition": condition,
+                        "experiment_group": experiment_group,
                         "image_id":  image_id,
                         "col_num":   col_num,
-                        "skipped":   True,
+                        "skipped":   False,
                     })
+                    print(f"  ✓ Processed {image_id}")
+
+                except Exception as exc:
+                    print(f"  ✗ Error: {exc}")
+                    tissue_stats["status"] = f"ERROR: {exc}"
+                    processing_stats.append(tissue_stats)
+                    processing_errors.append({
+                        "file":     file_path,
+                        "image_id": tissue_stats.get("image_id", csv_file),
+                        "error":    str(exc),
+                    })
+                    import traceback; traceback.print_exc()
+
+        # ── Save per-experiment_group + combined files ─────────────────────
+        print(f"\n{'=' * 80}\nSAVING PROCESSED TISSUES\n{'=' * 80}")
+
+        for tissue_id, tissue_list in all_processed_tissues.items():
+            print(f"\n--- {tissue_id} ---")
+            any_new = any(not t.get("skipped", False) for t in tissue_list)
+
+            # Per-experiment_group
+            for tinfo in tissue_list:
+                if tinfo.get("skipped"):
+                    print(f"  ⏭️  {tinfo['experiment_group']} already on disk")
+                    continue
+                cond     = tinfo["experiment_group"]
+                df_cond  = tinfo["data"]
+                col_num  = tinfo["col_num"]
+
+                csv_out = os.path.join(tissues_dir, f"{tissue_id}_{cond}.csv")
+                df_cond.to_csv(csv_out, index=False)
+
+                h5ad_out = os.path.join(tissues_dir, f"{tissue_id}_{cond}.h5ad")
+                adata = sp.hf.make_anndata(df_nn=df_cond, col_sum=col_num, nonFuncAb_list=[])
+                adata.write_h5ad(h5ad_out)
+                print(f"  ✓ Saved {cond}: {df_cond.shape[0]} cells")
+
+            # Combined — scan disk for all experiment_group CSVs (handles partial runs)
+            combined_csv = os.path.join(tissues_dir, f"{tissue_id}_combined_all_experiment_groups.csv")
+            combined_exists = os.path.exists(combined_csv)
+            unique_experiment_groups = list({t["experiment_group"] for t in tissue_list})
+
+            if combined_exists and not any_new and len(unique_experiment_groups) == 1:
+                print(f"  ⏭️  Combined already exists, no new data")
+                continue
+
+            disk_dfs = []
+            for cond in experiment_groups + ["Unknown"]:
+                cond_csv = os.path.join(tissues_dir, f"{tissue_id}_{cond}.csv")
+                if os.path.exists(cond_csv):
+                    df_c = pd.read_csv(cond_csv)
+                    df_c["experiment_group"] = cond   # ensure correct label
+                    disk_dfs.append(df_c)
+                    print(f"  + {cond}: {len(df_c)} cells")
+
+            if not disk_dfs:
+                print(f"  ⚠️  No experiment_group files found on disk — skipping combined")
+                continue
+
+            combined_df = pd.concat(disk_dfs, ignore_index=True)
+            combined_df.to_csv(combined_csv, index=False)
+
+            col_num = tissue_list[0]["col_num"]
+            adata_combined = sp.hf.make_anndata(
+                df_nn=combined_df, col_sum=col_num, nonFuncAb_list=[]
+            )
+            adata_combined_path = os.path.join(
+                tissues_dir, f"{tissue_id}_combined_all_experiment_groups.h5ad"
+            )
+            adata_combined.write_h5ad(adata_combined_path)
+            print(f"  ✓ Combined: {len(combined_df)} cells → {adata_combined_path}")
+
+        # ── Marker visualisations ───────────────────────────────────────────
+        print(f"\n{'=' * 80}\nGENERATING VISUALISATIONS\n{'=' * 80}")
+
+        for tissue_id, tissue_list in all_processed_tissues.items():
+            for tinfo in tissue_list:
+                image_id  = tinfo["image_id"]
+                experiment_group = tinfo["experiment_group"]
+                df_tissue = tinfo["data"]
+                safe_id   = tissue_id.replace("/", "_").replace(" ", "_")
+
+                viz_path = os.path.join(viz_dir, f"{safe_id}_{experiment_group}_all_markers.png")
+                if os.path.exists(viz_path):
+                    print(f"  ⏭️  Viz already exists: {safe_id}_{experiment_group}")
                     continue
 
-                # ── QC: size + DAPI filter ──────────────────────────────
-                area_thresh = np.percentile(df["area"], size_pct)
-                dapi_thresh = np.percentile(df["DAPI"],  dapi_pct)
-                print(f"  {size_pct}% thresholds — area: {area_thresh:.2f}, DAPI: {dapi_thresh:.2f}")
+                if image_id not in overlay_mapping:
+                    print(f"  ⚠️  No overlay data for {image_id} — skipping viz")
+                    continue
 
-                tissue_stats["area_threshold"] = area_thresh
-                tissue_stats["dapi_threshold"] = dapi_thresh
+                overlay = overlay_mapping[image_id]
+                if "img" not in overlay:
+                    print(f"  ⚠️  No 'img' key in overlay for {image_id} — skipping viz")
+                    continue
 
-                df_filt = sp.pp.filter_data(
-                    df,
-                    nuc_thres=dapi_thresh,
-                    size_thres=area_thresh,
-                    nuc_marker="DAPI",
-                    cell_size="area",
-                    log_scale=False,
-                )
-                n_after_filt = df_filt.shape[0]
-                n_removed_filt = df.shape[0] - n_after_filt
-                print(f"  After filter: {n_after_filt} cells  "
-                      f"(removed {n_removed_filt}, "
-                      f"{n_removed_filt / df.shape[0] * 100:.2f}%)")
+                METADATA = {
+                    "label", "area", "x", "y", "slide_folder", "image_ID", "experiment_group",
+                    "eccentricity", "perimeter", "convex_area",
+                    "axis_major_length", "axis_minor_length", "DAPI",
+                }
+                all_markers = [c for c in df_tissue.columns if c not in METADATA]
+                if not all_markers:
+                    continue
 
-                tissue_stats.update({
-                    "cells_after_size_dapi_filter": n_after_filt,
-                    "cells_removed_by_filter":      n_removed_filt,
-                    "percent_removed_by_filter":    n_removed_filt / df.shape[0] * 100,
-                })
+                n_cols = 5
+                n_rows = int(np.ceil(len(all_markers) / n_cols))
+                fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 4, n_rows * 4))
+                fig.suptitle(f"{tissue_id} – {experiment_group} – All Markers", fontsize=16)
+                axes_flat = np.array(axes).flatten()
 
-                # ── Normalisation ───────────────────────────────────────
-                print("  Normalising (z-score)…")
-                df_norm = sp.pp.format(
-                    data=df_filt,
-                    list_out=[
-                        "eccentricity", "perimeter", "convex_area",
-                        "axis_major_length", "axis_minor_length", "label",
-                    ],
-                    list_keep=["DAPI", "x", "y", "area", "image_ID", "condition", "slide_folder"],
-                    method="zscore",
-                )
+                for i, marker in enumerate(all_markers):
+                    ax = axes_flat[i]
+                    ax.imshow(overlay["img"], cmap="gray")
+                    sc = ax.scatter(
+                        df_tissue["x"], df_tissue["y"],
+                        c=df_tissue[marker], s=2, cmap="viridis", alpha=0.7,
+                        vmin=df_tissue[marker].quantile(0.01),
+                        vmax=df_tissue[marker].quantile(0.99),
+                    )
+                    plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+                    ax.set_title(marker, fontsize=10)
+                    ax.axis("off")
 
-                col_num = _get_last_marker_col(df_norm, last_marker)
+                for j in range(i + 1, len(axes_flat)):
+                    axes_flat[j].axis("off")
 
-                # ── Noise removal ───────────────────────────────────────
-                print(f"  Detecting noise cutoffs (last marker col: {col_num})…")
-                z_count_cut, z_sum_cut = auto_detect_cutoffs(
-                    df_norm, col_num,
-                    cut_off=noise_cut_off,
-                    count_bin=noise_bins,
-                )
-                print(f"  Cutoffs — z_count: {z_count_cut:.2f}, z_sum: {z_sum_cut:.2f}")
+                plt.tight_layout()
+                plt.savefig(viz_path, dpi=150, bbox_inches="tight")
+                plt.close()
+                print(f"  ✓ Saved viz: {viz_path}")
 
-                tissue_stats["z_count_cutoff"] = z_count_cut
-                tissue_stats["z_sum_cutoff"]   = z_sum_cut
+        # ── Save processing statistics ──────────────────────────────────────
+        stats_df   = pd.DataFrame(processing_stats)
+        stats_path = os.path.join(log_dir, f"processing_stats_{timestamp}.csv")
+        stats_df.to_csv(stats_path, index=False)
 
-                df_clean, _ = sp.pp.remove_noise(
-                    df=df_norm,
-                    col_num=col_num,
-                    z_count_thres=z_count_cut,
-                    z_sum_thres=z_sum_cut,
-                )
-                n_after_noise  = df_clean.shape[0]
-                n_removed_noise = df_norm.shape[0] - n_after_noise
-                print(f"  After noise removal: {n_after_noise} cells  "
-                      f"(removed {n_removed_noise}, "
-                      f"{n_removed_noise / df_norm.shape[0] * 100:.2f}%)")
+        # ── Summary ──────────────────────────────────────────────────────────
+        print(f"\n{'=' * 80}\nSUMMARY\n{'=' * 80}")
+        print(f"Unique tissues processed: {len(all_processed_tissues)}")
+        if len(stats_df) > 0:
+            done  = stats_df[stats_df["status"] == "PROCESSED"]
+            skip  = stats_df[stats_df.get("status", pd.Series()).str.contains("SKIPPED", na=False)]
+            errs  = stats_df[stats_df.get("status", pd.Series()).str.contains("ERROR",   na=False)]
+            print(f"  Processed: {len(done)}   Skipped: {len(skip)}   Errors: {len(errs)}")
+            if len(done) > 0:
+                print(f"  Avg total removal: {done['total_percent_removed'].mean():.2f}%")
 
-                total_removed = df.shape[0] - n_after_noise
-                tissue_stats.update({
-                    "cells_after_noise_removal":  n_after_noise,
-                    "cells_removed_by_noise":     n_removed_noise,
-                    "percent_removed_by_noise":   n_removed_noise / df_norm.shape[0] * 100,
-                    "total_cells_removed":        total_removed,
-                    "total_percent_removed":      total_removed / df.shape[0] * 100,
-                    "final_cells":                n_after_noise,
-                    "status":                     "PROCESSED",
-                })
-                processing_stats.append(tissue_stats)
+        # Unconditional errors summary -- same aggregation pattern as
+        # segmentation.py's run_cell_segmentation(): printed every run
+        # (not just on failure) and exposed in the return dict, not just
+        # buried in a per-row status string in processing_stats.
+        print(f"\nPreprocessing summary: {len(processing_stats) - len(processing_errors)} succeeded, "
+              f"{len(processing_errors)} failed out of {len(processing_stats)} attempted.")
+        if processing_errors:
+            print(f"⚠️  {len(processing_errors)} image(s) FAILED preprocessing and produced no output:")
+            for err in processing_errors:
+                print(f"   {err['image_id']}: {err['error']}")
 
-                all_processed_tissues.setdefault(tissue_id, []).append({
-                    "data":      df_clean,
-                    "condition": condition,
-                    "image_id":  image_id,
-                    "col_num":   col_num,
-                    "skipped":   False,
-                })
-                print(f"  ✓ Processed {image_id}")
+        print(f"\nOutput locations:")
+        print(f"  Tissues:  {tissues_dir}")
+        print(f"  Viz:      {viz_dir}")
+        print(f"  Logs:     {log_dir}")
+        print(f"\nProcessing complete: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("=" * 80)
 
-            except Exception as exc:
-                print(f"  ✗ Error: {exc}")
-                tissue_stats["status"] = f"ERROR: {exc}"
-                processing_stats.append(tissue_stats)
-                import traceback; traceback.print_exc()
-
-    # ── Save per-condition + combined files ───────────────────────────────
-    print(f"\n{'=' * 80}\nSAVING PROCESSED TISSUES\n{'=' * 80}")
-
-    for tissue_id, tissue_list in all_processed_tissues.items():
-        print(f"\n--- {tissue_id} ---")
-        any_new = any(not t.get("skipped", False) for t in tissue_list)
-
-        # Per-condition
-        for tinfo in tissue_list:
-            if tinfo.get("skipped"):
-                print(f"  ⏭️  {tinfo['condition']} already on disk")
-                continue
-            cond     = tinfo["condition"]
-            df_cond  = tinfo["data"]
-            col_num  = tinfo["col_num"]
-
-            csv_out = os.path.join(tissues_dir, f"{tissue_id}_{cond}.csv")
-            df_cond.to_csv(csv_out, index=False)
-
-            h5ad_out = os.path.join(tissues_dir, f"{tissue_id}_{cond}.h5ad")
-            adata = sp.hf.make_anndata(df_nn=df_cond, col_sum=col_num, nonFuncAb_list=[])
-            adata.write_h5ad(h5ad_out)
-            print(f"  ✓ Saved {cond}: {df_cond.shape[0]} cells")
-
-        # Combined — scan disk for all condition CSVs (handles partial runs)
-        combined_csv = os.path.join(tissues_dir, f"{tissue_id}_combined_all_conditions.csv")
-        combined_exists = os.path.exists(combined_csv)
-        unique_conditions = list({t["condition"] for t in tissue_list})
-
-        if combined_exists and not any_new and len(unique_conditions) == 1:
-            print(f"  ⏭️  Combined already exists, no new data")
-            continue
-
-        disk_dfs = []
-        for cond in conditions + ["Unknown"]:
-            cond_csv = os.path.join(tissues_dir, f"{tissue_id}_{cond}.csv")
-            if os.path.exists(cond_csv):
-                df_c = pd.read_csv(cond_csv)
-                df_c["condition"] = cond   # ensure correct label
-                disk_dfs.append(df_c)
-                print(f"  + {cond}: {len(df_c)} cells")
-
-        if not disk_dfs:
-            print(f"  ⚠️  No condition files found on disk — skipping combined")
-            continue
-
-        combined_df = pd.concat(disk_dfs, ignore_index=True)
-        combined_df.to_csv(combined_csv, index=False)
-
-        col_num = tissue_list[0]["col_num"]
-        adata_combined = sp.hf.make_anndata(
-            df_nn=combined_df, col_sum=col_num, nonFuncAb_list=[]
-        )
-        adata_combined_path = os.path.join(
-            tissues_dir, f"{tissue_id}_combined_all_conditions.h5ad"
-        )
-        adata_combined.write_h5ad(adata_combined_path)
-        print(f"  ✓ Combined: {len(combined_df)} cells → {adata_combined_path}")
-
-    # ── Marker visualisations ─────────────────────────────────────────────
-    print(f"\n{'=' * 80}\nGENERATING VISUALISATIONS\n{'=' * 80}")
-
-    for tissue_id, tissue_list in all_processed_tissues.items():
-        for tinfo in tissue_list:
-            image_id  = tinfo["image_id"]
-            condition = tinfo["condition"]
-            df_tissue = tinfo["data"]
-            safe_id   = tissue_id.replace("/", "_").replace(" ", "_")
-
-            viz_path = os.path.join(viz_dir, f"{safe_id}_{condition}_all_markers.png")
-            if os.path.exists(viz_path):
-                print(f"  ⏭️  Viz already exists: {safe_id}_{condition}")
-                continue
-
-            if image_id not in overlay_mapping:
-                print(f"  ⚠️  No overlay data for {image_id} — skipping viz")
-                continue
-
-            overlay = overlay_mapping[image_id]
-            if "img" not in overlay:
-                print(f"  ⚠️  No 'img' key in overlay for {image_id} — skipping viz")
-                continue
-
-            METADATA = {
-                "label", "area", "x", "y", "slide_folder", "image_ID", "condition",
-                "eccentricity", "perimeter", "convex_area",
-                "axis_major_length", "axis_minor_length", "DAPI",
-            }
-            all_markers = [c for c in df_tissue.columns if c not in METADATA]
-            if not all_markers:
-                continue
-
-            n_cols = 5
-            n_rows = int(np.ceil(len(all_markers) / n_cols))
-            fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 4, n_rows * 4))
-            fig.suptitle(f"{tissue_id} – {condition} – All Markers", fontsize=16)
-            axes_flat = np.array(axes).flatten()
-
-            for i, marker in enumerate(all_markers):
-                ax = axes_flat[i]
-                ax.imshow(overlay["img"], cmap="gray")
-                sc = ax.scatter(
-                    df_tissue["x"], df_tissue["y"],
-                    c=df_tissue[marker], s=2, cmap="viridis", alpha=0.7,
-                    vmin=df_tissue[marker].quantile(0.01),
-                    vmax=df_tissue[marker].quantile(0.99),
-                )
-                plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
-                ax.set_title(marker, fontsize=10)
-                ax.axis("off")
-
-            for j in range(i + 1, len(axes_flat)):
-                axes_flat[j].axis("off")
-
-            plt.tight_layout()
-            plt.savefig(viz_path, dpi=150, bbox_inches="tight")
-            plt.close()
-            print(f"  ✓ Saved viz: {viz_path}")
-
-    # ── Save processing statistics ────────────────────────────────────────
-    stats_df   = pd.DataFrame(processing_stats)
-    stats_path = os.path.join(log_dir, f"processing_stats_{timestamp}.csv")
-    stats_df.to_csv(stats_path, index=False)
-
-    # ── Summary ───────────────────────────────────────────────────────────
-    print(f"\n{'=' * 80}\nSUMMARY\n{'=' * 80}")
-    print(f"Unique tissues processed: {len(all_processed_tissues)}")
-    if len(stats_df) > 0:
-        done  = stats_df[stats_df["status"] == "PROCESSED"]
-        skip  = stats_df[stats_df.get("status", pd.Series()).str.contains("SKIPPED", na=False)]
-        errs  = stats_df[stats_df.get("status", pd.Series()).str.contains("ERROR",   na=False)]
-        print(f"  Processed: {len(done)}   Skipped: {len(skip)}   Errors: {len(errs)}")
-        if len(done) > 0:
-            print(f"  Avg total removal: {done['total_percent_removed'].mean():.2f}%")
-
-    print(f"\nOutput locations:")
-    print(f"  Tissues:  {tissues_dir}")
-    print(f"  Viz:      {viz_dir}")
-    print(f"  Logs:     {log_dir}")
-    print(f"\nProcessing complete: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 80)
-
-    # Restore stdout
-    dual_log.close()
-    sys.stdout = dual_log.terminal
-
-    return {
-        "all_processed_tissues": all_processed_tissues,
-        "processing_stats":      processing_stats,
-        "output_dir":            out_dir,
-    }
+        return {
+            "all_processed_tissues": all_processed_tissues,
+            "processing_stats":      processing_stats,
+            "processing_errors":     processing_errors,
+            "output_dir":            out_dir,
+        }
+    finally:
+        dual_log.close()
+        sys.stdout = dual_log.terminal
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -657,13 +750,14 @@ def run_qupath_export(cfg: dict) -> str:
     Generate per-image QuPath TSV files and QC visualisations.
 
     Requires run_preprocessing() to have already been executed
-    (reads per-condition CSVs from individual_processed_data/).
+    (reads per-experiment_group CSVs from individual_processed_data/).
 
     Returns
     -------
     Path to qupath_exports/ directory.
     """
-    conditions = cfg["experiment"]["conditions"]
+    experiment_groups = cfg["experiment"]["groups"]
+    image_experiment_group_map = cfg["experiment"].get("image_experiment_group_map", {})
     seg_dir    = cfg["paths"]["segmentation_results_dir"]
     base_out   = cfg["paths"]["output_dir"]
 
@@ -711,14 +805,16 @@ def run_qupath_export(cfg: dict) -> str:
         for csv_file in csv_files:
             df_raw = pd.read_csv(os.path.join(slide_dir, csv_file))
             image_id  = csv_file.replace("_mesmer_result.csv", "").replace("mesmer_result.csv", "")
-            condition = detect_condition(image_id, conditions)
-            tissue_id = extract_tissue_identifier(image_id, conditions)
+            experiment_group = resolve_experiment_group(
+                image_id, slide_folder, image_experiment_group_map, experiment_groups
+            )
+            tissue_id = extract_tissue_identifier(image_id, experiment_groups)
 
             df_raw["image_ID"]  = image_id
-            df_raw["condition"] = condition
+            df_raw["experiment_group"] = experiment_group
 
             # Load processed (included) cells
-            proc_csv = os.path.join(tissues_dir, f"{tissue_id}_{condition}.csv")
+            proc_csv = os.path.join(tissues_dir, f"{tissue_id}_{experiment_group}.csv")
             if not os.path.exists(proc_csv):
                 print(f"⚠️  Processed file not found: {proc_csv}  — run preprocessing first")
                 continue
@@ -752,7 +848,7 @@ def run_qupath_export(cfg: dict) -> str:
             tsv_cols = [
                 "centroid_x", "centroid_y", "roi_x", "roi_y",
                 "roi_width", "roi_height", "area", "DAPI",
-                "condition", "image_ID", "tissue_id",
+                "experiment_group", "image_ID", "tissue_id",
                 "classification", "area_threshold", "dapi_threshold",
             ]
             safe_id  = image_id.replace("/", "_").replace(" ", "_")
@@ -765,7 +861,7 @@ def run_qupath_export(cfg: dict) -> str:
 
             summary_records.append({
                 "tissue_id": tissue_id,
-                "condition": condition,
+                "experiment_group": experiment_group,
                 "total_raw": len(df_raw),
                 "tsv_file":  os.path.basename(tsv_path),
                 **counts,
@@ -776,7 +872,7 @@ def run_qupath_export(cfg: dict) -> str:
 
             # Panel 1: spatial inclusion/exclusion
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
-            fig.suptitle(f"{tissue_id} – {condition} QC", fontsize=14)
+            fig.suptitle(f"{tissue_id} – {experiment_group} QC", fontsize=14)
             for ax, subset, title in [
                 (ax1, df_raw[df_raw["classification"] == "Included"], "Included"),
                 (ax2, df_raw[df_raw["classification"] != "Included"], "Excluded"),
@@ -802,7 +898,7 @@ def run_qupath_export(cfg: dict) -> str:
                 ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + total * 0.005,
                         f"{val}\n({val/total*100:.1f}%)", ha="center", va="bottom", fontsize=9)
             ax.set_ylabel("Cell count")
-            ax.set_title(f"{tissue_id} – {condition} QC breakdown")
+            ax.set_title(f"{tissue_id} – {experiment_group} QC breakdown")
             plt.xticks(rotation=15, ha="right")
             plt.tight_layout()
             plt.savefig(os.path.join(qcviz_dir, f"{safe_id}_QC_barchart.png"), dpi=120, bbox_inches="tight")
@@ -819,7 +915,7 @@ def run_qupath_export(cfg: dict) -> str:
             ax.axhline(dapi_thresh, color="gray",  linestyle="--", linewidth=1, label="DAPI threshold")
             ax.set_xlabel("Cell area")
             ax.set_ylabel("DAPI intensity")
-            ax.set_title(f"{tissue_id} – {condition} DAPI vs Area")
+            ax.set_title(f"{tissue_id} – {experiment_group} DAPI vs Area")
             ax.legend(markerscale=5, fontsize=8, loc="upper right")
             plt.tight_layout()
             plt.savefig(os.path.join(qcviz_dir, f"{safe_id}_QC_dapi_vs_area.png"), dpi=120, bbox_inches="tight")

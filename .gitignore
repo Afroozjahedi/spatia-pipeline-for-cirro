@@ -20,8 +20,25 @@
 
 !run_pipeline.py
 
+# Dataset-agnostic prep script for survival.py's image_patient_map (TMA cohorts)
+!build_image_patient_map.py
+
 !cell_type_definitions/
 !cell_type_definitions/*.yaml
 
 !experiments/
 !experiments/*.yaml
+
+# Docs for the core pipeline steps only (not ui/, run_agentic.py's agentic
+# layer, or validation.py — those aren't tracked in this whitelist repo).
+!docs/
+!docs/README.md
+!docs/spatia_analysis_tif_conversion.md
+!docs/spatia_analysis_roi_masking.md
+!docs/spatia_analysis_segmentation.md
+!docs/spatia_analysis_preprocessing.md
+!docs/spatia_analysis_cell_typing.md
+!docs/spatia_analysis_triads.md
+!docs/spatia_analysis_functional.md
+!docs/spatia_analysis_survival.md
+!docs/build_image_patient_map.md
