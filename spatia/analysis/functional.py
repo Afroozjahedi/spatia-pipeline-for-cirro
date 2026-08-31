@@ -11,12 +11,12 @@ Recomputes in-triad membership at the functional reporting radius (which can be
 tighter than the search radius used during detection) and then, for each configured
 cell type, compares marker expression:
 
-  1. In-triad vs not-in-triad  (violin + Mann-Whitney U, all conditions pooled)
-  2. Condition A vs condition B within in-triad cells only  (CLR vs DII, etc.)
+  1. In-triad vs not-in-triad  (violin + Mann-Whitney U, all experiment_groups pooled)
+  2. Experiment group A vs experiment group B within in-triad cells only  (CLR vs DII, etc.)
 
 Outputs land in {output_dir}/functional_analysis/:
   functional_{CellType}_intriad_vs_out.png
-  functional_{CellType}_condition_compare.png
+  functional_{CellType}_experiment_group_compare.png
   functional_marker_summary.csv
 
 Usage (standalone pipeline step)
@@ -46,10 +46,10 @@ from scipy.stats import mannwhitneyu
 
 # ── Config helpers (mirrors triads.py) ───────────────────────────────────────
 
-def _get_condition(image_id: str, image_condition_map: dict, conditions: list) -> str:
-    if image_id in image_condition_map:
-        return image_condition_map[image_id]
-    for cond in conditions:
+def _get_experiment_group(image_id: str, image_experiment_group_map: dict, experiment_groups: list) -> str:
+    if image_id in image_experiment_group_map:
+        return image_experiment_group_map[image_id]
+    for cond in experiment_groups:
         if image_id.upper().startswith(cond.upper()):
             return cond
     return "Unknown"
@@ -95,8 +95,8 @@ def run_functional_analysis(cfg: dict) -> None:
     Reads triads step outputs from output_dir — run after the triads step.
     """
     exp_name     = cfg["experiment"]["name"]
-    conditions   = cfg["experiment"]["conditions"]
-    img_cond_map = cfg["experiment"].get("image_condition_map", {})
+    experiment_groups   = cfg["experiment"]["groups"]
+    img_group_map = cfg["experiment"].get("image_experiment_group_map", {})
     output_dir   = cfg["paths"]["output_dir"]
 
     func_cfg = cfg.get("analysis", {}).get("functional", {})
@@ -104,7 +104,15 @@ def run_functional_analysis(cfg: dict) -> None:
         print("[functional] disabled in config — skipping.")
         return
 
-    markers        = func_cfg.get("markers", {})
+    # `markers` is the shared/default marker set. Optional per-role overrides
+    # (markers_anchor/markers_partner1/markers_partner2) let you check a
+    # different marker panel per cell-type role — e.g. exhaustion markers on
+    # a T-cell partner but maturation markers on a DC anchor. A role with no
+    # override falls back to the shared `markers` dict unchanged.
+    markers           = func_cfg.get("markers", {})
+    markers_anchor    = func_cfg.get("markers_anchor",   markers)
+    markers_partner1  = func_cfg.get("markers_partner1", markers)
+    markers_partner2  = func_cfg.get("markers_partner2", markers)
     func_radius    = func_cfg.get("report_radius_um", 20.0)
     t_cfg          = cfg.get("analysis", {}).get("triad", {})
     anchor_type    = t_cfg.get("anchor_type",    "anchor")
@@ -114,17 +122,30 @@ def run_functional_analysis(cfg: dict) -> None:
     partner1_name  = t_cfg.get("partner_1_name", partner1_type)
     partner2_name  = t_cfg.get("partner_2_name", partner2_type)
 
-    if not markers:
-        print("[functional] No markers configured — add analysis.functional.markers to YAML.")
+    if not (t_cfg.get("anchor_type") and t_cfg.get("partner_type_1") and t_cfg.get("partner_type_2")):
+        print("[functional] ⚠️  analysis.triad.anchor_type/partner_type_1/partner_type_2 are not "
+              "all set — cell_type will never match the placeholder values "
+              f"('{anchor_type}'/'{partner1_type}'/'{partner2_type}'), so this run will find 0 "
+              "cells for every role and produce no output. Set all three in the config.")
+
+    if not (markers_anchor or markers_partner1 or markers_partner2):
+        print("[functional] No markers configured — add analysis.functional.markers (shared) "
+              "or markers_anchor/markers_partner1/markers_partner2 (per-role) to YAML.")
         return
 
     func_out = os.path.join(output_dir, "functional_analysis")
     os.makedirs(func_out, exist_ok=True)
 
     print(f"[functional] Experiment  : {exp_name}")
-    print(f"[functional] Conditions  : {conditions}")
+    print(f"[functional] Experiment groups  : {experiment_groups}")
     print(f"[functional] Func radius : {func_radius} µm")
-    print(f"[functional] Markers     : {list(markers.keys())}")
+    print(f"[functional] Markers (shared) : {list(markers.keys())}")
+    if markers_anchor is not markers:
+        print(f"[functional]   anchor override   : {list(markers_anchor.keys())}")
+    if markers_partner1 is not markers:
+        print(f"[functional]   partner1 override : {list(markers_partner1.keys())}")
+    if markers_partner2 is not markers:
+        print(f"[functional]   partner2 override : {list(markers_partner2.keys())}")
     print(f"[functional] Input dir   : {output_dir}\n")
 
     # ── Discover per-image cells files ────────────────────────────────────────
@@ -144,7 +165,7 @@ def run_functional_analysis(cfg: dict) -> None:
         basename = os.path.basename(cell_path)
         # e.g. CLR_reg001_A_cells_with_triad_flags.csv → CLR_reg001_A
         image_id = basename.replace("_cells_with_triad_flags.csv", "")
-        condition = _get_condition(image_id, img_cond_map, conditions)
+        experiment_group = _get_experiment_group(image_id, img_group_map, experiment_groups)
 
         # Load cell-level data (contains all original columns if KEEP_INTENSITIES=True)
         try:
@@ -162,8 +183,9 @@ def run_functional_analysis(cfg: dict) -> None:
         if os.path.exists(pairs_path):
             try:
                 triad_pairs = pd.read_csv(pairs_path)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"  ⚠️  Could not read {os.path.basename(pairs_path)}: {e} — "
+                      f"treating {image_id} as having no in-triad cells (not 'no triads found').")
 
         # Recompute in-triad flags at func_radius (tighter than search radius)
         if not triad_pairs.empty and "dist_anchor_p1_um" in triad_pairs.columns:
@@ -188,7 +210,7 @@ def run_functional_analysis(cfg: dict) -> None:
             df["_in_triad_partner2"] = cid.isin(p2_ids)
 
         df["image_id"]  = image_id
-        df["condition"] = condition
+        df["experiment_group"] = experiment_group
         all_cell_dfs.append(df)
 
     if not all_cell_dfs:
@@ -199,33 +221,33 @@ def run_functional_analysis(cfg: dict) -> None:
     print(f"[functional] Aggregated {len(all_cells):,} cells from {len(all_cell_dfs)} images\n")
 
     # ── Per-cell-type analysis ────────────────────────────────────────────────
-    COND_COLORS = dict(zip(
-        conditions,
+    GROUP_COLORS = dict(zip(
+        experiment_groups,
         ["#2196F3", "#F44336", "#4CAF50", "#FF9800", "#9C27B0"],
     ))
     COLOR_OUT = "#1f77b4"   # blue — out of triad
     COLOR_IN  = "#ff7f0e"   # orange — in triad
 
     cell_role_map = [
-        (anchor_type,   anchor_name,   "_in_triad_anchor"),
-        (partner1_type, partner1_name, "_in_triad_partner1"),
-        (partner2_type, partner2_name, "_in_triad_partner2"),
+        (anchor_type,   anchor_name,   "_in_triad_anchor",   markers_anchor),
+        (partner1_type, partner1_name, "_in_triad_partner1", markers_partner1),
+        (partner2_type, partner2_name, "_in_triad_partner2", markers_partner2),
     ]
 
     all_summary = []
 
-    for cell_type, display_name, flag_col in cell_role_map:
+    for cell_type, display_name, flag_col, role_markers in cell_role_map:
         cells = all_cells[all_cells["cell_type"] == cell_type].copy()
         if cells.empty:
             print(f"[functional] ⚠️  No {display_name} cells — skipping.")
             continue
 
-        avail   = {n: c for n, c in markers.items() if c in cells.columns}
-        missing = [n for n in markers if n not in avail]
+        avail   = {n: c for n, c in role_markers.items() if c in cells.columns}
+        missing = [n for n in role_markers if n not in avail]
         if missing:
             print(f"[functional]   Marker columns not found for {display_name}: {missing}")
-            print(f"[functional]   (Re-run prepare_crc_data.py with KEEP_INTENSITIES=True, "
-                  f"then re-run the triads step.)")
+            print(f"[functional]   (Your data-prep step must keep marker intensity columns — "
+                  f"e.g. prepare_crc_data.py's KEEP_INTENSITIES=True — then re-run the triads step.)")
         if not avail:
             print(f"[functional] ⚠️  No usable marker columns for {display_name} — skipping.")
             continue
@@ -281,25 +303,25 @@ def run_functional_analysis(cfg: dict) -> None:
         )
         plt.close(fig1)
 
-        # ── Plot 2: condition comparison within in-triad cells ────────────────
-        if len(conditions) >= 2 and "condition" in cells.columns and n_in >= 6:
-            cond_sub    = {c: in_triad[in_triad["condition"] == c] for c in conditions}
-            valid_conds = [c for c in conditions if len(cond_sub[c]) >= 3]
+        # ── Plot 2: experiment_group comparison within in-triad cells ────────────────
+        if len(experiment_groups) >= 2 and "experiment_group" in cells.columns and n_in >= 6:
+            group_sub    = {c: in_triad[in_triad["experiment_group"] == c] for c in experiment_groups}
+            valid_groups = [c for c in experiment_groups if len(group_sub[c]) >= 3]
 
-            if len(valid_conds) >= 2:
+            if len(valid_groups) >= 2:
                 fig2, axes2 = plt.subplots(1, n_m, figsize=(max(4 * n_m, 8), 6))
                 axes2 = [axes2] if n_m == 1 else list(axes2)
 
-                cA, cB = valid_conds[0], valid_conds[1]
+                cA, cB = valid_groups[0], valid_groups[1]
                 for ax, (marker_name, col) in zip(axes2, avail.items()):
-                    vA = cond_sub[cA][col].dropna().values.astype(float)
-                    vB = cond_sub[cB][col].dropna().values.astype(float)
+                    vA = group_sub[cA][col].dropna().values.astype(float)
+                    vB = group_sub[cB][col].dropna().values.astype(float)
 
                     stat2, pval2, sig2 = _violin_pair(
                         ax, vA, vB,
                         label_a=cA, label_b=cB,
-                        color_a=COND_COLORS.get(cA, "#888"),
-                        color_b=COND_COLORS.get(cB, "#888"),
+                        color_a=GROUP_COLORS.get(cA, "#888"),
+                        color_b=GROUP_COLORS.get(cB, "#888"),
                         title=marker_name,
                     )
                     all_summary.append({
@@ -327,7 +349,7 @@ def run_functional_analysis(cfg: dict) -> None:
                 )
                 plt.tight_layout()
                 fig2.savefig(
-                    os.path.join(func_out, f"functional_{display_name}_condition_compare.png"),
+                    os.path.join(func_out, f"functional_{display_name}_experiment_group_compare.png"),
                     dpi=150, bbox_inches="tight",
                 )
                 plt.close(fig2)

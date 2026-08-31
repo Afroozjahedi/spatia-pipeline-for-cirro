@@ -41,4 +41,14 @@
 !docs/spatia_analysis_triads.md
 !docs/spatia_analysis_functional.md
 !docs/spatia_analysis_survival.md
+!docs/spatia_analysis_functional.md
 !docs/build_image_patient_map.md
+
+# QuPath/Groovy scripts themselves stay untracked by design (see header
+# above) — these are docs *about* them, kept in git for reference.
+!docs/export_triads_for_qupath.md
+!docs/qupath_00_roi_extract_mask_project.md
+!docs/qupath_00b_auto_tma_dearray.md
+!docs/qupath_05-4-1_segmentation_boundaries_visualization.md
+!docs/qupath_05-4-2_celltyping_visualization.md
+!docs/qupath_07-2_triad_visualization.md
