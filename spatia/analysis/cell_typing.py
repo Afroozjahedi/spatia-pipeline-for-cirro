@@ -25,6 +25,35 @@ CD45 gating note
 Semi-auto mode historically used cd45_std_multiplier=8 (very tight gate).
 Auto mode used cd45_std_multiplier=3 (more permissive).
 Both are now explicit config parameters so the choice is intentional and documented.
+
+Threshold mode note (2026-08-19)
+---------------------------------
+Two ways to turn a fitted 2-component GMM into a positive/negative call,
+selected via gmm.threshold_mode:
+
+  "std_multiplier" (default -- unchanged prior behavior)
+    threshold = mean_low + std_multiplier * std_low
+    A cell is positive if its value is above this single scalar cutoff.
+    Simple, but only looks at the negative component's mean/std -- the
+    positive component's own shape and the relative size of the two
+    populations never factor in.
+
+  "posterior"
+    A cell is positive if its GMM posterior probability of belonging to
+    the higher-mean component exceeds gmm.confidence_level. This uses
+    both components' full distributions (mean, std, and mixture weight),
+    which is the more statistically complete way to ask "how sure are we
+    this cell is positive." An equivalent scalar "effective threshold"
+    (the value where the posterior crosses confidence_level) is still
+    computed and reported in marker_thresholds.csv for continuity with
+    existing plots/reports, but the actual per-cell positivity call in
+    "posterior" mode uses the real posterior probability, not that
+    scalar re-derived cutoff.
+
+Both modes depend on the GMM's two components actually being separated.
+A degenerate/collapsed component (e.g. a zero-inflated marker where the
+"low" component collapses onto the zero spike) makes a posterior just as
+unreliable as a std-multiplier threshold -- see gmm.transform below.
 """
 
 import os
@@ -36,6 +65,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime
+from typing import Optional, Tuple, Dict
 from sklearn.mixture import GaussianMixture
 
 try:
@@ -67,50 +97,312 @@ def _load_cluster_labels(path: str) -> dict:
     return {str(k): v for k, v in labels.items()}
 
 
-# ── GMM thresholding ──────────────────────────────────────────────────────────
+# ── Transforms (Q16 remediation + Yeo-Johnson) ─────────────────────────────────
 
-def _gmm_threshold(values: np.ndarray, std_multiplier: float, n_components: int = 2,
-                   random_state: int = 42, n_init: int = 1,
-                   max_cells: int = 50_000) -> float:
+def _yeojohnson_inverse(y: np.ndarray, lmbda: float) -> np.ndarray:
     """
-    Fit a 2-component GMM and return threshold = mean_low + std_multiplier * std_low.
-    Returns the global 95th percentile as fallback if GMM fails.
+    Inverse of scipy.stats.yeojohnson for a known/fitted lambda. scipy
+    provides the forward transform (and can fit lambda for you) but has no
+    public inverse function the way it does for Box-Cox (inv_boxcox), so
+    this implements it directly from the Yeo-Johnson definition. Handles
+    the y>=0 and y<0 branches (corresponding to x>=0 / x<0 in the forward
+    transform) and the lambda==0 / lambda==2 special cases separately.
+    """
+    y = np.asarray(y, dtype=float)
+    x = np.empty_like(y)
 
-    max_cells: if more cells than this, subsample for GMM fitting (threshold
-               is still applied to all cells). Keeps runtime O(max_cells).
+    pos = y >= 0
+    if lmbda != 0:
+        x[pos] = np.power(y[pos] * lmbda + 1.0, 1.0 / lmbda) - 1.0
+    else:
+        x[pos] = np.expm1(y[pos])
+
+    neg = ~pos
+    if lmbda != 2:
+        x[neg] = 1.0 - np.power(1.0 - (2.0 - lmbda) * y[neg], 1.0 / (2.0 - lmbda))
+    else:
+        x[neg] = -np.expm1(-y[neg])
+
+    return x
+
+
+def _transform_values(values: np.ndarray, transform: str = "none",
+                       arcsinh_cofactor: float = 5.0,
+                       yeojohnson_lambda: Optional[float] = None) -> Tuple[np.ndarray, dict]:
+    """
+    Q16 remediation (decided by Afrouz, 2026-08-18): optionally transform
+    marker intensities before GMM fitting, to fix threshold degeneracy on
+    zero-inflated channels (see Day 6 log entry — 14/53 CRC markers have
+    30-50% exact-zero raw intensity, causing the GMM's "low" component to
+    collapse onto the zero spike and produce threshold ~= 0). This is
+    standard cytometry practice -- transform to a scale where the two
+    populations are closer to Gaussian, fit the mixture there, transform
+    the result back -- not a workaround.
+
+    transform: "none" (legacy behavior, unchanged) | "arcsinh" | "log1p"
+               | "yeojohnson".
+
+    Returns (transformed_values, transform_params). transform_params is
+    empty for "none"/"arcsinh"/"log1p" (nothing needs to be remembered to
+    invert them). For "yeojohnson" it contains {"lambda": float} -- the
+    fitted (or passed-through, if yeojohnson_lambda was given) power
+    parameter, needed to invert the transform and worth reporting
+    per-marker for transparency (see compute_marker_thresholds).
+
+    arcsinh_cofactor: standard cytometry practice divides by a cofactor before
+    taking asinh (5.0 is the common CyTOF default; empirically checked against
+    this project's real CRC intensities on 2026-08-18 — median non-zero value
+    for the most zero-inflated markers (CD138, CK) is ~6-7, so cofactor=5 keeps
+    the dim-positive population in a reasonably spread part of the transformed
+    range rather than compressing it against zero). This default has NOT been
+    tuned per-marker or per-panel — treat as a starting point, not a validated
+    optimum, and re-check if applying this to a new panel/platform.
+    log1p is only defined for values >= -1; only use it on non-negative,
+    non-z-scored intensities (true of the CRC h5ad, not guaranteed for other
+    inputs — arcsinh is the safer default since it's defined everywhere).
+
+    yeojohnson (new): unlike arcsinh/log1p (fixed-shape transforms), this
+    fits a lambda parameter per marker from the data itself via
+    scipy.stats.yeojohnson, so the transform's shape adapts to how skewed
+    that specific marker's distribution actually is (lambda=0 reduces to
+    log1p-like behavior; lambda=1 is close to identity; other values
+    interpolate). Also the only option here that's well-defined for
+    negative values (arcsinh handles them fine too, but log1p does not),
+    which matters if this is ever run on z-scored rather than raw
+    intensities.
+    """
+    if transform == "none":
+        return values, {}
+    elif transform == "arcsinh":
+        return np.arcsinh(values / arcsinh_cofactor), {}
+    elif transform == "log1p":
+        return np.log1p(values), {}
+    elif transform == "yeojohnson":
+        from scipy.stats import yeojohnson
+        flat = np.asarray(values, dtype=float).flatten()
+        if yeojohnson_lambda is None:
+            transformed, lam = yeojohnson(flat)
+        else:
+            transformed = yeojohnson(flat, lmbda=yeojohnson_lambda)
+            lam = yeojohnson_lambda
+        return transformed.reshape(np.asarray(values).shape), {"lambda": float(lam)}
+    else:
+        raise ValueError(
+            f"Unknown gmm.transform: '{transform}'. Use 'none', 'arcsinh', 'log1p', or 'yeojohnson'."
+        )
+
+
+def _inverse_transform_scalar(value_t: float, transform: str, arcsinh_cofactor: float,
+                               transform_params: dict) -> float:
+    """Inverse of _transform_values for a single scalar (e.g. a fitted threshold)."""
+    if transform == "none":
+        return float(value_t)
+    elif transform == "arcsinh":
+        return float(np.sinh(value_t) * arcsinh_cofactor)
+    elif transform == "log1p":
+        return float(np.expm1(value_t))
+    elif transform == "yeojohnson":
+        lam = transform_params.get("lambda")
+        if lam is None:
+            raise ValueError("yeojohnson inverse requires transform_params['lambda']")
+        return float(_yeojohnson_inverse(np.array([value_t]), lam)[0])
+    else:
+        raise ValueError(f"Unknown transform: '{transform}'")
+
+
+# ── GMM fitting (shared by std_multiplier and posterior modes) ────────────────
+
+def _fit_gmm(values: np.ndarray, n_components: int = 2, random_state: int = 42,
+             n_init: int = 1, max_cells: int = 50_000, transform: str = "none",
+             arcsinh_cofactor: float = 5.0, yeojohnson_lambda: Optional[float] = None) -> dict:
+    """
+    Fit a GMM once on (optionally transformed) marker values. Shared by
+    both threshold_mode paths so a marker's GMM is only ever fit a single
+    time, regardless of which mode consumes it.
+
+    Returns a dict:
+        "gmm"              : fitted GaussianMixture, or None if fitting
+                              wasn't possible (too few finite cells) or failed
+        "transform_params" : see _transform_values
+        "low_idx"           : component index with the lower mean ("negative")
+        "high_idx"          : component index with the higher mean ("positive")
+        "clean"             : raw (untransformed) finite values, for the
+                               percentile fallback when gmm is None
+
+    Zero-inflation note: when transform != "none", exact-zero raw values
+    are excluded from the GMM fit (still included in "clean" for the
+    fallback). A monotonic transform (arcsinh/log1p/yeojohnson) reshapes
+    smooth right-skew, but it cannot fix a genuine point mass at exactly
+    zero -- every one of these transforms maps 0 -> 0, so a real "30-50%
+    of cells have exact-zero intensity" spike (documented for 14/53 CRC
+    markers) survives the transform unchanged and can still make one GMM
+    component collapse onto it, exactly the degeneracy the transform was
+    meant to fix. Excluding true zeros and fitting the 2-component GMM on
+    the remaining continuum is the standard complement to transforming.
+    transform="none" is left untouched (no zero exclusion) to keep that
+    path exactly backward compatible with pre-2026-08-19 behavior.
+    Confirmed with a standalone test: on a 33%-exact-zero, right-skewed
+    synthetic marker, yeojohnson WITHOUT this exclusion scored 52.6%
+    agreement with ground truth (worse than doing nothing) because the
+    fitted "low" component collapsed onto the zero spike and the
+    resulting threshold landed near zero, calling almost everything
+    positive; WITH zero exclusion it should recover discrimination
+    between the real negative and positive populations.
     """
     clean = values[np.isfinite(values)].reshape(-1, 1)
+    result = {"gmm": None, "transform_params": {}, "low_idx": None,
+              "high_idx": None, "clean": clean}
     if len(clean) < 10:
-        return float(np.percentile(clean, 95))
-    # Subsample for speed on large datasets
-    if len(clean) > max_cells:
-        rng = np.random.default_rng(random_state)
-        idx = rng.choice(len(clean), size=max_cells, replace=False)
-        fit_data = clean[idx]
+        return result
+
+    if transform != "none":
+        fit_input = clean[clean.flatten() != 0].reshape(-1, 1)
+        if len(fit_input) < 10:
+            print(f"    [GMM] WARNING: fewer than 10 non-zero values after excluding exact "
+                  f"zeros for transform='{transform}' — falling back to percentile threshold")
+            return result
     else:
-        fit_data = clean
+        fit_input = clean
+
+    clean_t, tparams = _transform_values(fit_input, transform, arcsinh_cofactor, yeojohnson_lambda)
+    result["transform_params"] = tparams
+
+    if len(clean_t) > max_cells:
+        rng = np.random.default_rng(random_state)
+        idx = rng.choice(len(clean_t), size=max_cells, replace=False)
+        fit_data = clean_t[idx]
+    else:
+        fit_data = clean_t
+
     try:
         gmm = GaussianMixture(n_components=n_components, random_state=random_state,
                               max_iter=200, n_init=n_init)
         gmm.fit(fit_data)
         means = gmm.means_.flatten()
-        stds  = np.sqrt(gmm.covariances_.flatten())
-        low_idx = int(np.argmin(means))
-        return float(means[low_idx] + std_multiplier * stds[low_idx])
+        result.update({
+            "gmm": gmm,
+            "low_idx": int(np.argmin(means)),
+            "high_idx": int(np.argmax(means)),
+        })
     except Exception as e:
-        print(f"    [GMM] WARNING: {e} — using 95th-percentile fallback")
-        return float(np.percentile(clean, 95))
+        print(f"    [GMM] WARNING: {e} — GMM fit failed")
+
+    return result
+
+
+def _gmm_threshold_from_fit(fit: dict, std_multiplier: float, transform: str,
+                             arcsinh_cofactor: float) -> float:
+    """std_multiplier-mode threshold: mean_low + std_multiplier * std_low, on
+    the raw (inverse-transformed) scale. Falls back to the 95th percentile
+    of raw values if the GMM couldn't be fit."""
+    if fit["gmm"] is None:
+        return float(np.percentile(fit["clean"], 95)) if len(fit["clean"]) else float("nan")
+    gmm = fit["gmm"]
+    means = gmm.means_.flatten()
+    stds = np.sqrt(gmm.covariances_.flatten())
+    low_idx = fit["low_idx"]
+    threshold_t = means[low_idx] + std_multiplier * stds[low_idx]
+    return _inverse_transform_scalar(threshold_t, transform, arcsinh_cofactor, fit["transform_params"])
+
+
+def _gmm_posterior_effective_threshold(fit: dict, confidence_level: float, transform: str,
+                                        arcsinh_cofactor: float, n_grid: int = 2000) -> float:
+    """
+    posterior-mode "effective threshold": the raw-scale value at which the
+    posterior probability of positive-component membership first crosses
+    confidence_level, scanning from low to high. Found by a numerical grid
+    search over the fit data's own transformed range rather than solving
+    the two-Gaussian crossing point analytically -- that equation can have
+    0, 1, or 2 real roots depending on the two components' relative
+    variances, and a grid search sidesteps picking the "right" root.
+
+    The grid search starts at the LOW component's own mean, not the
+    minimum observed value. Two unequal-variance Gaussians can cross twice
+    -- if the high (positive) component also happens to be wider, its
+    slower-decaying tail can make the posterior spuriously high again far
+    below the low component's mean, which is never a region anyone would
+    consider "positive." Starting the search there avoids ever reporting
+    an effective threshold from that spurious low-tail crossing.
+    Confirmed with a standalone test: a mixture with means (2, 8) and
+    stds (0.5, 1.5) has 280 grid points below x=0.32 where posterior
+    non-monotonically flips back toward "positive" -- none of which are
+    a plausible real cell value, but all of which would corrupt a naive
+    grid search starting at the data minimum.
+
+    This value is NOT what actually decides positivity in "posterior"
+    mode (predict_proba is, per-cell -- see add_positivity_columns, which
+    applies the same low-component-mean floor for the same reason) -- it
+    exists so marker_thresholds.csv and existing threshold-based plots
+    still get a single reportable number, for continuity with
+    "std_multiplier" mode's output shape.
+
+    Falls back to the 95th percentile of raw values if the GMM couldn't
+    be fit, same as the std_multiplier path.
+    """
+    if fit["gmm"] is None:
+        return float(np.percentile(fit["clean"], 95)) if len(fit["clean"]) else float("nan")
+
+    gmm = fit["gmm"]
+    high_idx = fit["high_idx"]
+    low_idx = fit["low_idx"]
+    clean = fit["clean"]
+    clean_t, _ = _transform_values(clean, transform, arcsinh_cofactor,
+                                    fit["transform_params"].get("lambda"))
+    low_mean_t = float(gmm.means_.flatten()[low_idx])
+    hi = float(np.max(clean_t))
+    lo = min(low_mean_t, hi)
+    if lo >= hi:
+        return _inverse_transform_scalar(hi, transform, arcsinh_cofactor, fit["transform_params"])
+
+    grid_t = np.linspace(lo, hi, n_grid).reshape(-1, 1)
+    proba_high = gmm.predict_proba(grid_t)[:, high_idx]
+    above = np.where(proba_high >= confidence_level)[0]
+    if len(above) == 0:
+        # Posterior never reaches confidence_level anywhere in the observed
+        # range -- report the max observed value as a (very conservative)
+        # stand-in, rather than raising, so batch runs don't halt on one
+        # under-separated marker. This is exactly the kind of case worth a
+        # manual look (see Notes/risks in the doc).
+        crossing_t = hi
+    else:
+        crossing_t = float(grid_t[above[0], 0])
+
+    return _inverse_transform_scalar(crossing_t, transform, arcsinh_cofactor, fit["transform_params"])
 
 
 def compute_marker_thresholds(adata, markers: list, std_multipliers: dict,
                                default_std: float = 2.0,
                                n_components: int = 2, random_state: int = 42,
-                               n_init: int = 1, max_cells: int = 50_000) -> dict:
+                               n_init: int = 1, max_cells: int = 50_000,
+                               transform: str = "none",
+                               arcsinh_cofactor: float = 5.0,
+                               threshold_mode: str = "std_multiplier",
+                               confidence_level: float = 0.8,
+                               confidence_overrides: Optional[dict] = None) -> Tuple[dict, dict]:
     """
-    Returns {marker: threshold_value} for all markers present in adata.
-    Uses per-marker std multiplier from std_multipliers dict, falling back to default_std.
+    Fits a GMM per marker and returns (thresholds, fit_info).
+
+    thresholds : {marker: threshold_value} -- always populated regardless
+        of threshold_mode, for backward-compatible reporting
+        (marker_thresholds.csv, threshold-line plots, etc). In
+        "std_multiplier" mode this is the actual decision boundary. In
+        "posterior" mode it's the equivalent "effective threshold" (see
+        _gmm_posterior_effective_threshold) -- informative, but NOT what
+        add_positivity_columns uses to decide positivity for that marker.
+
+    fit_info : {marker: {"gmm", "transform_params", "low_idx", "high_idx",
+        "threshold_mode", "confidence_level"}} -- everything
+        add_positivity_columns needs to make the actual per-cell call,
+        including the fitted GMM itself for "posterior" mode.
+
+    confidence_overrides: per-marker gmm.confidence_level overrides,
+        mirroring how std_multipliers/per_marker_overrides already work --
+        only used when threshold_mode == "posterior".
     """
-    thresholds = {}
+    confidence_overrides = confidence_overrides or {}
+    thresholds: Dict[str, float] = {}
+    fit_info: Dict[str, dict] = {}
+
     for m in markers:
         if m not in adata.var_names:
             print(f"    [GMM] marker '{m}' not in data — skipping")
@@ -120,21 +412,51 @@ def compute_marker_thresholds(adata, markers: list, std_multipliers: dict,
             vals = vals.toarray().flatten()
         else:
             vals = np.array(vals).flatten()
+
+        fit = _fit_gmm(vals, n_components=n_components, random_state=random_state,
+                       n_init=n_init, max_cells=max_cells, transform=transform,
+                       arcsinh_cofactor=arcsinh_cofactor)
+
         mult = std_multipliers.get(m, default_std)
-        t = _gmm_threshold(vals, mult, n_components=n_components,
-                           random_state=random_state, n_init=n_init, max_cells=max_cells)
+        conf = confidence_overrides.get(m, confidence_level)
+
+        if threshold_mode == "posterior":
+            t = _gmm_posterior_effective_threshold(fit, conf, transform, arcsinh_cofactor)
+            lam_note = f"  lambda={fit['transform_params']['lambda']:.3f}" if "lambda" in fit["transform_params"] else ""
+            print(f"    {m:<20} mode=posterior  confidence={conf:.2f}  "
+                  f"effective_threshold={t:.4f}{lam_note}")
+        else:
+            t = _gmm_threshold_from_fit(fit, mult, transform, arcsinh_cofactor)
+            lam_note = f"  lambda={fit['transform_params']['lambda']:.3f}" if "lambda" in fit["transform_params"] else ""
+            print(f"    {m:<20} mode=std_multiplier  std_mult={mult:.1f}  threshold={t:.4f}{lam_note}")
+
         thresholds[m] = t
-        print(f"    {m:<20} std_mult={mult:.1f}  threshold={t:.4f}")
-    return thresholds
+        fit_info[m] = {
+            **fit,
+            "threshold_mode": threshold_mode,
+            "confidence_level": conf,
+        }
+
+    return thresholds, fit_info
 
 
-def add_positivity_columns(adata, thresholds: dict) -> None:
+def add_positivity_columns(adata, thresholds: dict, fit_info: Optional[dict] = None,
+                            transform: str = "none", arcsinh_cofactor: float = 5.0) -> None:
     """
     Adds boolean columns '<marker>_pos' and intensity columns '<marker>_intensity'
-    (0=negative, 1=+, 2=++, 3=+++) to adata.obs in-place.
+    (0=negative, 1=+, 2=++, 3=+++) to adata.obs in-place. In "posterior" mode
+    also adds '<marker>_posterior' with the raw per-cell posterior probability,
+    for transparency/debugging (e.g. spotting cells that are borderline).
 
     Uses a single pd.concat at the end to avoid DataFrame fragmentation.
+
+    fit_info: from compute_marker_thresholds. Required for "posterior" mode
+        (needs the fitted GMM); ignored for "std_multiplier" mode, which
+        only needs the scalar thresholds dict (kept as a required, simple
+        argument so any external caller with just thresholds still works
+        exactly as before this feature was added).
     """
+    fit_info = fit_info or {}
     new_cols: dict[str, np.ndarray] = {}
 
     for marker, threshold in thresholds.items():
@@ -146,7 +468,36 @@ def add_positivity_columns(adata, thresholds: dict) -> None:
         else:
             vals = np.array(vals).flatten()
 
-        pos_mask = vals > threshold
+        info = fit_info.get(marker, {})
+        mode = info.get("threshold_mode", "std_multiplier")
+
+        if mode == "posterior" and info.get("gmm") is not None:
+            gmm = info["gmm"]
+            high_idx = info["high_idx"]
+            low_idx = info["low_idx"]
+            tparams = info.get("transform_params", {})
+            vals_t, _ = _transform_values(vals.reshape(-1, 1), transform, arcsinh_cofactor,
+                                           tparams.get("lambda"))
+            posterior = gmm.predict_proba(vals_t)[:, high_idx]
+            # Floor: never call a cell positive below the negative
+            # component's own mean, even if the posterior says so -- see
+            # _gmm_posterior_effective_threshold's docstring for why this
+            # can happen with unequal-variance components (the positive
+            # component's wider tail can spuriously outweigh the negative
+            # component's narrower tail far below where any real negative
+            # cell would sit).
+            low_mean_t = float(gmm.means_.flatten()[low_idx])
+            above_low_mean = vals_t.flatten() >= low_mean_t
+            pos_mask = (posterior >= info.get("confidence_level", 0.8)) & above_low_mean
+            new_cols[f"{marker}_posterior"] = posterior.astype(np.float32)
+        else:
+            # std_multiplier mode, or posterior mode with a GMM that failed
+            # to fit (fit_info["gmm"] is None) -- same scalar-threshold
+            # fallback compute_marker_thresholds itself uses in that case,
+            # so behavior stays consistent instead of silently producing
+            # an all-False positivity column.
+            pos_mask = vals > threshold
+
         new_cols[f"{marker}_pos"] = pos_mask
 
         intensity = np.zeros(len(vals), dtype=np.int8)
@@ -167,10 +518,20 @@ def add_positivity_columns(adata, thresholds: dict) -> None:
 # ── CD45 gating ───────────────────────────────────────────────────────────────
 
 def gate_cd45_positive(adata, cd45_std_multiplier: float, n_components: int = 2,
-                        random_state: int = 42, plot_dir: str = None):
+                        random_state: int = 42, plot_dir: str = None,
+                        transform: str = "none", arcsinh_cofactor: float = 5.0,
+                        threshold_mode: str = "std_multiplier",
+                        confidence_level: float = 0.8):
     """
     Returns adata filtered to CD45+ cells.
     Saves a threshold histogram to plot_dir if provided.
+
+    threshold_mode/confidence_level: same std_multiplier/posterior choice
+    as the per-marker thresholds (see module docstring), applied here for
+    consistency rather than leaving CD45 gating permanently on the older
+    std_multiplier-only path while other markers can use posteriors.
+
+    transform/arcsinh_cofactor: Q16 remediation, see `_transform_values()`.
     """
     if "CD45" not in adata.var_names:
         print("  [CD45 gate] WARNING: CD45 not found — returning all cells")
@@ -182,8 +543,29 @@ def gate_cd45_positive(adata, cd45_std_multiplier: float, n_components: int = 2,
     else:
         vals = np.array(vals).flatten()
 
-    threshold = _gmm_threshold(vals, cd45_std_multiplier, n_components, random_state)
-    print(f"  [CD45 gate] threshold={threshold:.4f}  (std_mult={cd45_std_multiplier})")
+    fit = _fit_gmm(vals, n_components=n_components, random_state=random_state,
+                   transform=transform, arcsinh_cofactor=arcsinh_cofactor)
+
+    if threshold_mode == "posterior":
+        threshold = _gmm_posterior_effective_threshold(fit, confidence_level, transform, arcsinh_cofactor)
+        print(f"  [CD45 gate] mode=posterior  confidence={confidence_level:.2f}  "
+              f"effective_threshold={threshold:.4f}")
+        if fit["gmm"] is not None:
+            tparams = fit["transform_params"]
+            vals_t, _ = _transform_values(vals.reshape(-1, 1), transform, arcsinh_cofactor,
+                                           tparams.get("lambda"))
+            posterior = fit["gmm"].predict_proba(vals_t)[:, fit["high_idx"]]
+            # Same low-component-mean floor as add_positivity_columns --
+            # see _gmm_posterior_effective_threshold's docstring.
+            low_mean_t = float(fit["gmm"].means_.flatten()[fit["low_idx"]])
+            above_low_mean = vals_t.flatten() >= low_mean_t
+            mask = (posterior >= confidence_level) & above_low_mean
+        else:
+            mask = vals > threshold
+    else:
+        threshold = _gmm_threshold_from_fit(fit, cd45_std_multiplier, transform, arcsinh_cofactor)
+        print(f"  [CD45 gate] threshold={threshold:.4f}  (std_mult={cd45_std_multiplier})")
+        mask = vals > threshold
 
     if plot_dir:
         os.makedirs(plot_dir, exist_ok=True)
@@ -192,13 +574,14 @@ def gate_cd45_positive(adata, cd45_std_multiplier: float, n_components: int = 2,
         ax.axvline(threshold, color="tomato", linewidth=2, label=f"Threshold={threshold:.3f}")
         ax.set_xlabel("CD45 expression")
         ax.set_ylabel("Cell count")
-        ax.set_title(f"CD45 gate  (std_mult={cd45_std_multiplier})")
+        title_suffix = (f"confidence={confidence_level}" if threshold_mode == "posterior"
+                         else f"std_mult={cd45_std_multiplier}")
+        ax.set_title(f"CD45 gate  ({threshold_mode}, {title_suffix})")
         ax.legend()
         plt.tight_layout()
         fig.savefig(os.path.join(plot_dir, "cd45_gate.png"), dpi=150, bbox_inches="tight")
         plt.close(fig)
 
-    mask = vals > threshold
     print(f"  [CD45 gate] {mask.sum():,} / {len(mask):,} cells pass ({mask.mean()*100:.1f}%)")
     return adata[mask].copy()
 
@@ -316,11 +699,11 @@ def run_clustering(adata, n_neighbors: int = 15, leiden_resolution: float = 0.5,
                     dpi=150, bbox_inches="tight")
         plt.close(fig)
 
-        # Condition UMAP
-        if "condition" in adata.obs.columns:
+        # Experiment group UMAP
+        if "experiment_group" in adata.obs.columns:
             fig, ax = plt.subplots(figsize=(8, 7))
-            sc.pl.umap(adata, color="condition", ax=ax, show=False, title="Condition")
-            fig.savefig(os.path.join(plot_dir, "umap_condition.png"),
+            sc.pl.umap(adata, color="experiment_group", ax=ax, show=False, title="Experiment Group")
+            fig.savefig(os.path.join(plot_dir, "umap_experiment_group.png"),
                         dpi=150, bbox_inches="tight")
             plt.close(fig)
 
@@ -395,6 +778,25 @@ def run_cell_typing(cfg: dict) -> None:
     random_state  = gmm_cfg.get("random_state", 42)
     n_init        = gmm_cfg.get("n_init", 1)
     max_cells_gmm = gmm_cfg.get("max_cells_gmm", 50_000)
+    # Q16 remediation (decided by Afrouz, 2026-08-18): "none" preserves the
+    # exact prior behavior for any config that doesn't opt in. "yeojohnson"
+    # (2026-08-19) adds a data-driven alternative to the fixed-shape
+    # arcsinh/log1p transforms -- see _transform_values().
+    gmm_transform = gmm_cfg.get("transform", "none")
+    arcsinh_cofactor = gmm_cfg.get("arcsinh_cofactor", 5.0)
+
+    # threshold_mode (2026-08-19): "std_multiplier" (default, unchanged
+    # prior behavior) or "posterior" (GMM posterior probability of
+    # positive-component membership >= confidence_level). See module
+    # docstring for the statistical rationale.
+    threshold_mode = gmm_cfg.get("threshold_mode", "std_multiplier")
+    if threshold_mode not in ("std_multiplier", "posterior"):
+        raise ValueError(
+            f"Unknown gmm.threshold_mode: '{threshold_mode}'. "
+            "Use 'std_multiplier' or 'posterior'."
+        )
+    confidence_level = gmm_cfg.get("confidence_level", 0.8)
+    confidence_overrides = gmm_cfg.get("per_marker_confidence_overrides", {})
 
     # Merge per-marker overrides with default
     std_multipliers = {m: default_std for m in panel}
@@ -409,6 +811,9 @@ def run_cell_typing(cfg: dict) -> None:
     print(f"[cell_typing] Experiment : {exp_name}")
     print(f"[cell_typing] Mode       : {mode}")
     print(f"[cell_typing] Input      : {input_file}")
+    print(f"[cell_typing] Threshold  : {threshold_mode}"
+          + (f"  (confidence={confidence_level})" if threshold_mode == "posterior" else ""))
+    print(f"[cell_typing] Transform  : {gmm_transform}")
 
     # ── Load data ─────────────────────────────────────────────
     adata = sc.read(input_file)
@@ -425,7 +830,9 @@ def run_cell_typing(cfg: dict) -> None:
     else:
         adata_cd45 = gate_cd45_positive(
             adata, cd45_mult, n_components=n_components,
-            random_state=random_state, plot_dir=plot_dir
+            random_state=random_state, plot_dir=plot_dir,
+            transform=gmm_transform, arcsinh_cofactor=arcsinh_cofactor,
+            threshold_mode=threshold_mode, confidence_level=confidence_level,
         )
 
     # ── Markers for analysis (exclude gating-only markers) ───
@@ -435,18 +842,30 @@ def run_cell_typing(cfg: dict) -> None:
         print(f"  [cell_typing] WARNING: markers not in data: {missing}")
 
     # ── GMM thresholds ────────────────────────────────────────
-    print(f"\n  Computing GMM thresholds (n_init={n_init}, max_cells={max_cells_gmm:,})...")
-    thresholds = compute_marker_thresholds(
+    print(f"\n  Computing GMM thresholds (n_init={n_init}, max_cells={max_cells_gmm:,}, "
+          f"transform={gmm_transform}, threshold_mode={threshold_mode})...")
+    thresholds, fit_info = compute_marker_thresholds(
         adata_cd45, markers_for_analysis, std_multipliers,
         default_std=default_std, n_components=n_components, random_state=random_state,
         n_init=n_init, max_cells=max_cells_gmm,
+        transform=gmm_transform, arcsinh_cofactor=arcsinh_cofactor,
+        threshold_mode=threshold_mode, confidence_level=confidence_level,
+        confidence_overrides=confidence_overrides,
     )
-    pd.Series(thresholds, name="threshold").to_csv(
-        os.path.join(data_dir, "marker_thresholds.csv"), header=True
-    )
+    threshold_report = pd.DataFrame({
+        "threshold": thresholds,
+        "threshold_mode": {m: threshold_mode for m in thresholds},
+        "transform": {m: gmm_transform for m in thresholds},
+        "transform_lambda": {
+            m: fit_info[m]["transform_params"].get("lambda") for m in thresholds
+        },
+    })
+    threshold_report.index.name = "marker"
+    threshold_report.to_csv(os.path.join(data_dir, "marker_thresholds.csv"))
 
     # ── Add positivity columns ────────────────────────────────
-    add_positivity_columns(adata_cd45, thresholds)
+    add_positivity_columns(adata_cd45, thresholds, fit_info=fit_info,
+                            transform=gmm_transform, arcsinh_cofactor=arcsinh_cofactor)
 
     # ══════════════════════════════════════════════════════════
     # AUTOMATIC MODE
@@ -552,21 +971,21 @@ def _save_and_plot(adata, data_dir, plot_dir, analysis_name, mode):
         fig.savefig(os.path.join(plot_dir, "umap_cell_types.png"), dpi=150, bbox_inches="tight")
         plt.close(fig)
 
-    # Condition comparison if available
-    if "condition" in adata.obs.columns:
-        comp = (adata.obs.groupby(["condition", "cell_type"])
+    # Experiment group comparison if available
+    if "experiment_group" in adata.obs.columns:
+        comp = (adata.obs.groupby(["experiment_group", "cell_type"])
                 .size().unstack(fill_value=0))
         comp_pct = comp.div(comp.sum(axis=1), axis=0) * 100
-        comp_pct.to_csv(os.path.join(data_dir, "cell_type_by_condition_pct.csv"))
+        comp_pct.to_csv(os.path.join(data_dir, "cell_type_by_experiment_group_pct.csv"))
 
         fig, ax = plt.subplots(figsize=(12, 5))
         comp_pct.T.plot(kind="bar", ax=ax, edgecolor="white")
-        ax.set_title(f"Cell Type % by Condition — {analysis_name}", fontsize=12)
+        ax.set_title(f"Cell Type % by Experiment Group — {analysis_name}", fontsize=12)
         ax.set_ylabel("% of cells")
         ax.tick_params(axis="x", rotation=45)
-        ax.legend(title="Condition", bbox_to_anchor=(1, 1))
+        ax.legend(title="Experiment Group", bbox_to_anchor=(1, 1))
         plt.tight_layout()
-        fig.savefig(os.path.join(plot_dir, "cell_type_by_condition.png"),
+        fig.savefig(os.path.join(plot_dir, "cell_type_by_experiment_group.png"),
                     dpi=150, bbox_inches="tight")
         plt.close(fig)
 

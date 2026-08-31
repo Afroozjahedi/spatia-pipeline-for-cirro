@@ -7,27 +7,27 @@ experiment:
   name: "PirB_D14"                       # Used in output filenames and plot titles
   description: "LILRB2 KO vs WT Day 14"  # Free text, shown in reports
 
-  # List all condition labels exactly as they appear in your filenames.
+  # List all experiment_group labels exactly as they appear in your filenames.
   # For multi-timepoint experiments, add a timepoints key.
-  conditions: ["WT", "KO"]
+  groups: ["WT", "KO"]
   # timepoints: ["D9", "D12", "D14"]    # optional — uncomment if needed
   # regions: null                        # optional — list region IDs or null
 
-  # Map image_id prefix → condition label.
-  # Overrides auto-detection (which checks if filename starts with condition name).
+  # Map image_id prefix → experiment_group label.
+  # Overrides auto-detection (which checks if filename starts with experiment_group name).
   # Leave empty {} to rely on auto-detection.
-  image_condition_map: {}
+  image_experiment_group_map: {}
 
 imaging:
   microns_per_pixel: 0.5064
 
-  # Tissue area per condition (µm²) — used to compute triad density (triads/mm²).
+  # Tissue area per experiment_group (µm²) — used to compute triad density (triads/mm²).
   # Required if you want density-normalized comparisons.
-  condition_areas_um2:
+  experiment_group_areas_um2:
     WT: 4692960.4739
     KO: 3281308.0925
   # For multi-timepoint, nest by timepoint:
-  # condition_areas_um2:
+  # experiment_group_areas_um2:
   #   D9:
   #     WT: 3200000.0
   #     KO: 2900000.0
@@ -105,7 +105,7 @@ cell_typing:
   mode: "automatic"
 
   # Input: .h5ad file from preprocessing (04-0 output)
-  input_file: "/rsrch6/scratch/trans_mol_path/ajahedi/PirB_D14/combined_all_conditions.h5ad"
+  input_file: "/rsrch6/scratch/trans_mol_path/ajahedi/PirB_D14/combined_all_experiment_groups.h5ad"
 
   # Used in output filenames — fix to match your actual slide/day (avoid Day12/Day14 mix-up)
   analysis_name: "PirB_D14"
@@ -165,6 +165,52 @@ cell_typing:
     per_marker_overrides:
       CD11c: 1.5    # DCs express CD11c at lower levels — more liberal gate
       MHC II: 1.5
+
+    # Q16 remediation (decided by Afrouz, 2026-08-18): transform marker
+    # intensities before GMM fitting to fix threshold degeneracy on
+    # zero-inflated channels (30-50% exact-zero raw intensity on some markers
+    # collapses the GMM's "low" component onto the zero spike, producing
+    # threshold ~= 0 and over-calling positivity). "none" is the legacy
+    # default — existing configs are unaffected unless you opt in.
+    # "yeojohnson" (2026-08-19) fits a data-driven power-transform lambda per
+    # marker via scipy.stats.yeojohnson, instead of a fixed-shape transform —
+    # useful when different markers are skewed by different amounts. As of
+    # 2026-08-19, whenever transform != "none", exact-zero raw values are
+    # automatically excluded from the GMM fit (see cell_typing.py's
+    # _fit_gmm docstring) — a transform alone reshapes smooth skew but
+    # cannot separate a genuine point-mass-at-zero from the GMM's "low"
+    # component, which is what made transform+GMM perform worse than doing
+    # nothing on zero-inflated markers before this fix.
+    transform: "none"   # "none" | "arcsinh" | "log1p" | "yeojohnson"
+    # Only used when transform is "arcsinh". 5.0 is the standard CyTOF
+    # cofactor; empirically sanity-checked against this project's real CRC
+    # intensities (median non-zero value for the most zero-inflated markers
+    # is ~6-7) but NOT tuned per-marker/per-panel — review before reusing on
+    # a different platform or panel.
+    arcsinh_cofactor: 5.0
+
+    # threshold_mode (2026-08-19): how a fitted GMM becomes a positive/
+    # negative call.
+    #   "std_multiplier" (default, unchanged prior behavior) —
+    #     threshold = mean_low + std_multiplier * std_low. Simple, but only
+    #     looks at the negative component's shape.
+    #   "posterior" — a cell is positive if its GMM posterior probability
+    #     of belonging to the higher-mean component is >= confidence_level.
+    #     Uses both components' full distributions (mean, std, and relative
+    #     population size), which is the statistically more complete way to
+    #     ask "how sure are we this cell is positive" — particularly useful
+    #     when the positive population is more spread out than the negative
+    #     one (common for real marker intensities). See
+    #     docs/spatia_analysis_cell_typing.md for a synthetic-data
+    #     comparison and the tail-crossing safeguard this mode includes.
+    threshold_mode: "std_multiplier"   # "std_multiplier" | "posterior"
+    # Only used when threshold_mode is "posterior". 0.8 is a reasonable
+    # starting point, not a validated optimum — like std_multiplier, this
+    # is a real modeling choice to review per panel/marker.
+    confidence_level: 0.8
+    # Per-marker confidence_level overrides, mirroring per_marker_overrides
+    # above. Only used when threshold_mode is "posterior".
+    per_marker_confidence_overrides: {}
 
   # ── Clustering (semi_automatic mode only) ────────────────────
   clustering:

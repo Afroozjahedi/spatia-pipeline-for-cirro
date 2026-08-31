@@ -19,12 +19,12 @@
 experiment:
   name: "CRC_TMA_CellTyping"
   description: "Automatic GMM cell typing on CRC TMA — validated against expert ClusterName labels"
-  conditions: ["CLR", "DII"]
-  image_condition_map: {}
+  groups: ["CLR", "DII"]
+  image_experiment_group_map: {}
 
 imaging:
   microns_per_pixel: 0.65
-  condition_areas_um2:
+  experiment_group_areas_um2:
     CLR: 79432704.0
     DII: 84105216.0
 
@@ -135,6 +135,47 @@ cell_typing:
       HLA_DR: 1.5   # broadly expressed at low levels
       Vimentin: 1.5  # stromal bleed-through
       GzmB: 2.0
+
+    # Q16 fix, decided by Afrouz 2026-08-18. Both transforms tested against
+    # real CRC data and reverted — arcsinh(cofactor=5): 19.0% -> 10.8%;
+    # log1p: 19.0% -> 8.9% (worse than arcsinh). Root cause (verified via
+    # direct GMM inspection, not inference): ANY exact-zero point mass, even
+    # a small one (e.g. CD3 at only 9.4% zero), gives the 2-component GMM an
+    # easy near-infinite-likelihood fit where one component collapses onto
+    # exactly that repeated value (mean~0, std~0.001) regardless of
+    # transform, rather than splitting the real noise/positive populations
+    # as intended. This is the classic GMM singular-covariance pathology,
+    # not a dynamic-range/scale problem — so no monotonic transform (log,
+    # arcsinh, or otherwise) fixes it on its own. Reverted to "none" (the
+    # validated 19.0%-accuracy baseline) — the next candidate remediation
+    # named here (fit GMM on non-zero values only, classify exact zeros as
+    # negative by construction) is now IMPLEMENTED (2026-08-19) in
+    # spatia/analysis/cell_typing.py's _fit_gmm(): whenever transform !=
+    # "none", exact-zero raw values are excluded from the GMM fit before
+    # transforming, specifically to fix this collapse. Verified on a
+    # synthetic 33%-zero-inflated marker: without the fix, "yeojohnson"
+    # scored 52.6% agreement with ground truth (worse than "none"'s
+    # 97.2%, consistent with the arcsinh/log1p regression documented
+    # above); with the fix, "yeojohnson" scored 98.8%. Still left as
+    # "none" here rather than auto-flipped, since re-validating against
+    # real CRC data (not synthetic) via compare_expert_vs_auto.py is the
+    # right next step before trusting a new number for the paper — try
+    # "arcsinh" or "yeojohnson" now that the root cause has a real fix.
+    transform: "none"
+    arcsinh_cofactor: 5.0
+
+    # threshold_mode (2026-08-19): "std_multiplier" (default, unchanged
+    # from all prior runs -- mean_low + std_multiplier * std_low) or
+    # "posterior" (GMM posterior probability of positive-component
+    # membership >= confidence_level, using both components' full shape
+    # instead of just the negative one's). Left at "std_multiplier" here
+    # for the same reason transform is left at "none" -- worth
+    # re-validating against real data before switching what feeds the
+    # paper's accuracy number. See docs/spatia_analysis_cell_typing.md
+    # for the full rationale and a synthetic-data comparison.
+    threshold_mode: "std_multiplier"
+    confidence_level: 0.8
+    per_marker_confidence_overrides: {}
 
   clustering:
     n_neighbors: 15

@@ -7,7 +7,7 @@
 # prepare_matusiak_data.py --inspect on
 # Matusiak_data/CODEX_AnnData_combined_expression_and_metadata.h5ad
 # (588,194 cells x 36 markers). Real cell_type values differ from the
-# original draft's guesses — see notes inline. condition_areas_um2 is
+# original draft's guesses — see notes inline. experiment_group_areas_um2 is
 # STILL a placeholder (0.0) — density outputs are not trustworthy yet.
 #
 # Run with (after prepare_matusiak_data.py has produced matched_cells/):
@@ -20,9 +20,9 @@ experiment:
   description: "Breast + Colon cancer, CODEX, pan-cancer triad pilot"
 
   # CONFIRMED — obs['sample'] values are exactly "Breast" / "Colon".
-  conditions: ["Breast", "Colon"]
+  groups: ["Breast", "Colon"]
 
-  image_condition_map: {}
+  image_experiment_group_map: {}
 
 imaging:
   # ⚙ STILL UNVERIFIED — obs has no pixel-size/metadata field at all.
@@ -41,7 +41,7 @@ imaging:
   # the "same nominal punch size" assumption holds well EXCEPT for 5-6
   # visibly smaller cores (down to 1.63 mm²) that are almost certainly
   # partial/damaged punches, not a different design. Used the median
-  # (2.237 mm²) as ONE constant per-core area x 24 cores/condition.
+  # (2.237 mm²) as ONE constant per-core area x 24 cores/experiment_group.
   # CAVEAT: this is a bounding-box estimate (width x height of the cell
   # coordinate extent), not a segmented tissue-mask area — TMA cores are
   # round punches, so true tissue area is roughly bbox_area x (pi/4) =
@@ -49,13 +49,13 @@ imaging:
   # comparisons are unaffected by that correction (same factor both sides);
   # only matters if this number is ever quoted as an absolute area.
   # NOTE ALSO: because n_images (24) and per-core area are equal for both
-  # conditions, total condition area is IDENTICAL for Breast and Colon —
+  # experiment_groups, total experiment_group area is IDENTICAL for Breast and Colon —
   # which means triads/mm2 here is just raw triad count rescaled by the
   # same constant. It reproduces the raw-count comparison (Breast > Colon),
   # NOT the permutation-enrichment result (Breast ~= Colon) — these are two
   # different, both-valid statistics answering different questions; do not
   # read the density plot as if it were the enrichment result.
-  condition_areas_um2:
+  experiment_group_areas_um2:
     Breast: 53687256.0   # 24 cores x 2,236,969 um2/core (median bbox)
     Colon: 53687256.0    # same n_cores x same per-core area
 
