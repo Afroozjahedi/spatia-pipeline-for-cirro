@@ -49,6 +49,8 @@
 !docs/build_image_patient_map.md
 !docs/prepare_matched_cells.md
 !docs/pool_tissues_for_celltyping.md
+!docs/run_pipeline.md
+!docs/spatia_analysis_visualization.md
 
 # QuPath/Groovy scripts themselves stay untracked by design (see header
 # above) — these are docs *about* them, kept in git for reference.
