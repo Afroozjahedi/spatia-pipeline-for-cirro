@@ -6,7 +6,7 @@
 
 Converts every `*_triad_pairs.csv` written by `spatia/analysis/triads.py`'s `run_triad_analysis()` into a QuPath-importable `*_triads.tsv` file — one row per cell, per triad, per role (anchor/partner1/partner2) — ready for `07-2_triad_visualization.groovy` to render in QuPath. This is the deterministic, CLI-driven replacement for `07-1_triad_visualization_tsv.ipynb` (and its automatic-typing counterpart, `07-1_a`), matching the same pattern already established by `prepare_matched_cells.py` and `prepare_crc_data.py` — arguments instead of hand-edited notebook variables, same output every time for the same input.
 
-Same core export logic as the notebook it replaces — verified against it directly with a synthetic fixture before either was trusted — plus three fixes made during the conversion:
+Same core export logic as the notebook it replaces, plus three fixes made during the conversion:
 
 1. Reads `experiment_group`, not the stale `condition` column the notebook used to read (the whole pipeline was renamed `condition` → `experiment_group` before this script existed; the notebooks have also been patched to match, but this script never had the bug).
 2. Anchor/partner1/partner2 cell-type display labels (`--anchor-cell-type` etc.) are CLI arguments, not hardcoded `"Dendritic cells"`/`"CD4 T cells"`/`"CD8 T cells"` — they still default to those exact values, so existing DC–CD4–CD8 runs behave identically unchanged.
@@ -48,5 +48,5 @@ flowchart TD
 
 ## Notes / risks
 
-- **Verified against a synthetic fixture, not yet against a real `triads.py` run's output (confidence: high on the tested logic, medium on real-world edge cases).** Tested: correct `experiment_group` values (not "Unknown"), correct default and custom cell-type labels, missing-required-columns handling (skips that file with a clear error, continues with the rest), empty input directory, nonexistent `--input-dir`. Not yet tested against an actual multi-thousand-triad real output file.
+- **Not yet run against a real `triads.py` output file (confidence: high on the tested logic, medium on real-world edge cases).** Logic is exercised for the cases that matter (correct `experiment_group` values, default and custom cell-type labels, missing-required-columns handling, empty/nonexistent input directory), but not yet against an actual multi-thousand-triad real output file.
 - **A malformed or unreadable `*_triad_pairs.csv` is skipped with a printed error, not silently ignored and not a hard stop for the whole run (confidence: high, by design).** Other images in the same `--input-dir` still get exported; check the console output for any `⚠️` lines before assuming every image was exported.
