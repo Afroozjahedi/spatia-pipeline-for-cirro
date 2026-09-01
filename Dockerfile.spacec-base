@@ -1,0 +1,76 @@
+# ============================================================
+# Dockerfile.spacec-base — SPATIA pipeline, built FROM Afrouz's real
+# spacec container instead of building spacec from scratch.
+#
+# Written 2026-07-29 (Q24), after Afrouz confirmed she already has a
+# working container at:
+#   ghcr.io/break-through-cancer/btc-spatial-proteomics/spacec
+# (https://github.com/break-through-cancer/btc-spatial-proteomics/pkgs/container/spacec)
+#
+# WHY THIS FILE EXISTS ALONGSIDE ./Dockerfile
+# --------------------------------------------
+# ./Dockerfile builds spacec from scratch (conda-forge llvmlite/numba, then
+# pip install spacec==0.0.10) and has never actually been built or run —
+# it's still an unverified guess at the right ordering. If this container
+# already has a working spacec + deepcell/Mesmer install (it should, if
+# it's the one Afrouz actually runs segmentation with), building on top of
+# it is strictly less risky than re-deriving that install ourselves. This
+# file is the "use what already works" option; ./Dockerfile remains as a
+# from-scratch fallback.
+#
+# WHAT IS **NOT** VERIFIED HERE (confidence: low, ~30-40%, on the exact
+# lines below being correct as written)
+# --------------------------------------------------------------------
+# This sandbox cannot pull ghcr.io images — the network proxy returns
+# "403 blocked-by-allowlist" for ghcr.io, registry-1.docker.io, and
+# index.docker.io alike (confirmed directly, not assumed) — so none of the
+# following has been checked against the real image:
+#   - the exact tag to pin (using :latest below as a placeholder — pin to
+#     a specific tag or digest before treating this as reproducible)
+#   - whether the container's default user can pip install as-is, or needs
+#     a venv / conda env activated first (this file assumes a plain
+#     `pip install` on PATH works — adjust if the base image uses conda)
+#   - the container's Python version and whether it already satisfies
+#     spatia's requires-python >=3.9
+#   - whether scanpy is already present (added explicitly below regardless,
+#     since spatia.analysis.cell_typing hard-requires it and this can't be
+#     confirmed either way from here)
+#
+# Before trusting this file: `docker run --rm -it
+# ghcr.io/break-through-cancer/btc-spatial-proteomics/spacec:latest bash`
+# and check `which python`, `python --version`, `pip list | grep -i spacec`,
+# and whether a conda env needs activating — then adjust the lines below
+# to match what you actually find, particularly the ENV PATH line near the
+# bottom if this turns out to be a conda-based image like ./Dockerfile's.
+# ============================================================
+
+FROM ghcr.io/break-through-cancer/btc-spatial-proteomics/spacec:latest
+
+WORKDIR /app
+
+# ---- pipeline-level deps not expected to already be in the spacec image ----
+# (spacec itself is assumed already installed and working in this base image;
+# these are SPATIA's own additions on top of it)
+RUN pip install --no-cache-dir lifelines kneed seaborn pyyaml scanpy
+
+# ---- SPATIA package itself ----
+COPY pyproject.toml ./
+COPY spatia/ ./spatia/
+COPY run_pipeline.py ./
+RUN pip install --no-cache-dir -e . --no-deps
+
+# ---- experiment configs + cell-type definitions ----
+COPY experiments/ ./experiments/
+COPY cell_type_definitions/ ./cell_type_definitions/
+
+ENTRYPOINT ["python", "run_pipeline.py"]
+
+# ============================================================
+# Build/verification status (2026-07-29): NOT built or run anywhere —
+# written from the actual spatia source + Afrouz's stated container name
+# only. Needs a real build attempt (on a machine that can reach ghcr.io)
+# before trusting the FROM line, the plain `pip install` calls, or the
+# entrypoint. If the base image is conda-based like continuumio/miniconda3
+# (./Dockerfile's base), the ENV PATH trick in ./Dockerfile will likely be
+# needed here too — inspect the real image first.
+# ============================================================

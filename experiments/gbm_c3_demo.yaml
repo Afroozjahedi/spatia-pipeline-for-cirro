@@ -1,0 +1,179 @@
+# ============================================================
+# SPATIA Pipeline Configuration — GBM CyCIF, patient BTC_988, section C3
+#
+# Separate, one-off use of this pipeline for a GBM ROI. NOT part of the
+# CRC-TMA/Nature-Protocols project scope (see SPATIA_PIPELINE_LOG.md Q4/Q6).
+# Run at Afrouz's explicit request, 2026-07-29, once she confirmed she has
+# a working spacec container (ghcr.io/break-through-cancer/
+# btc-spatial-proteomics/spacec) to run the real segmentation step in —
+# this sandbox has no docker runtime, no registry network access, and
+# insufficient disk to do that itself (all three confirmed directly, not
+# assumed). This config is written so the real pipeline can be run
+# end-to-end wherever that container actually runs (her machine / HPC).
+#
+# NOT YET RUN in this sandbox — segmentation/preprocessing require spacec,
+# which cannot be installed here. Wiring below is written against the
+# actual spatia.analysis.* source (read in full), not guessed, but has
+# only been exercised end-to-end here with a hand-built h5ad standing in
+# for real segmentation output (see SPATIA_GBM_*_demo.pptx in the CYCIF_GBM
+# folder). Real validation needs to happen where spacec actually runs.
+#
+# ── OPEN ITEMS — please review before running for real ─────────────────
+#
+# 1. Nuclear channel name mismatch (confidence: high, ~90%, read the code
+#    directly). preprocessing.py hardcodes the literal column name "DAPI"
+#    in several places (nuc_marker="DAPI", df["DAPI"] for the QC filter,
+#    and "DAPI" in its METADATA_COLS exclusion set) — it is not a
+#    configurable nuc-marker name. This image's nuclear channel is named
+#    DNA1, not DAPI. Workaround used below: channelnames_gbm_c3.txt labels
+#    that channel "DAPI" so preprocessing.py's hardcoded lookups resolve —
+#    this is a label, not a claim that DNA1 and DAPI are the same stain.
+#    The real fix (making nuc_marker configurable in preprocessing.py) is
+#    a small code change, not done here — flagging as a new open item
+#    rather than quietly patching the shared module for a one-off run.
+#
+# 2. No true membrane marker in this panel (confidence: low-moderate on
+#    the "right" choice, ~50%). Panel is DNA1 (nuclear) + HSV1 + GZMB +
+#    CD20 — none of these is a universal membrane/whole-cell stain like
+#    CD45. membrane_channel_list below sums all three as a whole-cell-
+#    expansion proxy; most cells are negative for all three, so Mesmer's
+#    whole-cell call for double/triple-negative cells will be weaker than
+#    for marker-positive cells. Alternative: set segmentation.compartment
+#    to "nuclear" and skip whole-cell expansion entirely — more defensible
+#    but loses membrane-localized signal. Left as whole-cell here since
+#    that's what the rest of this pipeline (cell_typing / triads) expects
+#    from prior runs, but this is a real judgment call, not a fact.
+#
+# 3. Scale mismatch (confidence: high, ~95%, computed directly from image
+#    metadata read this session). "The image" is the full registered
+#    section (4, 59940, 29011) px at 0.325 µm/px — ~183.7 mm^2, not a small
+#    ROI. That's an HPC-scale segmentation job (~14 GB raw pixels through
+#    Mesmer), not a laptop smoke test. experiment_group_areas_um2.GBM below is
+#    computed for the FULL image on that assumption. If you crop to a
+#    sub-region first (recommended for a first real run), update that
+#    number to match your crop's actual area.
+#
+# 4. roi_masking is assumed a no-op here (enabled: false) because the
+#    source file was already exported as a single per-ROI OME-TIFF from
+#    QuPath (per your own description of the QuPath export folder) rather
+#    than a whole-slide scan needing a separate binary-mask + TMA-dearray
+#    step. I have not verified there's no QuPath binary_mask.png /
+#    roi_labels.txt pair for this slide — if one exists and you want
+#    roi_masking's cropping/masking behavior, flip this to true and fill
+#    in paths.qupath_roi_dir.
+#
+# Run with (once spacec is available in the environment):
+#   python run_pipeline.py --config experiments/gbm_c3_demo.yaml
+# ============================================================
+
+experiment:
+  name: "GBM_CyCIF_C3_demo"
+  description: "GBM CyCIF, patient BTC_988, section C3 (Post-Xenium). HSV1/GranzymeB/CD20 triad, real spatia segmentation + cell_typing + triads modules end-to-end from the raw registered image."
+  groups: ["GBM"]
+  image_experiment_group_map: {}
+
+imaging:
+  microns_per_pixel: 0.325
+  experiment_group_areas_um2:
+    # Full registered image: 59940 x 29011 px @ 0.325 um/px. UPDATE if you
+    # run on a cropped sub-region instead (see open item 3 above).
+    GBM: 183673355.0
+
+paths:
+  # Source file already a standard OME-TIFF (not .qptiff) -- tif_conversion
+  # is disabled below, so this is not read by this run. Left here for
+  # reference / in case tif_conversion is turned back on.
+  raw_image_dir: "data/gbm_c3_demo/raw"
+
+  # roi_masking disabled (open item 4) -- segmentation reads directly from
+  # masked_roi_dir. Before running: create data/gbm_c3_demo/masked_rois/GBM_C3/
+  # and place (or symlink) the QuPath-exported ROI tif there, named so it
+  # starts with the experiment_group prefix, e.g.:
+  #   data/gbm_c3_demo/masked_rois/GBM_C3/GBM_C3.tif
+  # (source: registration/C3_Post_Xenium_BTC_988_HSV1_GranymeB_CD20_evos.ome.tiff)
+  masked_roi_dir: "data/gbm_c3_demo/masked_rois"
+
+  # One name per line, in image channel order (DNA1, HSV1, GZMB, CD20).
+  # DNA1 is labeled "DAPI" here as a workaround -- see open item 1.
+  # Format (plain text, one channel name per line) inferred from common
+  # spacec/CODEX convention -- NOT verified against your actual spacec
+  # install; confirm before relying on it.
+  channel_file: "data/gbm_c3_demo/channelnames_gbm_c3.txt"
+
+  segmentation_results_dir: "data/gbm_c3_demo/segmentation_results"
+  input_dir: "data/gbm_c3_demo/segmentation_results"
+  output_dir: "data/gbm_c3_demo/results"
+
+tif_conversion:
+  enabled: false   # source is already a standard OME-TIFF -- see open item note above
+  image_format: ".qptiff"
+  preserve_metadata: true
+
+roi_masking:
+  enabled: false   # see open item 4 -- assumed already-extracted single-ROI export
+
+segmentation:
+  enabled: true
+  seg_method: "mesmer"
+  nuclei_channel: "DAPI"   # see open item 1 -- really DNA1, aliased in channel_file
+  membrane_channel_list: ["HSV1", "GZMB", "CD20"]   # see open item 2 -- no true membrane marker
+  compartment: "whole-cell"
+  input_format: "Multichannel"
+  resize_factor: 1
+  size_cutoff: 0
+  generate_overlays: true
+
+preprocessing:
+  last_marker: "CD20"   # last channel in the 4-marker panel
+  qc_filter:
+    size_percentile: 1
+    dapi_percentile: 1
+  noise:
+    cut_off: 0.01
+    count_bin: 50
+
+cell_typing:
+  mode: "automatic"
+
+  # Produced by run_preprocessing() for this single experiment_group:
+  #   <output_dir>/combined_processed_data/individual_processed_data/
+  #     C3_combined_all_experiment_groups.h5ad
+  # (tissue_id "C3" comes from stripping the "GBM_" experiment_group prefix off
+  # image_ID "GBM_C3" -- see spatia.analysis.preprocessing.extract_tissue_identifier)
+  input_file: "data/gbm_c3_demo/results/combined_processed_data/individual_processed_data/C3_combined_all_experiment_groups.h5ad"
+  analysis_name: "GBM_C3_demo"
+
+  markers:
+    panel:
+      - HSV1
+      - GZMB
+      - CD20
+    gating_only: []   # no CD45 in this reduced panel -- CD45 gate auto-skipped
+
+  gmm:
+    n_components: 2
+    random_state: 42
+    cd45_std_multiplier: 3.0   # unused (gating_only empty), kept because the key is required
+    default_std_multiplier: 2.0
+    per_marker_overrides: {}
+
+  clustering:
+    n_neighbors: 15
+    leiden_resolution: 0.5
+
+  cell_type_definitions_file: "cell_type_definitions/gbm_c3_demo.yaml"
+  cluster_labels_file: null
+
+analysis:
+  triad:
+    enabled: true
+    radius_um: 20.0
+    report_radius_um: 15.0
+    anchor_type: "HSV1+ cells"
+    partner_type_1: "GranzymeB+ effector cells"
+    partner_type_2: "CD20+ B cells"
+    matched_only: true
+    min_triad_size: 1
+
+  tls:
+    enabled: false

@@ -1,0 +1,7 @@
+{
+  "_comment": "DRAFT — scaffold only, written 2026-07-21 as part of Q10/Q12 packaging work. Values below (name/description/version) are reasonable defaults, NOT confirmed with Afrouz. Repository field updated 2026-09-01 now that the codebase is pushed to GitHub. The actual admin-import step still requires Afrouz (or whoever holds Cirro project Admin at BTC) to act in the Cirro UI — this cannot be completed from outside Cirro (see SPATIA_PIPELINE_LOG.md Day 2, 'Admin gate').",
+  "name": "SPATIA Pipeline",
+  "description": "Single-cell spatial proteomics pipeline for CRC TMA data — DC-CD4-CD8 triad detection and Nature Protocols reference implementation.",
+  "version": "0.1.0",
+  "repository": "https://github.com/Afroozjahedi/spatia-pipeline-for-cirro"
+}

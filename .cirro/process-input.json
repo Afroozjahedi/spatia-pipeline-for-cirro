@@ -1,0 +1,6 @@
+{
+  "_comment": "DRAFT — maps process-form.json fields to Nextflow --params. Matches main.nf's single params.config input (Q10: one black-box process).",
+  "params": {
+    "config": "{{ form.config_file }}"
+  }
+}

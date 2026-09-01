@@ -1,0 +1,15 @@
+{
+  "_comment": "DRAFT — the web form end users see when launching this pipeline in Cirro. Only exposes the config file path for now, deliberately minimal. NOT deciding which individual SPATIA config parameters (conditions, marker thresholds, triad radius, etc.) should be exposed as separate form fields vs. bundled into one uploaded YAML — that's a UX call for Afrouz, not something to invent unilaterally (operating rule 1). Flagging as an open question rather than guessing at a full form schema.",
+  "form": {
+    "type": "object",
+    "properties": {
+      "config_file": {
+        "type": "string",
+        "format": "file",
+        "title": "SPATIA experiment config (.yaml)",
+        "description": "Upload the experiment YAML (e.g. experiments/crc_tma.yaml). All pipeline parameters — conditions, paths, thresholds — are read from this file."
+      }
+    },
+    "required": ["config_file"]
+  }
+}

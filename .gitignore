@@ -60,3 +60,15 @@
 !docs/qupath_05-4-1_segmentation_boundaries_visualization.md
 !docs/qupath_05-4-2_celltyping_visualization.md
 !docs/qupath_07-2_triad_visualization.md
+
+# Cirro packaging scaffold (main.nf single-process wrapper, Cirro pipeline
+# manifest, Docker build). Contains known TODOs/placeholders — see each
+# file's own header comments (SPATIA_PIPELINE_LOG.md Day 2 for context).
+!main.nf
+!nextflow.config
+!Dockerfile
+!Dockerfile.spacec-base
+!pyproject.toml
+!.cirro/
+!.cirro/*.json
+!.cirro/*.config

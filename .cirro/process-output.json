@@ -1,0 +1,7 @@
+{
+  "_comment": "DRAFT — which outputs Cirro can visualize/browse. Matches main.nf's two emit channels (results/, logs/). Since Q10 chose a single black-box process, Cirro only sees final outputs, not per-step intermediates — this is the direct tradeoff Afrouz accepted when choosing option (a) over the five-staged-process alternative.",
+  "outputs": [
+    { "name": "results", "path": "results/**", "type": "directory" },
+    { "name": "logs",    "path": "logs/**",    "type": "directory" }
+  ]
+}

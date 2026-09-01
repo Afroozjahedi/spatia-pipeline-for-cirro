@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spatia"
+version = "0.1.0"
+description = "SPATIA: single-cell spatial proteomics analysis pipeline (CRC TMA / Nature Protocols deployment)"
+requires-python = ">=3.9"
+dependencies = [
+    "spacec==0.0.10",
+    "lifelines",
+    "kneed",
+    "seaborn",
+    "pyyaml",
+    "scanpy",
+]
+
+# scanpy added 2026-07-29 (Q24): spatia.analysis.cell_typing.run_cell_typing()
+# raises ImportError immediately if scanpy isn't importable, in BOTH
+# "automatic" and "semi_automatic" mode (confirmed by reading the code, not
+# assumed). It was previously omitted here on the assumption spacec pulls it
+# in transitively — that assumption was never actually confirmed (spacec has
+# never been installed end-to-end in any sandbox this project used), so it's
+# now pinned explicitly rather than left implicit.
+
+# NOTE (added 2026-07-21, Q11; updated same day once Afrouz confirmed her
+# real JupyterHub environment): this file exists to fix the
+# "No module named 'spatia.analysis'" import error that broke Afrouz's
+# manual runs on 2026-07-17 (see SPATIA_PIPELINE_LOG.md Day 4). Running
+#     pip install -e .
+# from the repo root makes `spatia` importable regardless of which
+# directory the interpreter was launched from or what PYTHONPATH is set,
+# since editable installs register the package via an import hook instead
+# of relying on cwd.
+#
+# spacec is pinned to 0.0.10 — confirmed via `pip show spacec` on Afrouz's
+# actual working environment (BTC JupyterHub, Python 3.9, image
+# hpcharbor.mdanderson.edu/jwwood/jupyter/spacec:4.1.0). That same output
+# shows deepcell IS a normal transitive dependency of spacec 0.0.10 (listed
+# under "Requires"), so a plain `pip install spacec` should pull it in
+# automatically — the earlier note here (deepcell excluded on purpose,
+# install manually only if needed) was based on setup_local_env.sh, which
+# Afrouz has since said she never actually validated. Correcting that
+# guidance now that a real source exists; not re-adding deepcell to
+# `dependencies` explicitly since spacec's own metadata already requires it.
+#
+# What's still UNVERIFIED: whether `pip install spacec==0.0.10` on a fresh
+# x86_64 machine hits the llvmlite/numba build-from-source failure
+# setup_local_env.sh describes. That claim traces back to the same
+# unvalidated script, not to JupyterHub (JupyterHub's image is prebuilt,
+# so it never exercises this install path fresh). The Dockerfile still
+# installs llvmlite/numba from conda-forge before spacec as a precaution,
+# but this is a hedge, not a confirmed requirement for 0.0.10 specifically.
+
+[tool.setuptools.packages.find]
+include = ["spatia*"]
