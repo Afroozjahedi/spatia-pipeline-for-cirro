@@ -23,6 +23,11 @@
 # Dataset-agnostic prep script for survival.py's image_patient_map (TMA cohorts)
 !build_image_patient_map.py
 
+# Dataset-agnostic scripts: onboarding a new dataset into triads.py, and
+# pooling per-tissue h5ads before cell_typing.py for a multi-tissue cohort.
+!prepare_matched_cells.py
+!pool_tissues_for_celltyping.py
+
 !cell_type_definitions/
 !cell_type_definitions/*.yaml
 
@@ -41,8 +46,9 @@
 !docs/spatia_analysis_triads.md
 !docs/spatia_analysis_functional.md
 !docs/spatia_analysis_survival.md
-!docs/spatia_analysis_functional.md
 !docs/build_image_patient_map.md
+!docs/prepare_matched_cells.md
+!docs/pool_tissues_for_celltyping.md
 
 # QuPath/Groovy scripts themselves stay untracked by design (see header
 # above) — these are docs *about* them, kept in git for reference.
