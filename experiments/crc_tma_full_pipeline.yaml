@@ -32,6 +32,43 @@
 # Run with:
 #   python run_pipeline.py --config experiments/crc_tma_full_pipeline.yaml \
 #       --steps segmentation preprocessing
+#
+# CHANGELOG -- 2026-09-04 (Afrouz + Claude consulting session)
+# --------------------------------------------------------------
+# The 2026-09-03 run against all four TMA folders failed completely (see
+# spatia/analysis/segmentation.py's changelog for the root cause: raw cores are
+# CODEX hyperstacks, not flat 92-channel stacks -- now handled by the new
+# spatia/analysis/channels.py). Three settings changed here as a result:
+#
+#   channel_file          -- was repo-relative ("data/crc_tma_full/
+#                             channelNames.txt"), which could never resolve on
+#                             a fresh clone: .gitignore is a whitelist that
+#                             excludes data/, so this file is never committed.
+#                             It only worked before by accident of which
+#                             directory run_pipeline.py happened to be launched
+#                             from. Now an absolute rsrch6 path.
+#   nuclei_channel        -- was the literal string "HOECHST1"; now "auto",
+#                             which resolves structurally (channel 1 of cycle
+#                             1 -- the CODEX nuclear convention) instead of by
+#                             exact string match. Equivalent value for this
+#                             panel, but survives channelNames.txt formatting
+#                             changes (e.g. a " (C1)" suffix) that would
+#                             otherwise silently break the old literal match.
+#   membrane_channel_list -- was the full panel string "CD45 - hematopoietic
+#                             cells"; now the short name "CD45", which
+#                             channels.resolve_channel() matches against the
+#                             full panel entry. Ambiguous short names (e.g.
+#                             "CD4", which prefix-matches 4 entries in this
+#                             panel) raise rather than guessing.
+#   keep_normalized / normalized_dir / channel_check -- new keys, documented
+#                             inline in the segmentation: block below.
+#
+# STATUS AS OF THIS CHANGELOG: the fix has been code-reviewed and unit-tested
+# against synthetic CODEX/OME data (see channels.py), but NOT yet confirmed
+# against a real segmentation run on rsrch6 -- that smoke test (3 cores from
+# TMA_A) is the next step, not yet reported back as of this commit. Treat the
+# "HONEST STATUS" block above as still current until that run is confirmed;
+# update it (and this note) once it is.
 # ============================================================
 
 experiment:
@@ -95,7 +132,12 @@ paths:
   # list (spacec/QuPath scanner metadata), NOT reconstructed or guessed.
   # Repo-relative: resolves correctly once this repo is on Seadragon and
   # run_pipeline.py is run from the repo root.
-  channel_file: "data/crc_tma_full/channelNames.txt"
+  # FIXED 2026-09-03: was repo-relative ("data/crc_tma_full/channelNames.txt"),
+  # which cannot work -- .gitignore is a whitelist that excludes data/, so this
+  # file is never in a fresh clone, and the path only resolved at all when
+  # run_pipeline.py happened to be launched from the right directory. Absolute
+  # path to where the panel actually lives on rsrch6.
+  channel_file: "/rsrch6/home/trans_mol_path/ajahedi/SPATIA pipeline paper/data/crc_tma_full/channelNames.txt"
 
   # Segmentation writes here; preprocessing reads from here -- same directory,
   # no separate wiring needed. Moved to scratch (not home) to match this
@@ -116,13 +158,31 @@ roi_masking:
 segmentation:
   enabled: true
   seg_method: "mesmer"
-  nuclei_channel: "HOECHST1"   # fixed 2026-08-28: real panel has no "DAPI" channel -- CyCIF nuclear stain is HOECHST, cycled every 4 channels (HOECHST1..23). Using cycle-1 (freshest signal, pre-bleach) as the segmentation nuclear channel.
-  membrane_channel_list: ["CD45 - hematopoietic cells"]
+  # UPDATED 2026-09-03: "auto" resolves structurally rather than by string --
+  # channel 1 of cycle 1, which in CODEX/PhenoCycler acquisition is always the
+  # nuclear stain. Equivalent to the old "HOECHST1" for this panel, but it no
+  # longer breaks when the panel file's spelling changes (e.g. entries carrying
+  # a " (C1)" suffix) and it works unchanged on any other CODEX panel.
+  nuclei_channel: "auto"
+  # Short names now resolve against the full panel entry
+  # ("CD45" -> "CD45 - hematopoietic cells"). Ambiguous prefixes raise rather
+  # than guessing -- "CD4" would match CD44/CD45/CD45RA/CD45RO.
+  membrane_channel_list: ["CD45"]
   compartment: "whole-cell"
   input_format: "Multichannel"
   resize_factor: 1
   size_cutoff: 0
   generate_overlays: true
+  # Raw cores are ImageJ hyperstacks (23 cycles x 4 channels). spacec reads the
+  # file itself and treats axis 0 as channels, so each image is flattened to a
+  # labeled 92-plane CYX TIFF here first. Same size as the source (~508 MB), so
+  # by default each copy is deleted right after its image is segmented -- peak
+  # extra disk is one file, not a second copy of the dataset.
+  keep_normalized: false
+  normalized_dir: "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA_full/_normalized"
+  # Verifies plane count against the panel, and checks nuclear periodicity on
+  # the pixels once per batch. Leave true.
+  channel_check: true
 
 preprocessing:
   last_marker: "DRAQ5"   # last channel in the real 92-channel panel (channelNames.txt)

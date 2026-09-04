@@ -4,6 +4,86 @@ spatia/analysis/segmentation.py
 Config-driven cell segmentation (Mesmer/Cellpose via spacec) on masked,
 multichannel ROI TIFFs, with CSV export and QC overlay generation.
 
+CHANGELOG -- 2026-09-04 (Afrouz + Claude consulting session)
+--------------------------------------------------------------
+Context: the 2026-09-03 real-data run (pipeline_20260903_133016.log) against
+all four CRC TMA folders (276 raw .tif files) failed completely -- 0 succeeded,
+139 failed, 137 skipped for "channel mismatch". Root cause, confirmed against
+the actual files on rsrch6 (not assumed): the raw cores are CODEX/PhenoCycler
+ImageJ hyperstacks, axes "TCYX", shape (23, 4, 1440, 1920) -- 23 acquisition
+cycles x 4 channels/cycle = 92 planes, NOT a flat 92-channel stack. Two bugs
+followed from that one fact, both fixed below. Full reasoning and the pixel-
+level verification (nuclear-periodicity correlation, r=0.87-0.92 across all 23
+HOECHST cycles + DRAQ5) are in the new spatia/analysis/channels.py docstring
+and in this session's chat log -- not repeated here in full.
+
+1. `_find_masked_tifs()`: now skips filenames starting with "._" -- macOS
+   AppleDouble resource-fork sidecars created when this data was copied through
+   an HFS+/APFS volume. 134 of these were in the 276-file batch; each is ~4 KB
+   of metadata, not an image, and crashed tifffile with
+   "not a TIFF file b'\\x00\\x05\\x16\\x07'" the moment segmentation tried to
+   open one. Pure noise removal -- does not change segmentation results for
+   any real file.
+
+2. `_check_channel_order()`: rewritten. The OLD check compared this image's
+   embedded ImageJ 'Labels' against channel_file NAME-FOR-NAME. That is correct
+   for ROIs written by roi_masking.py (which embeds real marker names) but can
+   NEVER pass for raw CODEX acquisitions, whose embedded labels are scanner
+   placeholders ("ch1".."ch4" repeating 23x) carrying no marker identity at
+   all -- that's what rejected all 137 real cores as "mismatched" when nothing
+   was actually wrong with them. The check now dispatches on what the image
+   actually carries (via the new channels.StackInfo):
+     - real names embedded            -> compare name-for-name, as before
+     - generic/absent labels          -> compare PLANE COUNT instead (the
+                                          comparison that actually catches a
+                                          truncated acquisition or wrong panel)
+     - OME-TIFF/QPTIFF whose names
+       could not be parsed            -> FAIL LOUD, does not fall through to
+                                          the generic path (see channels.py
+                                          changelog -- this is the safety net
+                                          against silently relabeling a file
+                                          that already had real names)
+
+3. `run_cell_segmentation()` / `run_segmentation()`: new normalization step.
+   spacec's `sp.tl.cell_segmentation()` opens the file path itself and treats
+   axis 0 as the channel axis -- on a (23, 4, Y, X) array that means it sees 23
+   "channels", which is the direct cause of the 2026-09-03
+   "IndexError: index 23 is out of bounds for axis 0 with size 23" on
+   reg021_X01_Y01_Z08.tif (that file was NOT corrupt or short a cycle -- every
+   one of the 137 real cores has this same shape and would have hit the same
+   crash once past the name-mismatch check). Each hyperstack is now flattened
+   cycle-major to a flat, honestly-labeled (92, Y, X) TIFF via
+   channels.normalize_stack_to_file() before being handed to spacec. New
+   params: `normalized_dir` (default "<output_dir>/_normalized"),
+   `keep_normalized` (default False -- each ~508 MB normalized copy is deleted
+   right after its image is segmented, so peak extra disk is one file, not a
+   second copy of the ~72 GB four-folder dataset), `auto_panel_template`
+   (writes a positional "cyc01_ch1"... placeholder panel if channel_file is
+   missing, so the mechanics can be smoke-tested -- loudly flagged as NOT real
+   marker identity).
+
+4. `nuclei_channel` / `membrane_channel_list`: now resolved once per run via
+   channels.resolve_channels() instead of passed to spacec as literal config
+   strings. Lets the yaml say "auto" (-> channel 1 of cycle 1, the CODEX
+   nuclear convention) and short names ("CD45" -> "CD45 - hematopoietic
+   cells") instead of requiring an exact match to the panel file's full text.
+   Ambiguous short names (e.g. "CD4", which prefix-matches CD44/CD45/CD45RA/
+   CD45RO in this panel) raise rather than silently picking one.
+
+5. One pixel-level QC check added per batch: channels.verify_nuclear_periodicity()
+   confirms channel-1-of-every-cycle actually correlates across cycles (r>=0.5)
+   after flattening -- the automated version of the manual correlation check
+   run by hand during this session. If it fails, the run HALTS rather than
+   proceeding on a possibly-wrong flatten order, since a wrong order would
+   silently swap marker identities for every cell.
+
+Net effect: this is a bug fix (CODEX hyperstacks were unsupported, and the
+validation logic was checking something that could never be true for them),
+not a behavior change for any input this pipeline had previously segmented
+successfully. channel_check=True remains the default and is not weakened --
+it now checks the thing that can actually be wrong (plane count / real name
+match / periodicity) instead of a comparison that could never pass.
+
 Refactored from: 03_segmentation.ipynb
 
 Pipeline position: tif_conversion (step 0) -> roi_masking (step 1) ->
@@ -48,6 +128,8 @@ import tifffile
 
 import spacec as sp
 
+from spatia.analysis import channels as ch
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PART 1 -- SEGMENTATION
@@ -70,6 +152,13 @@ def _find_masked_tifs(processed_rois_dir: str) -> List[str]:
     tif_files = []
     for root, _dirs, files in os.walk(processed_rois_dir):
         for f in files:
+            # "._name.tif" files are macOS AppleDouble resource forks, created
+            # whenever this data is copied through an HFS+/APFS volume. They
+            # are ~4 KB of metadata, not images, and tifffile raises
+            # "not a TIFF file b'\\x00\\x05\\x16\\x07'" on them. Added
+            # 2026-09-03 after 134 of them entered a 276-file batch.
+            if f.startswith("._"):
+                continue
             if f.endswith(".tif") and "preview" not in f and ".ome.tif" not in f:
                 tif_files.append(os.path.join(root, f))
     return tif_files
@@ -79,11 +168,23 @@ def _find_masked_tifs(processed_rois_dir: str) -> List[str]:
 # CHANNEL-ORDER VALIDATION
 # run_cell_segmentation applies ONE channel_file to every masked ROI TIFF in
 # the batch. That's only correct if every image really does share the same
-# channel count/order. roi_masking.py already derives the per-slide channel
-# order and writes it two ways -- embedded in the TIFF's own ImageJ 'Labels'
-# metadata, and as a sidecar "{roi}_channel_info.txt" -- so each image can be
-# checked against the global channel_file before trusting it, instead of
-# silently mislabeling markers when an image doesn't match.
+# channel count/order.
+#
+# REVISED 2026-09-03. The original check compared the TIFF's embedded ImageJ
+# 'Labels' against the panel file name-for-name. That works for ROIs written by
+# roi_masking.py (which embeds real marker names), but it can NEVER pass for
+# raw CODEX/PhenoCycler acquisitions, whose labels are scanner placeholders --
+# "ch1".."ch4" repeating once per cycle -- carrying no marker identity at all.
+# On the CRC TMA that rejected all 137 real cores.
+#
+# The check now dispatches on what the image actually is:
+#   * real marker names embedded  -> compare name-for-name, as before
+#   * generic placeholders        -> compare PLANE COUNT against the panel, and
+#                                    verify nuclear periodicity on the pixels
+#
+# Plane count is the comparison with teeth: it catches a truncated acquisition,
+# a panel from a different experiment, or a core genuinely missing cycles --
+# the failure modes the name check was reaching for and missing.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _read_channel_file(channel_file_path: str) -> List[str]:
@@ -140,31 +241,69 @@ def _read_tiff_channel_labels(tiff_path: str) -> Optional[List[str]]:
         return None
 
 
-def _check_channel_order(tiff_path: str, expected_channels: List[str]) -> Tuple[Optional[bool], str]:
+def _check_channel_order(
+    tiff_path: str,
+    expected_channels: List[str],
+    info: Optional["ch.StackInfo"] = None,
+) -> Tuple[Optional[bool], str]:
     """
-    Compare this image's own channel order against the global channel_file.
+    Validate this image against the global channel_file.
 
-    Returns (True, msg) on match, (False, msg) on a real mismatch (count or
-    name/order -- the file gets skipped), (None, msg) if this image has no
-    per-image channel metadata to check against (proceeds unverified with a
-    warning, doesn't block -- same as the old, unchecked behavior).
+    Returns (True, msg) on match, (False, msg) on a real mismatch (the file
+    gets skipped), (None, msg) if nothing could be checked (proceeds
+    unverified with a warning, doesn't block).
+
+    Two paths, chosen by what the image carries:
+
+    1. Embedded labels are real marker names (roi_masking.py output) --
+       compare name-for-name, exactly as before.
+
+    2. Embedded labels are scanner placeholders, or absent (raw CODEX) --
+       marker identity was never in the file, so names cannot be compared.
+       Compare the PLANE COUNT instead, using the file's true structure:
+       a (23, 4, Y, X) hyperstack is 92 planes, not 23.
     """
+    info = info or ch.inspect_stack(tiff_path)
+
+    # Fail loud rather than guessing. An OME-TIFF or QPTIFF normally carries
+    # its own channel names; if they can't be read, "unknown" must not be
+    # treated as "unlabeled" -- applying the panel positionally to a file that
+    # already had names would silently relabel every marker.
+    if info.labels_unverifiable:
+        return False, (
+            "file format normally carries channel names (OME-TIFF/QPTIFF) but "
+            "they could not be read — refusing to apply channel_file "
+            "positionally, which would silently relabel markers. Export this "
+            "image with readable channel metadata, or convert it to a plain "
+            "multichannel .tif whose channel order you have verified."
+        )
+
+    if info.n_planes != len(expected_channels):
+        return False, (
+            f"channel COUNT mismatch — channel_file has {len(expected_channels)} "
+            f"names, this image has {info.n_planes} planes ({info.describe()})"
+        )
+
+    if info.labels_are_generic():
+        return None, (
+            f"image carries only generic channel labels ({info.describe()}) — "
+            f"marker identity comes from channel_file; plane count "
+            f"({info.n_planes}) verified"
+        )
+
     actual = _read_tiff_channel_labels(tiff_path)
     if actual is None:
         return None, "no per-image channel metadata found (older ROI export?) — cannot verify"
-
-    if len(actual) != len(expected_channels):
-        return False, (
-            f"channel COUNT mismatch — channel_file has {len(expected_channels)} "
-            f"({expected_channels}), this image has {len(actual)} ({actual})"
-        )
 
     mismatches = [
         f"position {i}: channel_file says '{e}', image says '{a}'"
         for i, (e, a) in enumerate(zip(expected_channels, actual)) if e != a
     ]
     if mismatches:
-        return False, "channel ORDER/NAME mismatch — " + "; ".join(mismatches)
+        shown = "; ".join(mismatches[:5])
+        if len(mismatches) > 5:
+            shown += f"; ... and {len(mismatches) - 5} more"
+        return False, "channel ORDER/NAME mismatch — " + shown
 
     return True, "channels match"
 
@@ -181,6 +320,9 @@ def run_cell_segmentation(
     resize_factor: int = 1,
     size_cutoff: int = 0,
     channel_check: bool = True,
+    normalized_dir: Optional[str] = None,
+    keep_normalized: bool = False,
+    auto_panel_template: bool = True,
 ) -> Dict[str, object]:
     """
     Run spacec cell segmentation over every masked ROI TIFF found under
@@ -216,15 +358,33 @@ def run_cell_segmentation(
         (e.g. pre-existing ROI exports) proceed with a warning, unverified --
         same as the behavior before this check existed. Set False to restore
         that old, unchecked behavior entirely.
+
+    normalized_dir : str, optional
+        Where to write flattened, correctly-labeled copies of any image whose
+        on-disk layout spacec cannot read directly (raw CODEX "TCYX"
+        hyperstacks). Defaults to "<output_dir>/_normalized".
+
+    keep_normalized : bool, default False
+        A normalized copy is the same size as its source (~508 MB per CRC core,
+        ~72 GB across all four TMA folders), so by default each one is deleted
+        as soon as its image has been segmented -- peak extra disk is one file,
+        not a second copy of the dataset. Set True to keep them for inspection,
+        or to let a re-run skip the conversion.
+
+    auto_panel_template : bool, default True
+        If channel_file_path does not exist, write a positional template
+        ("cyc01_ch1", ...) sized from the first image instead of hard-failing,
+        so the mechanics can be smoke-tested. Loudly flagged: those are
+        placeholders, not marker identities.
     """
     os.makedirs(output_dir, exist_ok=True)
+    normalized_dir = normalized_dir or os.path.join(output_dir, "_normalized")
 
-    if not os.path.exists(channel_file_path):
+    if not os.path.exists(channel_file_path) and not auto_panel_template:
         raise FileNotFoundError(
             f"Channel file not found: {channel_file_path}. "
             "Segmentation cannot proceed without a channel-name mapping."
         )
-    expected_channels = _read_channel_file(channel_file_path)
 
     tif_files = _find_masked_tifs(processed_rois_dir)
     if not tif_files:
@@ -239,6 +399,16 @@ def run_cell_segmentation(
     segmentation_errors: List[dict] = []
     n_unverified = 0
     n_already_done = 0
+    n_normalized = 0
+
+    # Resolved once, from the first readable image, then re-validated per image
+    # by plane count. expected_channels stays the single source of marker
+    # identity; panel_source records where it came from for the run log.
+    expected_channels: Optional[List[str]] = None
+    resolved_nuclei = nuclei_channel
+    resolved_membrane = list(membrane_channel_list)
+    periodicity_checked = False
+
     print("Starting cell segmentation...")
 
     for input_file in tif_files:
@@ -254,8 +424,50 @@ def run_cell_segmentation(
             n_already_done += 1
             continue
 
+        # ── Structure detection ──────────────────────────────────────────────
+        # Reads only the TIFF header, so this is cheap enough to do per image
+        # and it is what tells us a (23, 4, Y, X) hyperstack is 92 planes.
+        # A file that isn't a readable TIFF at all (macOS "._" resource forks,
+        # truncated copies) fails here and is recorded, instead of crashing the
+        # batch several steps later inside spacec.
+        try:
+            info = ch.inspect_stack(input_file)
+        except Exception as e:
+            print(f"  ❌ Unreadable TIFF, skipping {filename}: {e}")
+            segmentation_errors.append({"file": input_file, "error": f"unreadable TIFF: {e}"})
+            continue
+
+        # ── Panel resolution (once) ──────────────────────────────────────────
+        if expected_channels is None:
+            expected_channels = ch.ensure_panel(
+                channel_file_path, info, auto_template=auto_panel_template
+            )
+            resolved = ch.resolve_channels(
+                expected_channels, info,
+                nuclei_channel=nuclei_channel,
+                membrane_channel_list=membrane_channel_list,
+            )
+            resolved_nuclei = resolved["nuclei_channel"]
+            resolved_membrane = resolved["membrane_channel_list"]
+            groups = ch.classify_panel(expected_channels, info)
+            print(
+                f"Panel               : {len(expected_channels)} channels "
+                f"({len(groups['marker'])} markers, {len(groups['nuclear'])} nuclear, "
+                f"{len(groups['blank'])} blank/empty)"
+            )
+            print(f"Layout              : {info.describe()}")
+            print(f"Nuclei channel      : {resolved_nuclei!r}  (config: {nuclei_channel!r})")
+            print(f"Membrane channel(s) : {resolved_membrane}  (config: {list(membrane_channel_list)})")
+            if groups["blank"]:
+                print(
+                    f"  note: planes {groups['blank'][:6]}"
+                    f"{' ...' if len(groups['blank']) > 6 else ''} are blank/empty "
+                    f"slots — expect zero variance; drop them before any "
+                    f"per-channel normalization downstream."
+                )
+
         if channel_check:
-            ok, msg = _check_channel_order(input_file, expected_channels)
+            ok, msg = _check_channel_order(input_file, expected_channels, info)
             if ok is False:
                 print(f"  ❌ CHANNEL MISMATCH for {filename}: {msg}")
                 print(f"     Skipping this image — segmenting it against "
@@ -266,18 +478,62 @@ def run_cell_segmentation(
                 continue
             elif ok is None:
                 n_unverified += 1
-                print(f"  ⚠️  {filename}: {msg} — proceeding unverified against the global channel_file.")
+                print(f"  ⚠️  {filename}: {msg}")
 
-        print(f"Segmenting: {input_file}")
+        # ── Normalization ────────────────────────────────────────────────────
+        # spacec reads the file itself and treats axis 0 as the channel axis, so
+        # a (23, 4, Y, X) hyperstack makes it see 23 channels and index out of
+        # bounds. Hand it a flat (92, Y, X) TIFF whose embedded labels are the
+        # real marker names instead. Nothing to do for already-flat images.
+        seg_input = input_file
+        normalized_path = None
+        if info.needs_flattening or info.labels_are_generic():
+            normalized_path = os.path.join(normalized_dir, slide_id, filename)
+            try:
+                ch.normalize_stack_to_file(
+                    input_file, normalized_path, expected_channels, info
+                )
+                seg_input = normalized_path
+                n_normalized += 1
+            except Exception as e:
+                print(f"  ❌ Could not normalize {filename}: {e}")
+                segmentation_errors.append({"file": input_file, "error": f"normalize failed: {e}"})
+                continue
+
+            # One pixel-level check per run that the cycle-major flatten was
+            # right: in CODEX, channel 1 of every cycle re-images the same
+            # nuclei, so those planes must correlate. If they don't, the panel
+            # is being mapped onto a stack it doesn't describe.
+            if channel_check and not periodicity_checked:
+                periodicity_checked = True
+                try:
+                    qc = ch.verify_nuclear_periodicity(
+                        ch.load_flat_stack(input_file, info), info
+                    )
+                    if qc.get("checked"):
+                        status = "✓" if qc["passed"] else "❌"
+                        print(f"  {status} nuclear periodicity: mean r={qc['mean_corr']:.3f} — {qc['reason']}")
+                        if not qc["passed"]:
+                            raise RuntimeError(
+                                f"Nuclear-periodicity check failed on {filename}: "
+                                f"{qc['reason']}. Refusing to segment the batch — "
+                                f"every marker would carry the wrong name."
+                            )
+                except RuntimeError:
+                    raise
+                except Exception as e:
+                    print(f"  ⚠️  periodicity check could not run: {e}")
+
+        print(f"Segmenting: {seg_input}")
         try:
             seg_output = sp.tl.cell_segmentation(
-                file_name=input_file,
+                file_name=seg_input,
                 channel_file=channel_file_path,
                 output_dir=slide_output_dir,
                 seg_method=seg_method,
-                nuclei_channel=nuclei_channel,
+                nuclei_channel=resolved_nuclei,
                 output_fname=output_fname,
-                membrane_channel_list=membrane_channel_list,
+                membrane_channel_list=resolved_membrane,
                 compartment=compartment,
                 input_format=input_format,
                 resize_factor=resize_factor,
@@ -291,6 +547,14 @@ def run_cell_segmentation(
             print(f"Error during segmentation for {filename}: {e}")
             print(f"Stack trace: {sys.exc_info()}")
             segmentation_errors.append({"file": input_file, "error": str(e)})
+        finally:
+            # Peak extra disk stays at one normalized file, not a second copy
+            # of the dataset. Kept only if explicitly asked for.
+            if normalized_path and not keep_normalized and os.path.exists(normalized_path):
+                try:
+                    os.remove(normalized_path)
+                except OSError:
+                    pass
 
     print("All segmentation processes completed!")
 
@@ -302,6 +566,9 @@ def run_cell_segmentation(
         f"(skipped), {len(channel_mismatches)} skipped for channel mismatch "
         f"— {len(tif_files)} total files found."
     )
+    if n_normalized:
+        kept = "kept" if keep_normalized else "deleted after segmenting"
+        print(f"   {n_normalized} image(s) flattened to a labeled CYX stack first ({kept}).")
     if segmentation_errors:
         print(f"⚠️  {len(segmentation_errors)} image(s) FAILED segmentation "
               f"(see errors above) and produced no output:")
@@ -327,12 +594,24 @@ def run_cell_segmentation(
             f"than segmented with wrong channel labels. See the list above. "
             f"Either fix channelnames.txt to match, or split these images into "
             f"a separate segmentation run with the correct channel_file. "
+            f"A count mismatch usually means a truncated acquisition or a panel "
+            f"from a different experiment — check the reported plane count "
+            f"against len(channelnames.txt) before assuming the panel is wrong. "
             f"Pass channel_check=False to run_segmentation()/run_cell_segmentation() "
-            f"to bypass this check (not recommended unless channel order has "
-            f"been verified another way)."
+            f"to bypass this check (not recommended: it also disables the "
+            f"nuclear-periodicity verification, which is the only pixel-level "
+            f"evidence that the panel maps onto this stack correctly)."
         )
 
-    return {"outputs": segmentation_outputs, "errors": segmentation_errors}
+    return {
+        "outputs": segmentation_outputs,
+        "errors": segmentation_errors,
+        # Resolved names, not the raw config values -- overlays and any
+        # downstream step need the real panel entry, not the literal "auto".
+        "nuclei_channel": resolved_nuclei,
+        "membrane_channel_list": resolved_membrane,
+        "channel_names": expected_channels or [],
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -532,7 +811,11 @@ def run_segmentation(cfg: dict) -> dict:
 
     seg_cfg = cfg.get("segmentation", {})
     seg_method = seg_cfg.get("seg_method", "mesmer")
-    nuclei_channel = seg_cfg.get("nuclei_channel", "DAPI")
+    # "auto" resolves structurally: channel 1 of cycle 1, the CODEX nuclear
+    # slot. Short names ("CD45") also resolve against the full panel entry
+    # ("CD45 - hematopoietic cells"), so the config doesn't have to mirror
+    # the panel file's exact punctuation.
+    nuclei_channel = seg_cfg.get("nuclei_channel", "auto")
     membrane_channel_list = seg_cfg.get("membrane_channel_list", ["CD45"])
     compartment = seg_cfg.get("compartment", "whole-cell")
     input_format = seg_cfg.get("input_format", "Multichannel")
@@ -540,6 +823,9 @@ def run_segmentation(cfg: dict) -> dict:
     size_cutoff = seg_cfg.get("size_cutoff", 0)
     do_overlays = seg_cfg.get("generate_overlays", True)
     channel_check = seg_cfg.get("channel_check", True)
+    normalized_dir = seg_cfg.get("normalized_dir") or paths.get("converted_tif_dir")
+    keep_normalized = seg_cfg.get("keep_normalized", False)
+    auto_panel_template = seg_cfg.get("auto_panel_template", True)
 
     print("=" * 72)
     print("SPATIA CELL SEGMENTATION")
@@ -564,16 +850,21 @@ def run_segmentation(cfg: dict) -> dict:
         resize_factor=resize_factor,
         size_cutoff=size_cutoff,
         channel_check=channel_check,
+        normalized_dir=normalized_dir,
+        keep_normalized=keep_normalized,
+        auto_panel_template=auto_panel_template,
     )
     segmentation_outputs = seg_result["outputs"]
     segmentation_errors = seg_result["errors"]
+    resolved_nuclei = seg_result.get("nuclei_channel", nuclei_channel)
+    resolved_membrane = seg_result.get("membrane_channel_list", membrane_channel_list)
 
     csv_files = export_segmentation_to_csv(output_dir)
 
     overlay_files: List[str] = []
     if do_overlays:
-        overlay_files = generate_overlays(output_dir, nucleus_channel=nuclei_channel,
-                                           additional_channels=membrane_channel_list)
+        overlay_files = generate_overlays(output_dir, nucleus_channel=resolved_nuclei,
+                                           additional_channels=resolved_membrane)
 
     return {
         "segmentation_outputs": segmentation_outputs,
@@ -581,4 +872,7 @@ def run_segmentation(cfg: dict) -> dict:
         "csv_files": csv_files,
         "overlay_files": overlay_files,
         "output_dir": output_dir,
+        "nuclei_channel": resolved_nuclei,
+        "membrane_channel_list": resolved_membrane,
+        "channel_names": seg_result.get("channel_names", []),
     }
