@@ -41,6 +41,12 @@
 !docs/spatia_analysis_tif_conversion.md
 !docs/spatia_analysis_roi_masking.md
 !docs/spatia_analysis_segmentation.md
+# New 2026-09-04: doc for the new spatia/analysis/channels.py support module
+# (CODEX hyperstack handling, panel resolution) that segmentation.py now
+# depends on. Without this line the file would sit in docs/ on disk but never
+# be tracked -- this repo's whitelist blocks everything by default and each
+# tracked doc must be named explicitly, same as every other entry below.
+!docs/spatia_analysis_channels.md
 !docs/spatia_analysis_preprocessing.md
 !docs/spatia_analysis_cell_typing.md
 !docs/spatia_analysis_triads.md
