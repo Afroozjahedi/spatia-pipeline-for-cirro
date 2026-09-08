@@ -116,6 +116,7 @@ import os
 import re
 import sys
 import pickle
+import time
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -410,8 +411,10 @@ def run_cell_segmentation(
     periodicity_checked = False
 
     print("Starting cell segmentation...")
+    t_start = time.time()
+    n_total = len(tif_files)
 
-    for input_file in tif_files:
+    for idx, input_file in enumerate(tif_files, start=1):
         filename = os.path.basename(input_file)
         output_fname = os.path.splitext(filename)[0]
         slide_id = os.path.basename(os.path.dirname(input_file))
@@ -420,7 +423,7 @@ def run_cell_segmentation(
 
         pickle_file = os.path.join(slide_output_dir, f"{output_fname}_seg_output.pickle")
         if os.path.exists(pickle_file):
-            print(f"Segmentation output already exists, skipping: {pickle_file}")
+            print(f"[{idx}/{n_total}] Segmentation output already exists, skipping: {pickle_file}")
             n_already_done += 1
             continue
 
@@ -433,7 +436,7 @@ def run_cell_segmentation(
         try:
             info = ch.inspect_stack(input_file)
         except Exception as e:
-            print(f"  ❌ Unreadable TIFF, skipping {filename}: {e}")
+            print(f"[{idx}/{n_total}]   ❌ Unreadable TIFF, skipping {filename}: {e}")
             segmentation_errors.append({"file": input_file, "error": f"unreadable TIFF: {e}"})
             continue
 
@@ -524,7 +527,16 @@ def run_cell_segmentation(
                 except Exception as e:
                     print(f"  ⚠️  periodicity check could not run: {e}")
 
-        print(f"Segmenting: {seg_input}")
+        elapsed = time.time() - t_start
+        n_done_for_eta = idx - 1 - n_already_done  # only count images actually segmented so far -- skips segment instantly and would skew the average
+        if n_done_for_eta > 0:
+            avg_sec = elapsed / n_done_for_eta
+            remaining = max(n_total - idx + 1, 0)
+            eta_sec = avg_sec * remaining
+            progress_note = f"  (elapsed {elapsed/60:.1f} min, ~{eta_sec/60:.1f} min remaining for {remaining} left)"
+        else:
+            progress_note = "  (elapsed <1 min, ETA not yet available)"
+        print(f"[{idx}/{n_total}] Segmenting: {seg_input}{progress_note}")
         try:
             seg_output = sp.tl.cell_segmentation(
                 file_name=seg_input,
@@ -542,9 +554,9 @@ def run_cell_segmentation(
             segmentation_outputs[output_fname] = seg_output
             with open(pickle_file, "wb") as f:
                 pickle.dump(seg_output, f)
-            print(f"Segmentation completed for: {filename}")
+            print(f"[{idx}/{n_total}] Segmentation completed for: {filename}")
         except Exception as e:
-            print(f"Error during segmentation for {filename}: {e}")
+            print(f"[{idx}/{n_total}] Error during segmentation for {filename}: {e}")
             print(f"Stack trace: {sys.exc_info()}")
             segmentation_errors.append({"file": input_file, "error": str(e)})
         finally:
