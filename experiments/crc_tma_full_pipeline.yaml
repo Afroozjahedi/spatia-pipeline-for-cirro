@@ -167,7 +167,7 @@ segmentation:
   # Short names now resolve against the full panel entry
   # ("CD45" -> "CD45 - hematopoietic cells"). Ambiguous prefixes raise rather
   # than guessing -- "CD4" would match CD44/CD45/CD45RA/CD45RO.
-  membrane_channel_list: ["CD45"]
+  membrane_channel_list: ["CD45 - hematopoietic cells"]
   compartment: "whole-cell"
   input_format: "Multichannel"
   resize_factor: 1
