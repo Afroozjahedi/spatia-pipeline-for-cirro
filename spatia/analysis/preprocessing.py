@@ -307,13 +307,27 @@ def run_preprocessing(cfg: dict) -> dict:
     image_experiment_group_map = cfg["experiment"].get("image_experiment_group_map", {})
     seg_dir        = cfg["paths"]["segmentation_results_dir"]
     base_out       = cfg["paths"]["output_dir"]
+    channel_file   = cfg["paths"].get("channel_file")
+    panel_names    = None
+    if channel_file and os.path.exists(channel_file):
+        try:
+            panel_names = ch.read_panel(channel_file)
+        except Exception as e:
+            print(f"  ⚠️  Could not read channel_file {channel_file!r}: {e}. "
+                  f"'auto' nuclei_channel will fall back to pattern-matching, "
+                  f"which raises if the panel has more than one nuclear-looking "
+                  f"column (e.g. a multi-cycle CODEX panel).")
 
     pp_cfg         = cfg.get("preprocessing", {})
     last_marker    = pp_cfg.get("last_marker", None)   # e.g. "SIGLEC F"
     nuclei_channel_cfg = pp_cfg.get("nuclei_channel", "auto")  # mirrors
-        # segmentation.nuclei_channel -- "auto" picks the column matching
-        # _NUCLEAR_RE (e.g. "HOECHST1 (C1)"), not the literal name "DAPI",
-        # which this panel does not have as a column at all.
+        # segmentation.nuclei_channel -- "auto" resolves to panel_names[0]
+        # (e.g. "HOECHST1 (C1)"), the same value segmentation itself
+        # resolved, not the literal name "DAPI", which this panel does not
+        # have as a column at all. NOT a unique-_NUCLEAR_RE-match: a
+        # multi-cycle CODEX panel re-images the nuclear stain once per
+        # cycle, so many columns can legitimately look nuclear (this panel
+        # has 24) -- panel_names[0] is what makes "auto" unambiguous.
     size_pct       = pp_cfg.get("qc_filter", {}).get("size_percentile",  1)
     dapi_pct       = pp_cfg.get("qc_filter", {}).get("dapi_percentile",  1)
     noise_cut_off  = pp_cfg.get("noise", {}).get("cut_off",   0.01)
@@ -413,7 +427,8 @@ def run_preprocessing(cfg: dict) -> dict:
                     df = pd.read_csv(file_path)
                     df["slide_folder"] = slide_folder
                     nuclei_col = ch.resolve_column(
-                        nuclei_channel_cfg, df.columns, role="preprocessing.nuclei_channel"
+                        nuclei_channel_cfg, df.columns, role="preprocessing.nuclei_channel",
+                        panel_names=panel_names,
                     )
 
                     base_name = csv_file.replace("_mesmer_result.csv", "").replace("mesmer_result.csv", "")
@@ -785,6 +800,14 @@ def run_qupath_export(cfg: dict) -> str:
     size_pct    = pp_cfg.get("qc_filter", {}).get("size_percentile", 1)
     dapi_pct    = pp_cfg.get("qc_filter", {}).get("dapi_percentile", 1)
 
+    channel_file = cfg["paths"].get("channel_file")
+    panel_names  = None
+    if channel_file and os.path.exists(channel_file):
+        try:
+            panel_names = ch.read_panel(channel_file)
+        except Exception as e:
+            print(f"  ⚠️  Could not read channel_file {channel_file!r}: {e}")
+
     tissues_dir = os.path.join(base_out, "combined_processed_data", "individual_processed_data")
     qupath_dir  = os.path.join(base_out, "qupath_exports")
     qcviz_dir   = os.path.join(qupath_dir, "qc_visualizations")
@@ -828,7 +851,7 @@ def run_qupath_export(cfg: dict) -> str:
             df_raw = pd.read_csv(os.path.join(slide_dir, csv_file))
             nuclei_col = ch.resolve_column(
                 pp_cfg.get("nuclei_channel", "auto"), df_raw.columns,
-                role="preprocessing.nuclei_channel",
+                role="preprocessing.nuclei_channel", panel_names=panel_names,
             )
             image_id  = csv_file.replace("_mesmer_result.csv", "").replace("mesmer_result.csv", "")
             experiment_group = resolve_experiment_group(

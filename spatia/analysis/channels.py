@@ -512,7 +512,7 @@ def resolve_channels(
     }
 
 
-def resolve_column(spec, columns, role: str = "column") -> str:
+def resolve_column(spec, columns, role: str = "column", panel_names=None) -> str:
     """
     Like resolve_channel(), but resolves a config value against a flat list
     of DataFrame column names instead of a raw hyperstack panel.
@@ -533,19 +533,37 @@ def resolve_column(spec, columns, role: str = "column") -> str:
     Ambiguous or missing raises rather than guessing, so a config value like
     a bare "CD45" (which also prefix-matches CD45RA and CD45RO columns in
     this panel) fails loudly instead of silently selecting the wrong column.
+
+    panel_names : the acquisition panel in stack order (e.g. read_panel() on
+    the same channel_file segmentation used), when available. "auto" prefers
+    panel_names[0] over pattern-matching columns directly -- fixed 2026-09-09
+    after this panel showed why the pattern-match fallback is unsafe: a CODEX
+    acquisition re-images the nuclear stain once per cycle, so a 92-channel
+    panel can legitimately have MANY columns matching _NUCLEAR_RE (this one
+    has 24: HOECHST1-23 + DRAQ5, one per cycle) -- that's not an ambiguity to
+    raise on, it's the expected shape, and resolve_channel()'s own "auto"
+    (which segmentation.py actually used) always means "the first channel in
+    the panel", full stop, regardless of cycle count. Re-deriving that same
+    concrete name here keeps preprocessing's "auto" in lockstep with whatever
+    segmentation resolved, instead of guessing from column names alone.
     """
     text = str(spec).strip()
     columns = list(columns)
 
     if text.lower() == "auto":
+        if panel_names:
+            return resolve_column(str(panel_names[0]).strip(), columns, role=role)
         matches = [c for c in columns if _NUCLEAR_RE.match(str(c))]
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
             raise ValueError(
                 f"'auto' {role} is ambiguous -- {len(matches)} columns look "
-                f"nuclear (matched {_NUCLEAR_RE.pattern!r}): {matches}. Set "
-                f"the config value to the exact column name."
+                f"nuclear (matched {_NUCLEAR_RE.pattern!r}): {matches}. This "
+                f"usually means a panel_names argument (the acquisition panel "
+                f"in stack order) should have been passed instead of relying "
+                f"on pattern-matching -- see read_panel(). Otherwise, set the "
+                f"config value to the exact column name."
             )
         raise ValueError(
             f"'auto' {role} found no nuclear-looking column (matched against "
