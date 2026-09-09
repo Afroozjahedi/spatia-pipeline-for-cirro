@@ -28,6 +28,11 @@
 !prepare_matched_cells.py
 !pool_tissues_for_celltyping.py
 
+# Ad-hoc aggregate QC/summary report over an already-completed
+# run_preprocessing() run (tissue-level, CLR/DII group-level, and
+# marker-level framings). Reads existing outputs only, dataset-agnostic.
+!generate_preprocessing_summary.py
+
 !cell_type_definitions/
 !cell_type_definitions/*.yaml
 
