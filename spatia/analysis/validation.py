@@ -195,6 +195,13 @@ def validate_preprocessing(cfg: dict) -> Tuple[bool, List[ValidationError]]:
     - Each combined h5ad opens cleanly
     - Each combined h5ad has a 'experiment_group' column in obs
     - Each combined h5ad has > 0 cells
+    - Across ALL combined h5ad files together, every experiment_group named
+      in cfg["experiment"]["groups"] shows up somewhere in obs["experiment_group"].
+      This is checked at the whole-run level, not per file: some datasets scan
+      different experiment groups as entirely separate slide folders (see
+      image_experiment_group_map in the config), so any individual tissue's
+      combined h5ad legitimately contains only ONE experiment_group. Requiring
+      every file to contain every group would fail correctly-processed runs.
     """
     errors: List[ValidationError] = []
     step = "preprocessing"
@@ -223,6 +230,8 @@ def validate_preprocessing(cfg: dict) -> Tuple[bool, List[ValidationError]]:
         ))
         return False, errors
 
+    all_found_groups: set = set()
+
     for fname in combined_files:
         path = os.path.join(tissues_dir, fname)
 
@@ -249,16 +258,21 @@ def validate_preprocessing(cfg: dict) -> Tuple[bool, List[ValidationError]]:
                 path,
             ))
 
-        experiment_groups = cfg["experiment"]["groups"]
         if "experiment_group" in adata.obs.columns:
-            found = set(adata.obs["experiment_group"].unique())
-            expected = set(experiment_groups)
-            if not expected.issubset(found) and len(found) < 2:
-                errors.append(ValidationError(
-                    step,
-                    f"Expected experiment_groups {expected} but found {found} in obs['experiment_group'].",
-                    path,
-                ))
+            all_found_groups |= set(adata.obs["experiment_group"].unique())
+
+    # Whole-run check, not per-file -- see docstring. A tissue's combined
+    # h5ad containing only one experiment_group is expected, not an error;
+    # what matters is that every configured group is present SOMEWHERE
+    # across the run.
+    expected_groups = set(cfg["experiment"]["groups"])
+    if not expected_groups.issubset(all_found_groups):
+        errors.append(ValidationError(
+            step,
+            f"Expected experiment_groups {expected_groups} but only found "
+            f"{all_found_groups} across all combined h5ad files in {tissues_dir}.",
+            tissues_dir,
+        ))
 
     return len(errors) == 0, errors
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
 import pickle
 import logging
 from datetime import datetime
@@ -385,6 +386,24 @@ def run_preprocessing(cfg: dict) -> dict:
         processing_stats: List[dict]            = []
         processing_errors: List[dict]           = []
 
+        # Progress/ETA instrumentation (mirrors segmentation.py's
+        # run_cell_segmentation() pattern). Pre-scan every slide folder up
+        # front to get a single global n_total across the whole run --
+        # this loop is nested (slide_folder -> csv_file) so idx has to be
+        # a counter incremented across both levels, not derived from
+        # enumerate() on either loop alone.
+        n_total = 0
+        for _sf in slide_folders:
+            _sf_dir = os.path.join(seg_dir, _sf)
+            n_total += len([
+                f for f in os.listdir(_sf_dir)
+                if f.endswith("mesmer_result.csv") and not f.startswith("._")
+            ])
+        idx = 0
+        n_already_done = 0
+        t_start = time.time()
+        print(f"Total images to process: {n_total}")
+
         for slide_folder in slide_folders:
             slide_dir = os.path.join(seg_dir, slide_folder)
             print(f"\n{'=' * 80}")
@@ -414,8 +433,24 @@ def run_preprocessing(cfg: dict) -> dict:
                     print(f"  Error loading overlay {pf}: {e}")
 
             for csv_file in csv_files:
+                idx += 1
                 file_path = os.path.join(slide_dir, csv_file)
-                print(f"\n--- {csv_file} ---")
+
+                elapsed = time.time() - t_start
+                n_done_for_eta = idx - 1 - n_already_done  # only count images
+                    # actually processed so far -- skips finish instantly and
+                    # would skew the average, same reasoning as segmentation.py
+                if n_done_for_eta > 0:
+                    avg_sec = elapsed / n_done_for_eta
+                    remaining = max(n_total - idx + 1, 0)
+                    eta_sec = avg_sec * remaining
+                    progress_note = (
+                        f"  (elapsed {elapsed/60:.1f} min, "
+                        f"~{eta_sec/60:.1f} min remaining for {remaining} left)"
+                    )
+                else:
+                    progress_note = "  (elapsed <1 min, ETA not yet available)"
+                print(f"\n[{idx}/{n_total}] --- {csv_file} ---{progress_note}")
 
                 tissue_stats: dict = {
                     "filename":    csv_file,
@@ -485,6 +520,7 @@ def run_preprocessing(cfg: dict) -> dict:
                             "nuclei_col": nuclei_col,
                             "skipped":   True,
                         })
+                        n_already_done += 1
                         continue
 
                     # ── QC: size + DAPI filter ──────────────────────────
