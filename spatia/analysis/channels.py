@@ -512,6 +512,76 @@ def resolve_channels(
     }
 
 
+def resolve_column(spec, columns, role: str = "column") -> str:
+    """
+    Like resolve_channel(), but resolves a config value against a flat list
+    of DataFrame column names instead of a raw hyperstack panel.
+
+    Added 2026-09-09 for preprocessing.py, which reads already-exported
+    *_mesmer_result.csv files (export_segmentation_to_csv() in
+    segmentation.py writes one column per channel, named with the exact
+    resolved panel string -- e.g. "HOECHST1 (C1)", not "DAPI") rather than
+    the raw hyperstack itself, so it has no StackInfo to resolve against and
+    cannot call resolve_channel() directly.
+
+    "auto"  -> the unique column matching _NUCLEAR_RE (the same nuclear-stain
+               regex classify_panel()/verify_nuclear_periodicity() use).
+    Anything else -> exact match, then unique case-insensitive prefix match,
+               then unique case-insensitive substring match -- same fallback
+               order as resolve_channel().
+
+    Ambiguous or missing raises rather than guessing, so a config value like
+    a bare "CD45" (which also prefix-matches CD45RA and CD45RO columns in
+    this panel) fails loudly instead of silently selecting the wrong column.
+    """
+    text = str(spec).strip()
+    columns = list(columns)
+
+    if text.lower() == "auto":
+        matches = [c for c in columns if _NUCLEAR_RE.match(str(c))]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise ValueError(
+                f"'auto' {role} is ambiguous -- {len(matches)} columns look "
+                f"nuclear (matched {_NUCLEAR_RE.pattern!r}): {matches}. Set "
+                f"the config value to the exact column name."
+            )
+        raise ValueError(
+            f"'auto' {role} found no nuclear-looking column (matched against "
+            f"{_NUCLEAR_RE.pattern!r}) among: {columns}"
+        )
+
+    if text in columns:
+        return text
+
+    lowered = [str(c).lower() for c in columns]
+    target = text.lower()
+
+    exact_ci = [c for c, low in zip(columns, lowered) if low == target]
+    if len(exact_ci) == 1:
+        return exact_ci[0]
+
+    prefix = [c for c, low in zip(columns, lowered) if low.startswith(target)]
+    if len(prefix) == 1:
+        return prefix[0]
+
+    contains = [c for c, low in zip(columns, lowered) if target in low]
+    if len(contains) == 1:
+        return contains[0]
+
+    candidates = prefix or contains
+    if candidates:
+        raise ValueError(
+            f"{role} {spec!r} is ambiguous -- matches {len(candidates)} "
+            f"columns: {candidates}. Use the full column name."
+        )
+    raise ValueError(
+        f"{role} {spec!r} not found among {len(columns)} columns. First few: "
+        f"{columns[:10]}"
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # QC -- turns the manual 2026-09-03 correlation check into an automatic one
 # ─────────────────────────────────────────────────────────────────────────────

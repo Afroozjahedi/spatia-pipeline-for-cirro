@@ -35,6 +35,8 @@ import matplotlib.pyplot as plt
 import spacec as sp
 from kneed import KneeLocator
 
+from spatia.analysis import channels as ch
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LOGGING
@@ -159,7 +161,7 @@ def resolve_experiment_group(
 # QC HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _get_last_marker_col(df: pd.DataFrame, last_marker: str) -> int:
+def _get_last_marker_col(df: pd.DataFrame, last_marker: str, nuclei_col: str = "DAPI") -> int:
     """
     Return the integer column index of *last_marker*.
     Falls back to the rightmost non-metadata column if the marker is absent.
@@ -184,7 +186,7 @@ def _get_last_marker_col(df: pd.DataFrame, last_marker: str) -> int:
     METADATA_COLS = {
         "label", "area", "x", "y", "slide_folder", "image_ID", "experiment_group",
         "eccentricity", "perimeter", "convex_area",
-        "axis_major_length", "axis_minor_length", "DAPI",
+        "axis_major_length", "axis_minor_length", nuclei_col,
     }
     if last_marker and last_marker in df.columns:
         col_num = df.columns.get_loc(last_marker)
@@ -308,6 +310,10 @@ def run_preprocessing(cfg: dict) -> dict:
 
     pp_cfg         = cfg.get("preprocessing", {})
     last_marker    = pp_cfg.get("last_marker", None)   # e.g. "SIGLEC F"
+    nuclei_channel_cfg = pp_cfg.get("nuclei_channel", "auto")  # mirrors
+        # segmentation.nuclei_channel -- "auto" picks the column matching
+        # _NUCLEAR_RE (e.g. "HOECHST1 (C1)"), not the literal name "DAPI",
+        # which this panel does not have as a column at all.
     size_pct       = pp_cfg.get("qc_filter", {}).get("size_percentile",  1)
     dapi_pct       = pp_cfg.get("qc_filter", {}).get("dapi_percentile",  1)
     noise_cut_off  = pp_cfg.get("noise", {}).get("cut_off",   0.01)
@@ -371,7 +377,12 @@ def run_preprocessing(cfg: dict) -> dict:
             print(f"Slide folder: {slide_folder}")
             print("=" * 80)
 
-            csv_files = [f for f in os.listdir(slide_dir) if f.endswith("mesmer_result.csv")]
+            csv_files = [
+                f for f in os.listdir(slide_dir)
+                if f.endswith("mesmer_result.csv") and not f.startswith("._")
+            ]  # macOS AppleDouble sidecars (._reg...csv) end with the same
+               # suffix and are not real data -- see segmentation.py::_find_masked_tifs()
+               # and validation.py::validate_segmentation() for the same fix.
             if not csv_files:
                 print(f"  No mesmer_result.csv found — skipping")
                 continue
@@ -401,6 +412,9 @@ def run_preprocessing(cfg: dict) -> dict:
                 try:
                     df = pd.read_csv(file_path)
                     df["slide_folder"] = slide_folder
+                    nuclei_col = ch.resolve_column(
+                        nuclei_channel_cfg, df.columns, role="preprocessing.nuclei_channel"
+                    )
 
                     base_name = csv_file.replace("_mesmer_result.csv", "").replace("mesmer_result.csv", "")
                     df["image_ID"] = base_name
@@ -431,21 +445,23 @@ def run_preprocessing(cfg: dict) -> dict:
                         df_clean = pd.read_csv(
                             os.path.join(tissues_dir, f"{tissue_id}_{experiment_group}.csv")
                         )
-                        col_num = _get_last_marker_col(df_clean, last_marker)
+                        col_num = _get_last_marker_col(df_clean, last_marker, nuclei_col)
 
                         all_processed_tissues.setdefault(tissue_id, []).append({
                             "data":      df_clean,
                             "experiment_group": experiment_group,
                             "image_id":  image_id,
                             "col_num":   col_num,
+                            "nuclei_col": nuclei_col,
                             "skipped":   True,
                         })
                         continue
 
                     # ── QC: size + DAPI filter ──────────────────────────
                     area_thresh = np.percentile(df["area"], size_pct)
-                    dapi_thresh = np.percentile(df["DAPI"],  dapi_pct)
-                    print(f"  {size_pct}% thresholds — area: {area_thresh:.2f}, DAPI: {dapi_thresh:.2f}")
+                    dapi_thresh = np.percentile(df[nuclei_col],  dapi_pct)
+                    print(f"  {size_pct}% thresholds — area: {area_thresh:.2f}, "
+                          f"{nuclei_col}: {dapi_thresh:.2f}")
 
                     tissue_stats["area_threshold"] = area_thresh
                     tissue_stats["dapi_threshold"] = dapi_thresh
@@ -454,7 +470,7 @@ def run_preprocessing(cfg: dict) -> dict:
                         df,
                         nuc_thres=dapi_thresh,
                         size_thres=area_thresh,
-                        nuc_marker="DAPI",
+                        nuc_marker=nuclei_col,
                         cell_size="area",
                         log_scale=False,
                     )
@@ -478,11 +494,11 @@ def run_preprocessing(cfg: dict) -> dict:
                             "eccentricity", "perimeter", "convex_area",
                             "axis_major_length", "axis_minor_length", "label",
                         ],
-                        list_keep=["DAPI", "x", "y", "area", "image_ID", "experiment_group", "slide_folder"],
+                        list_keep=[nuclei_col, "x", "y", "area", "image_ID", "experiment_group", "slide_folder"],
                         method="zscore",
                     )
 
-                    col_num = _get_last_marker_col(df_norm, last_marker)
+                    col_num = _get_last_marker_col(df_norm, last_marker, nuclei_col)
 
                     # ── Noise removal ────────────────────────────────────
                     print(f"  Detecting noise cutoffs (last marker col: {col_num})…")
@@ -525,6 +541,7 @@ def run_preprocessing(cfg: dict) -> dict:
                         "experiment_group": experiment_group,
                         "image_id":  image_id,
                         "col_num":   col_num,
+                        "nuclei_col": nuclei_col,
                         "skipped":   False,
                     })
                     print(f"  ✓ Processed {image_id}")
@@ -626,7 +643,8 @@ def run_preprocessing(cfg: dict) -> dict:
                 METADATA = {
                     "label", "area", "x", "y", "slide_folder", "image_ID", "experiment_group",
                     "eccentricity", "perimeter", "convex_area",
-                    "axis_major_length", "axis_minor_length", "DAPI",
+                    "axis_major_length", "axis_minor_length",
+                    tinfo.get("nuclei_col", "DAPI"),
                 }
                 all_markers = [c for c in df_tissue.columns if c not in METADATA]
                 if not all_markers:
@@ -713,6 +731,7 @@ def _classify_cells(
     included_keys: set,
     area_thresh: float,
     dapi_thresh: float,
+    nuclei_col: str,
 ) -> pd.Series:
     """
     Label each raw cell with a QC classification:
@@ -728,7 +747,7 @@ def _classify_cells(
     ))
 
     small_area = df_raw["area"] < area_thresh
-    low_dapi   = df_raw["DAPI"] < dapi_thresh
+    low_dapi   = df_raw[nuclei_col] < dapi_thresh
 
     labels = []
     for i, key in enumerate(coord_key):
@@ -789,7 +808,10 @@ def run_qupath_export(cfg: dict) -> str:
 
     for slide_folder in slide_folders:
         slide_dir = os.path.join(seg_dir, slide_folder)
-        csv_files = [f for f in os.listdir(slide_dir) if f.endswith("mesmer_result.csv")]
+        csv_files = [
+            f for f in os.listdir(slide_dir)
+            if f.endswith("mesmer_result.csv") and not f.startswith("._")
+        ]
 
         # Load overlay images for this slide
         overlay_mapping: Dict[str, dict] = {}
@@ -804,6 +826,10 @@ def run_qupath_export(cfg: dict) -> str:
 
         for csv_file in csv_files:
             df_raw = pd.read_csv(os.path.join(slide_dir, csv_file))
+            nuclei_col = ch.resolve_column(
+                pp_cfg.get("nuclei_channel", "auto"), df_raw.columns,
+                role="preprocessing.nuclei_channel",
+            )
             image_id  = csv_file.replace("_mesmer_result.csv", "").replace("mesmer_result.csv", "")
             experiment_group = resolve_experiment_group(
                 image_id, slide_folder, image_experiment_group_map, experiment_groups
@@ -821,7 +847,7 @@ def run_qupath_export(cfg: dict) -> str:
 
             df_proc = pd.read_csv(proc_csv)
             area_thresh = np.percentile(df_raw["area"], size_pct)
-            dapi_thresh = np.percentile(df_raw["DAPI"],  dapi_pct)
+            dapi_thresh = np.percentile(df_raw[nuclei_col],  dapi_pct)
 
             included_keys = set(zip(
                 df_proc["x"].round(2).astype(str),
@@ -829,7 +855,7 @@ def run_qupath_export(cfg: dict) -> str:
             ))
 
             df_raw["classification"] = _classify_cells(
-                df_raw, included_keys, area_thresh, dapi_thresh
+                df_raw, included_keys, area_thresh, dapi_thresh, nuclei_col
             )
             df_raw["area_threshold"] = area_thresh
             df_raw["dapi_threshold"] = dapi_thresh
@@ -847,7 +873,7 @@ def run_qupath_export(cfg: dict) -> str:
 
             tsv_cols = [
                 "centroid_x", "centroid_y", "roi_x", "roi_y",
-                "roi_width", "roi_height", "area", "DAPI",
+                "roi_width", "roi_height", "area", nuclei_col,
                 "experiment_group", "image_ID", "tissue_id",
                 "classification", "area_threshold", "dapi_threshold",
             ]
@@ -909,13 +935,13 @@ def run_qupath_export(cfg: dict) -> str:
             for cls, color in COLOR_MAP.items():
                 sub = df_raw[df_raw["classification"] == cls]
                 if len(sub):
-                    ax.scatter(sub["area"], sub["DAPI"], c=color, s=1,
+                    ax.scatter(sub["area"], sub[nuclei_col], c=color, s=1,
                                alpha=0.4, label=cls)
             ax.axvline(area_thresh, color="black", linestyle="--", linewidth=1, label="area threshold")
-            ax.axhline(dapi_thresh, color="gray",  linestyle="--", linewidth=1, label="DAPI threshold")
+            ax.axhline(dapi_thresh, color="gray",  linestyle="--", linewidth=1, label=f"{nuclei_col} threshold")
             ax.set_xlabel("Cell area")
-            ax.set_ylabel("DAPI intensity")
-            ax.set_title(f"{tissue_id} – {experiment_group} DAPI vs Area")
+            ax.set_ylabel(f"{nuclei_col} intensity")
+            ax.set_title(f"{tissue_id} – {experiment_group} {nuclei_col} vs Area")
             ax.legend(markerscale=5, fontsize=8, loc="upper right")
             plt.tight_layout()
             plt.savefig(os.path.join(qcviz_dir, f"{safe_id}_QC_dapi_vs_area.png"), dpi=120, bbox_inches="tight")
