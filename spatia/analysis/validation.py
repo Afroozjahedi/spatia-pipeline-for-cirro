@@ -117,6 +117,15 @@ def validate_segmentation(cfg: dict) -> Tuple[bool, List[ValidationError]]:
     csv_files = []
     for root, _dirs, files in os.walk(seg_dir):
         for f in files:
+            # "._name.csv" files are macOS AppleDouble resource-fork sidecars,
+            # created whenever this output dir is browsed/copied through an
+            # HFS+/APFS volume -- ~4KB of binary metadata, not a real CSV.
+            # segmentation.py's _find_masked_tifs() already excludes the same
+            # pattern for input TIFFs (added 2026-09-03); this walk needed the
+            # same guard (added 2026-09-09 after one halted validation with
+            # "'utf-8' codec can't decode byte 0xb0").
+            if f.startswith("._"):
+                continue
             if f.endswith("_mesmer_result.csv"):
                 csv_files.append(os.path.join(root, f))
 
@@ -137,6 +146,12 @@ def validate_segmentation(cfg: dict) -> Tuple[bool, List[ValidationError]]:
         tif_count = 0
         for root, _dirs, files in os.walk(masked_dir):
             for f in files:
+                # Same AppleDouble exclusion as above and as
+                # segmentation.py's _find_masked_tifs() -- without it, a
+                # "._name.tif" sidecar inflates tif_count and produces a
+                # false "N short" mismatch error against the real CSV count.
+                if f.startswith("._"):
+                    continue
                 if f.endswith(".tif") and "preview" not in f:
                     tif_count += 1
         if tif_count and len(csv_files) < tif_count:
