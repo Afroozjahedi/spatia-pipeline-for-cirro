@@ -62,6 +62,10 @@
 !docs/pool_tissues_for_celltyping.md
 !docs/run_pipeline.md
 !docs/spatia_analysis_visualization.md
+# Was on disk but never whitelisted -- edits to it never reached JupyterHub via
+# git pull. Whitelisting now since validation.py itself got a real fix 2026-09-09.
+!docs/spatia_analysis_validation.md
+!docs/generate_preprocessing_summary.md
 
 # QuPath/Groovy scripts themselves stay untracked by design (see header
 # above) — these are docs *about* them, kept in git for reference.
