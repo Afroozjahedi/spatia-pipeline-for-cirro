@@ -7,14 +7,30 @@ Aggregate QC/summary report across a completed run_preprocessing() run.
 Reads the same config used for the pipeline run (--config), finds the
 outputs run_preprocessing() already wrote, and produces three framings:
 
-  1. Tissue-level : per-tissue cell counts and QC removal, from the
-                     processing_stats_<timestamp>.csv row-per-image table.
-  2. Group-level   : CLR vs DII (or whatever cfg["experiment"]["groups"] is)
-                     comparison of the same QC metrics.
-  3. Marker-level  : per-marker mean expression by experiment_group, read
-                     directly from the combined *_combined_all_experiment_groups.h5ad
-                     files (processing_stats.csv has no marker columns --
-                     only the h5ad/csv outputs carry per-marker intensities).
+  1. Tissue-level        : per-tissue cell counts and QC removal, from the
+                            processing_stats_<timestamp>.csv row-per-image table.
+  2. Group-level          : CLR vs DII (or whatever cfg["experiment"]["groups"]
+                            is) comparison of the same QC metrics.
+  3. Removal reasons      : coarse (size+DAPI filter vs. noise removal) cell
+                            counts by group, from processing_stats.csv --
+                            always available. A finer split (small-area vs
+                            low-DAPI vs noise, individually) is also produced
+                            if qupath_exports/qupath_export_summary.csv exists
+                            (written by the separate, optional
+                            run_qupath_export(cfg) step -- not part of
+                            run_pipeline.py --steps, so most runs won't have
+                            it yet; this report is skipped with an
+                            explanatory message, not an error, if absent).
+  4. Marker-level         : per-marker mean expression by experiment_group,
+                            read directly from the combined
+                            *_combined_all_experiment_groups.h5ad files
+                            (processing_stats.csv has no marker columns).
+                            These values are already per-cell z-scores (see
+                            run_preprocessing()'s zscore normalization step),
+                            so markers are already on one comparable scale --
+                            for exactly 2 groups this is plotted as a signed
+                            group-mean-difference bar chart; for >2 groups, a
+                            heatmap of the raw (not re-normalized) group means.
 
 Does NOT re-run any pipeline step. Purely reads existing outputs.
 
@@ -23,12 +39,11 @@ Usage
     python generate_preprocessing_summary.py --config experiments/crc_tma_full_pipeline.yaml
 
 Outputs (written under <output_dir>/combined_processed_data/summary_report/):
-    tissue_level_qc.png
-    tissue_level_qc.csv
-    group_comparison_qc.png
-    group_comparison_qc.csv
-    marker_level_by_group.png
-    marker_level_by_group.csv
+    tissue_level_qc.png / .csv
+    group_comparison_qc.png / .csv
+    removal_reasons_qc.png / .csv                (always)
+    removal_reasons_fine_qc.png / .csv            (only if qupath_exports/ exists)
+    marker_level_by_group.png / .csv
     SUMMARY.txt
 """
 
@@ -188,6 +203,130 @@ def make_group_comparison_report(stats: pd.DataFrame, groups_in_order: list, out
     return summary
 
 
+# ── 3. Cell-removal reasons ────────────────────────────────────────────────
+
+def make_removal_reasons_report(stats: pd.DataFrame, groups_in_order: list, out_dir: str):
+    """
+    Coarse removal-reason breakdown, from processing_stats.csv alone -- always
+    available after any run_preprocessing() run, no extra step needed. Two
+    reasons are tracked at this level: the combined size+DAPI QC filter, and
+    z-score noise removal. For the finer per-reason split (small-area vs
+    low-DAPI vs noise, individually -- see preprocessing.py's
+    run_qupath_export()/_classify_cells()), see
+    make_fine_removal_reasons_report() below, which needs that separate,
+    optional step to have been run first.
+    """
+    done = stats[stats.get("status", "") == "PROCESSED"].copy()
+    if done.empty:
+        print("  ⚠️  No rows with status == PROCESSED -- skipping removal-reasons report")
+        return
+
+    reason_cols = ["final_cells", "cells_removed_by_filter", "cells_removed_by_noise"]
+    agg = done.groupby("experiment_group")[reason_cols].sum()
+    agg = agg.reindex([g for g in groups_in_order if g in agg.index])
+    agg["total_raw_cells"] = agg[reason_cols].sum(axis=1)
+    for col in reason_cols:
+        agg[f"{col}_pct"] = agg[col] / agg["total_raw_cells"] * 100
+
+    csv_path = os.path.join(out_dir, "removal_reasons_qc.csv")
+    agg.to_csv(csv_path)
+    print(f"  ✓ Saved {csv_path}")
+
+    stack_cols = ["final_cells", "cells_removed_by_filter", "cells_removed_by_noise"]
+    labels     = ["Kept", "Removed: size+DAPI filter", "Removed: noise removal"]
+    colors     = ["#4C9F70", "#E8A33D", "#C1666B"]
+
+    fig, (ax_n, ax_pct) = plt.subplots(1, 2, figsize=(11, 5))
+    x = np.arange(len(agg.index))
+    bottom_n, bottom_pct = np.zeros(len(agg)), np.zeros(len(agg))
+    for col, label, color in zip(stack_cols, labels, colors):
+        vals_n, vals_pct = agg[col].values, agg[f"{col}_pct"].values
+        ax_n.bar(x, vals_n, bottom=bottom_n, label=label, color=color)
+        ax_pct.bar(x, vals_pct, bottom=bottom_pct, label=label, color=color)
+        bottom_n += vals_n
+        bottom_pct += vals_pct
+
+    for ax, title, ylabel in [(ax_n, "Cell counts", "Cells"), (ax_pct, "As % of raw cells", "% of raw cells")]:
+        ax.set_xticks(x)
+        ax.set_xticklabels(agg.index)
+        ax.set_title(title)
+        ax.set_ylabel(ylabel)
+    ax_pct.legend(loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=1, fontsize=8)
+    fig.suptitle("Cell removal reasons by experiment_group (coarse: filter vs. noise)", fontsize=12)
+    plt.tight_layout()
+    png_path = os.path.join(out_dir, "removal_reasons_qc.png")
+    plt.savefig(png_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  ✓ Saved {png_path}")
+
+    return agg
+
+
+def make_fine_removal_reasons_report(output_dir: str, groups_in_order: list, out_dir: str):
+    """
+    Fine-grained removal-reason breakdown (Excl_SmallArea / Excl_LowDAPI /
+    Excl_SmallArea_LowDAPI / Excl_Noise / Included), read from
+    qupath_exports/qupath_export_summary.csv -- written by
+    run_qupath_export(cfg), a SEPARATE, optional function that is NOT part of
+    run_pipeline.py's --steps registry and is not called automatically by
+    run_preprocessing(). Most runs won't have this file yet. Skips (with an
+    explanatory message, not an error) if it's missing.
+    """
+    summary_path = os.path.join(output_dir, "qupath_exports", "qupath_export_summary.csv")
+    if not os.path.exists(summary_path):
+        print(f"  ⚠️  {summary_path} not found -- skipping fine-grained removal reasons. "
+              f"This needs run_qupath_export(cfg) to be run separately first (it's not "
+              f"wired into run_pipeline.py --steps): "
+              f"python -c \"import yaml; from spatia.analysis.preprocessing import run_qupath_export; "
+              f"run_qupath_export(yaml.safe_load(open('<your config>')))\"")
+        return
+
+    df = pd.read_csv(summary_path)
+    reason_cols = [c for c in ["Included", "Excl_SmallArea", "Excl_LowDAPI",
+                                "Excl_SmallArea_LowDAPI", "Excl_Noise"] if c in df.columns]
+    if not reason_cols or "experiment_group" not in df.columns:
+        print(f"  ⚠️  {summary_path} doesn't have the expected columns -- skipping")
+        return
+
+    agg = df.groupby("experiment_group")[reason_cols].sum(min_count=1).fillna(0)
+    agg = agg.reindex([g for g in groups_in_order if g in agg.index])
+    total = agg.sum(axis=1)
+    pct = agg.div(total, axis=0) * 100
+
+    csv_path = os.path.join(out_dir, "removal_reasons_fine_qc.csv")
+    agg.to_csv(csv_path)
+    print(f"  ✓ Saved {csv_path}")
+
+    # Same palette run_qupath_export()'s own QC plots use, for visual consistency.
+    colors_map = {
+        "Included":               "#00D200",
+        "Excl_SmallArea":         "#FF3C3C",
+        "Excl_LowDAPI":           "#FFA500",
+        "Excl_SmallArea_LowDAPI": "#B400B4",
+        "Excl_Noise":             "#1E90FF",
+    }
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    x = np.arange(len(pct.index))
+    bottom = np.zeros(len(pct))
+    for col in reason_cols:
+        vals = pct[col].values
+        ax.bar(x, vals, bottom=bottom, label=col, color=colors_map.get(col, "grey"))
+        bottom += vals
+    ax.set_xticks(x)
+    ax.set_xticklabels(pct.index)
+    ax.set_ylabel("% of raw cells")
+    ax.set_title("Cell classification by experiment_group (fine-grained, from run_qupath_export)")
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=2, fontsize=8)
+    plt.tight_layout()
+    png_path = os.path.join(out_dir, "removal_reasons_fine_qc.png")
+    plt.savefig(png_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  ✓ Saved {png_path}")
+
+    return agg
+
+
 # ── 3. Marker-level ───────────────────────────────────────────────────────
 
 def make_marker_level_report(tissues_dir: str, groups_in_order: list, out_dir: str):
@@ -255,21 +394,51 @@ def make_marker_level_report(tissues_dir: str, groups_in_order: list, out_dir: s
     group_marker_means.T.to_csv(csv_path)
     print(f"  ✓ Saved {csv_path}")
 
-    # Heatmap: markers (rows) x groups (cols), z-scored across groups per marker
-    # so markers with very different absolute scales are still visually comparable.
-    heat = group_marker_means.T.copy()
-    heat_z = heat.sub(heat.mean(axis=1), axis=0).div(heat.std(axis=1).replace(0, np.nan), axis=0)
-    heat_z = heat_z.dropna(how="all")
+    # IMPORTANT: these are already per-cell z-scores, not raw intensities --
+    # run_preprocessing() z-score normalizes every marker (sp.pp.format(...,
+    # method="zscore")) before this h5ad is ever written. Markers are already
+    # on one common, comparable scale, so no further re-normalization is
+    # correct here.
+    #
+    # Fixed 2026-09-10: the first version of this function re-z-scored these
+    # already-z-scored group means AGAIN, per marker row, across groups. For
+    # the common case of exactly 2 groups that's mathematically degenerate --
+    # z-scoring any 2 points always produces the same magnitude (+-1/sqrt(2)),
+    # regardless of how different the two groups actually are. Only the SIGN
+    # carried real information; every tile in that heatmap had the same
+    # visual intensity, which is exactly what made it uninterpretable. Fixed
+    # by dropping the re-z-scoring: for 2 groups, plot the actual group-mean
+    # difference (which IS a meaningful, magnitude-preserving quantity once
+    # the inputs are already z-scores); for >2 groups, a heatmap of the raw
+    # (not re-normalized) group means.
+    present_groups = [g for g in groups_in_order if g in group_marker_means.index]
 
-    fig, ax = plt.subplots(figsize=(max(6, len(groups_in_order) * 1.5), max(8, len(heat_z) * 0.28)))
-    im = ax.imshow(heat_z.values, aspect="auto", cmap="RdBu_r", vmin=-2, vmax=2)
-    ax.set_xticks(range(len(heat_z.columns)))
-    ax.set_xticklabels(heat_z.columns)
-    ax.set_yticks(range(len(heat_z.index)))
-    ax.set_yticklabels(heat_z.index, fontsize=7)
-    ax.set_title("Mean marker expression by experiment_group\n(row z-scored across groups)")
-    plt.colorbar(im, ax=ax, label="z-score", fraction=0.05, pad=0.02)
-    plt.tight_layout()
+    if len(present_groups) == 2:
+        g1, g2 = present_groups
+        diff = (group_marker_means.loc[g1] - group_marker_means.loc[g2]).sort_values()
+        bar_colors = ["#C1666B" if v < 0 else "#4C9F70" for v in diff.values]
+        fig, ax = plt.subplots(figsize=(7, max(8, len(diff) * 0.22)))
+        ax.barh(diff.index, diff.values, color=bar_colors)
+        ax.axvline(0, color="black", linewidth=0.8)
+        ax.set_xlabel(f"Δ mean per-cell z-score ({g1} − {g2})")
+        ax.set_title(f"Marker expression difference by experiment_group\n"
+                     f"({g1} higher →       ← {g2} higher)")
+        ax.tick_params(axis="y", labelsize=7)
+        plt.tight_layout()
+    else:
+        heat = group_marker_means.T.reindex(columns=present_groups)
+        vmax = float(np.nanmax(np.abs(heat.values))) if heat.size else 1.0
+        vmax = vmax if vmax > 0 else 1.0
+        fig, ax = plt.subplots(figsize=(max(6, len(present_groups) * 1.5), max(8, len(heat) * 0.28)))
+        im = ax.imshow(heat.values, aspect="auto", cmap="RdBu_r", vmin=-vmax, vmax=vmax)
+        ax.set_xticks(range(len(heat.columns)))
+        ax.set_xticklabels(heat.columns)
+        ax.set_yticks(range(len(heat.index)))
+        ax.set_yticklabels(heat.index, fontsize=7)
+        ax.set_title("Mean per-cell z-score by experiment_group\n(already on a common scale -- not re-normalized)")
+        plt.colorbar(im, ax=ax, label="mean z-score", fraction=0.05, pad=0.02)
+        plt.tight_layout()
+
     png_path = os.path.join(out_dir, "marker_level_by_group.png")
     plt.savefig(png_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -312,13 +481,19 @@ def main():
 
     stats = _load_stats(log_dir)
 
-    print("\n[1/3] Tissue-level report...")
+    print("\n[1/5] Tissue-level report...")
     make_tissue_level_report(stats, groups_in_order, out_dir)
 
-    print("\n[2/3] Group comparison report (CLR vs DII)...")
+    print("\n[2/5] Group comparison report (CLR vs DII)...")
     group_summary = make_group_comparison_report(stats, groups_in_order, out_dir)
 
-    print("\n[3/3] Marker-level report (reads all combined h5ad files)...")
+    print("\n[3/5] Removal-reasons report (coarse: filter vs. noise)...")
+    removal_summary = make_removal_reasons_report(stats, groups_in_order, out_dir)
+
+    print("\n[4/5] Removal-reasons report (fine-grained, if available)...")
+    fine_removal_summary = make_fine_removal_reasons_report(base_out, groups_in_order, out_dir)
+
+    print("\n[5/5] Marker-level report (reads all combined h5ad files)...")
     marker_summary = make_marker_level_report(tissues_dir, groups_in_order, out_dir)
 
     # ── Plain-text top-line summary ──────────────────────────────────────
@@ -330,9 +505,21 @@ def main():
         f.write(f"Images processed: {len(done)} / {len(stats)}\n")
         f.write(f"Unique tissues:   {done['tissue_id'].nunique() if len(done) else 0}\n")
         if group_summary is not None:
-            f.write("\nBy experiment_group:\n")
+            f.write("\nBy experiment_group (QC metrics):\n")
             f.write(group_summary.to_string())
             f.write("\n")
+        if removal_summary is not None:
+            f.write("\nRemoval reasons by experiment_group (coarse):\n")
+            f.write(removal_summary.to_string())
+            f.write("\n")
+        if fine_removal_summary is not None:
+            f.write("\nRemoval reasons by experiment_group (fine-grained):\n")
+            f.write(fine_removal_summary.to_string())
+            f.write("\n")
+        else:
+            f.write("\nFine-grained removal reasons: not available -- run_qupath_export(cfg) "
+                    "hasn't been run for this output_dir. See removal_reasons_qc.png/.csv for "
+                    "the coarse (filter vs. noise) breakdown instead.\n")
         if marker_summary is not None:
             f.write(f"\nMarkers summarized: {marker_summary.shape[1]}\n")
     print(f"\n✓ Saved {summary_txt_path}")
