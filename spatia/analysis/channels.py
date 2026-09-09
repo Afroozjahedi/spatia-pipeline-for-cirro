@@ -512,6 +512,27 @@ def resolve_channels(
     }
 
 
+def find_blank_columns(columns) -> List[str]:
+    """
+    Column names that look like blank/empty acquisition slots (_BLANK_RE:
+    "blank"/"empty" prefix), among a flat list of DataFrame column names.
+
+    Added 2026-09-09 for preprocessing.py, which -- unlike segmentation.py --
+    never called classify_panel() and so never excluded blank channels before
+    z-scoring. This panel has 3 Blank planes (see this module's docstring,
+    verify_nuclear_periodicity()'s corroborating note); a blank channel is
+    identically zero, so per-channel z-score normalization divides by zero
+    and produces an all-NaN column. That NaN then propagates into
+    preprocessing.auto_detect_cutoffs()'s z_count/z_sum sums, which is what
+    actually broke: "autodetected range of [nan, nan] is not finite" out of
+    np.histogram. classify_panel() already computed this same "blank" set
+    for the raw stack; this is the column-name-list equivalent, for the same
+    reason resolve_column() exists alongside resolve_channel() -- preprocessing
+    only ever sees exported CSV columns, not the raw stack + StackInfo.
+    """
+    return [c for c in columns if _BLANK_RE.match(str(c))]
+
+
 def resolve_column(spec, columns, role: str = "column", panel_names=None) -> str:
     """
     Like resolve_channel(), but resolves a config value against a flat list

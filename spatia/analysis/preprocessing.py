@@ -430,6 +430,12 @@ def run_preprocessing(cfg: dict) -> dict:
                         nuclei_channel_cfg, df.columns, role="preprocessing.nuclei_channel",
                         panel_names=panel_names,
                     )
+                    blank_cols = ch.find_blank_columns(df.columns)
+                    if blank_cols:
+                        print(f"  Dropping {len(blank_cols)} blank acquisition-slot "
+                              f"column(s) before z-score normalization "
+                              f"(identically zero -- would divide by zero): {blank_cols}")
+                        df = df.drop(columns=blank_cols)
 
                     base_name = csv_file.replace("_mesmer_result.csv", "").replace("mesmer_result.csv", "")
                     df["image_ID"] = base_name
@@ -460,6 +466,9 @@ def run_preprocessing(cfg: dict) -> dict:
                         df_clean = pd.read_csv(
                             os.path.join(tissues_dir, f"{tissue_id}_{experiment_group}.csv")
                         )
+                        stale_blank_cols = ch.find_blank_columns(df_clean.columns)
+                        if stale_blank_cols:
+                            df_clean = df_clean.drop(columns=stale_blank_cols)
                         col_num = _get_last_marker_col(df_clean, last_marker, nuclei_col)
 
                         all_processed_tissues.setdefault(tissue_id, []).append({
