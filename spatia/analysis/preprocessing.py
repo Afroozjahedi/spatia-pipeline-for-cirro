@@ -430,6 +430,12 @@ def run_preprocessing(cfg: dict) -> dict:
                         nuclei_channel_cfg, df.columns, role="preprocessing.nuclei_channel",
                         panel_names=panel_names,
                     )
+                    resolved_last_marker = last_marker
+                    if last_marker:
+                        resolved_last_marker = ch.resolve_column(
+                            last_marker, df.columns, role="preprocessing.last_marker",
+                            panel_names=panel_names, auto_position="last",
+                        )
                     blank_cols = ch.find_blank_columns(df.columns)
                     if blank_cols:
                         print(f"  Dropping {len(blank_cols)} blank acquisition-slot "
@@ -469,7 +475,7 @@ def run_preprocessing(cfg: dict) -> dict:
                         stale_blank_cols = ch.find_blank_columns(df_clean.columns)
                         if stale_blank_cols:
                             df_clean = df_clean.drop(columns=stale_blank_cols)
-                        col_num = _get_last_marker_col(df_clean, last_marker, nuclei_col)
+                        col_num = _get_last_marker_col(df_clean, resolved_last_marker, nuclei_col)
 
                         all_processed_tissues.setdefault(tissue_id, []).append({
                             "data":      df_clean,
@@ -522,7 +528,7 @@ def run_preprocessing(cfg: dict) -> dict:
                         method="zscore",
                     )
 
-                    col_num = _get_last_marker_col(df_norm, last_marker, nuclei_col)
+                    col_num = _get_last_marker_col(df_norm, resolved_last_marker, nuclei_col)
 
                     # ── Noise removal ────────────────────────────────────
                     print(f"  Detecting noise cutoffs (last marker col: {col_num})…")

@@ -533,7 +533,9 @@ def find_blank_columns(columns) -> List[str]:
     return [c for c in columns if _BLANK_RE.match(str(c))]
 
 
-def resolve_column(spec, columns, role: str = "column", panel_names=None) -> str:
+def resolve_column(
+    spec, columns, role: str = "column", panel_names=None, auto_position: str = "first",
+) -> str:
     """
     Like resolve_channel(), but resolves a config value against a flat list
     of DataFrame column names instead of a raw hyperstack panel.
@@ -567,13 +569,30 @@ def resolve_column(spec, columns, role: str = "column", panel_names=None) -> str
     the panel", full stop, regardless of cycle count. Re-deriving that same
     concrete name here keeps preprocessing's "auto" in lockstep with whatever
     segmentation resolved, instead of guessing from column names alone.
+
+    auto_position : "first" (default, nuclei_channel's meaning) or "last"
+    (last_marker's meaning -- mirrors resolve_channel()'s own last_marker
+    "auto" branch, which always returns names[-1]). Only meaningful together
+    with panel_names; "auto" with auto_position="last" and no panel_names
+    raises rather than falling back to the nuclear-only regex, which would
+    be the wrong heuristic for a last-marker lookup.
     """
     text = str(spec).strip()
     columns = list(columns)
 
     if text.lower() == "auto":
         if panel_names:
-            return resolve_column(str(panel_names[0]).strip(), columns, role=role)
+            idx = 0 if auto_position == "first" else -1
+            return resolve_column(
+                str(panel_names[idx]).strip(), columns, role=role,
+                panel_names=panel_names, auto_position=auto_position,
+            )
+        if auto_position != "first":
+            raise ValueError(
+                f"'auto' {role} needs panel_names when auto_position={auto_position!r} "
+                f"-- there is no column-pattern fallback for anything but the "
+                f"nuclear-channel heuristic."
+            )
         matches = [c for c in columns if _NUCLEAR_RE.match(str(c))]
         if len(matches) == 1:
             return matches[0]
