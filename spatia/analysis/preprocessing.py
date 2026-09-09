@@ -748,6 +748,28 @@ def run_preprocessing(cfg: dict) -> dict:
         stats_path = os.path.join(log_dir, f"processing_stats_{timestamp}.csv")
         stats_df.to_csv(stats_path, index=False)
 
+        # -- Auto-generate QC summary report ------------------------------
+        # Folded directly into this step (not a separate pipeline step /
+        # manual script) per explicit request 2026-09-09: every
+        # run_preprocessing() call now regenerates
+        # combined_processed_data/summary_report/ automatically --
+        # `--steps preprocessing` alone is enough, nothing else to remember
+        # to run. Local import + try/except: a bug in report generation (a
+        # plotting error, a malformed h5ad, the optional anndata import
+        # missing) is printed as a warning and non-fatal -- it must never
+        # fail the core preprocessing step or block downstream steps
+        # (cell_typing, triads, ...) that depend on this function's actual
+        # return value, not on the report. Can also be re-run cheaply on
+        # its own via generate_preprocessing_summary.py at the repo root
+        # (calls this exact same function) without re-processing images.
+        try:
+            from spatia.analysis.preprocessing_summary import generate_summary_report
+            print(f"\n{'=' * 80}\nGenerating QC summary report...\n{'=' * 80}")
+            generate_summary_report(cfg)
+        except Exception as e:
+            print(f"WARNING: Summary report generation failed (non-fatal -- "
+                  f"preprocessing itself succeeded): {e}")
+
         # ── Summary ──────────────────────────────────────────────────────────
         print(f"\n{'=' * 80}\nSUMMARY\n{'=' * 80}")
         print(f"Unique tissues processed: {len(all_processed_tissues)}")
