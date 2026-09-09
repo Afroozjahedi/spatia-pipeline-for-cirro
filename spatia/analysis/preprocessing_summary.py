@@ -95,21 +95,55 @@ def _color_for(group: str, groups_in_order: list) -> str:
     return _DEFAULT_CYCLE[idx % len(_DEFAULT_CYCLE)]
 
 
-def _latest_stats_csv(log_dir: str) -> str:
+def _all_stats_csvs(log_dir: str) -> list:
     candidates = sorted(glob.glob(os.path.join(log_dir, "processing_stats_*.csv")))
     if not candidates:
         raise FileNotFoundError(
             f"No processing_stats_*.csv found in {log_dir} -- "
             f"has run_preprocessing() completed at least once?"
         )
-    return candidates[-1]  # lexically-sortable timestamp -> last is newest
+    return candidates  # lexically-sortable timestamp -> chronological order
 
 
 def _load_stats(log_dir: str) -> pd.DataFrame:
-    path = _latest_stats_csv(log_dir)
-    print(f"Reading tissue/image-level stats: {path}")
-    df = pd.read_csv(path)
-    return df
+    """
+    Merges EVERY processing_stats_<timestamp>.csv in log_dir, not just the
+    latest one (confidence: high, fixed 2026-09-10 -- see Notes/risks in
+    docs/generate_preprocessing_summary.md for the full writeup and how
+    this was caught).
+
+    run_preprocessing() writes a fresh stats CSV on every call. Any image
+    already on disk takes the fast "_processed_files_exist()" skip branch,
+    which logs status == "SKIPPED - Already processed" WITHOUT any of the
+    QC breakdown columns (cells_removed_by_filter, percent_removed_by_*,
+    total_percent_removed, ...) -- those are only ever recorded on the run
+    that actually did the filtering/normalization/noise-removal. Reading
+    only the single latest stats CSV -- the previous behavior -- means a
+    resume-only run (everything already processed, nothing new to do)
+    would show EVERY image as "SKIPPED" with no QC data at all, and the
+    tissue-level / group-comparison / removal-reasons reports (which all
+    filter to status == "PROCESSED") would silently produce empty output.
+
+    Fix: concatenate every stats CSV for this config, and for each
+    (image_id, experiment_group) pair keep a status == "PROCESSED" row over
+    a "SKIPPED" one whenever either exists across ANY prior run -- so the
+    report always uses the real QC breakdown from whichever run actually
+    computed it, no matter how many resume-only runs have happened since.
+    """
+    paths = _all_stats_csvs(log_dir)
+    print(f"Reading tissue/image-level stats: {len(paths)} file(s) "
+          f"({os.path.basename(paths[0])}"
+          + (f" .. {os.path.basename(paths[-1])}" if len(paths) > 1 else "") + ")")
+    frames = [pd.read_csv(p) for p in paths]
+    merged = pd.concat(frames, ignore_index=True)
+
+    if "image_id" in merged.columns and "experiment_group" in merged.columns:
+        merged["_has_qc"] = (merged.get("status", "") == "PROCESSED").astype(int)
+        sort_cols = [c for c in ["_has_qc", "timestamp"] if c in merged.columns]
+        merged = merged.sort_values(sort_cols)  # PROCESSED rows sort last -> win the dedup below
+        merged = merged.drop_duplicates(subset=["image_id", "experiment_group"], keep="last")
+        merged = merged.drop(columns=["_has_qc"])
+    return merged
 
 
 # ── 1. Tissue-level ─────────────────────────────────────────────────────
