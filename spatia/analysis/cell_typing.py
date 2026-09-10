@@ -1488,6 +1488,438 @@ def compute_and_plot_umaps(adata, plot_dir: str, data_dir: str, group_col: str, 
           f"{data_dir}/umap_coordinates.csv")
 
 
+# ── 7. Dotplot: marker expression across cell types ─────────────────────────
+# Added 2026-09-10, at Afrouz's request to mirror her reference notebook's
+# outputs one-for-one. sc.pl.dotplot with dendrogram=True clusters cell
+# types by expression similarity and standard_scale="var" puts every marker
+# on the same 0-1 color scale, exactly matching the notebook's call.
+
+def plot_dotplot(adata, thresholds: dict, column_map: dict, plot_dir: str, formats=("png", "pdf")):
+    if "cell_type" not in adata.obs.columns or not HAS_SCANPY:
+        return
+    column_map = column_map or {}
+    var_names = [column_map.get(m, m) for m in thresholds if column_map.get(m, m) in adata.var_names]
+    n_types = adata.obs["cell_type"].nunique()
+    if len(var_names) < 2 or n_types < 2:
+        print(f"  [diagnostics] Skipping dotplot -- need >=2 markers and >=2 cell types "
+              f"(have {len(var_names)} markers, {n_types} cell types).")
+        return
+    try:
+        plt.figure(figsize=(max(10, 0.4 * len(var_names) + 4), max(6, 0.35 * n_types + 3)))
+        sc.pl.dotplot(adata, var_names=var_names, groupby="cell_type",
+                      standard_scale="var", dendrogram=True, color_map="viridis", show=False)
+        fig = plt.gcf()
+        fig.suptitle("Marker Expression Across Cell Types", fontsize=14, y=1.02)
+        plt.tight_layout()
+        _savefig(fig, os.path.join(plot_dir, "cell_type_marker_dotplot"), formats)
+        plt.close(fig)
+        print(f"  [diagnostics] Dotplot: {len(var_names)} markers x {n_types} cell types")
+    except Exception as e:
+        plt.close("all")
+        raise e
+
+
+# ── 8. Per-marker UMAP: expression + positivity, side by side ───────────────
+# Added 2026-09-10. Matches the notebook's per-marker UMAP panels, one file
+# per marker (raw expression on the left, binary {marker}_pos on the
+# right). Requires compute_and_plot_umaps() to have already run (reuses
+# its X_umap embedding -- never recomputes it).
+
+def plot_marker_umaps(adata, thresholds: dict, column_map: dict, plot_dir: str, formats=("png", "pdf")):
+    if "X_umap" not in adata.obsm or not HAS_SCANPY:
+        print("  [diagnostics] Skipping per-marker UMAPs -- no UMAP embedding yet "
+              "(compute_and_plot_umaps() must run first).")
+        return
+    column_map = column_map or {}
+    sub_dir = os.path.join(plot_dir, "marker_umaps")
+    os.makedirs(sub_dir, exist_ok=True)
+
+    n_done, skipped = 0, []
+    for marker, threshold in thresholds.items():
+        real_col = column_map.get(marker, marker)
+        pos_col = f"{marker}_pos"
+        if real_col not in adata.var_names or pos_col not in adata.obs.columns:
+            skipped.append(marker)
+            continue
+        try:
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+            sc.pl.umap(adata, color=real_col, cmap="plasma", ax=ax1, show=False)
+            ax1.set_title(f"{marker} expression")
+            sc.pl.umap(adata, color=pos_col, cmap="coolwarm", ax=ax2, show=False)
+            ax2.set_title(f"{marker}+ cells (threshold: {threshold:.3f})")
+            plt.tight_layout()
+            safe_marker = marker.replace("/", "_").replace(" ", "_")
+            _savefig(fig, os.path.join(sub_dir, f"{safe_marker}_umap"), formats)
+            plt.close(fig)
+            n_done += 1
+        except Exception as e:
+            plt.close("all")
+            skipped.append(f"{marker} ({e})")
+
+    print(f"  [diagnostics] Per-marker UMAPs: {n_done} written to {sub_dir}/"
+          + (f"  -- skipped: {skipped}" if skipped else ""))
+
+
+# ── 9. Group statistics: chi-square test + significant-difference plots ─────
+# Added 2026-09-10. The reference notebook's chi2 test only ever handled
+# exactly 2 conditions (a fixed 2x2 contingency table). Generalized here to
+# any number of groups: for each cell type, a [this type vs everything
+# else] x [group1..groupN] table. The signed diverging "difference" bar
+# chart is inherently pairwise, so it's only produced when there are
+# exactly 2 groups (matching the notebook exactly in that specific case).
+
+def plot_group_statistics(adata, group_col: str, plot_dir: str, data_dir: str, formats=("png", "pdf")):
+    if "cell_type" not in adata.obs.columns or group_col not in adata.obs.columns:
+        return
+    from scipy.stats import chi2_contingency
+
+    groups = sorted(adata.obs[group_col].dropna().unique().tolist())
+    if len(groups) < 2:
+        print(f"  [diagnostics] Skipping group statistics -- only {len(groups)} group(s) in '{group_col}'.")
+        return
+
+    cell_types = adata.obs["cell_type"].value_counts().index.tolist()
+    pct = (pd.crosstab(adata.obs["cell_type"], adata.obs[group_col], normalize="columns") * 100)
+    pct = pct.reindex(index=cell_types, columns=groups)
+
+    results = {}
+    for ct in cell_types:
+        is_type = (adata.obs["cell_type"] == ct)
+        table = np.array([
+            [int((is_type & (adata.obs[group_col] == g)).sum()) for g in groups],
+            [int((~is_type & (adata.obs[group_col] == g)).sum()) for g in groups],
+        ])
+        try:
+            chi2, p, _, _ = chi2_contingency(table)
+        except ValueError:
+            chi2, p = np.nan, np.nan
+        results[ct] = {"chi2": chi2, "p_value": p,
+                       "significant": bool(p < 0.05) if pd.notna(p) else False}
+
+    chi2_df = pd.DataFrame(results).T
+    chi2_df.to_csv(os.path.join(data_dir, f"cell_type_{group_col}_chi2_statistics.csv"))
+
+    sig = chi2_df[chi2_df["significant"]]
+    if not sig.empty:
+        sig_pct = pct.loc[sig.index]
+        fig, ax = plt.subplots(figsize=(11, max(4, 0.5 * len(sig) + 2)))
+        sig_pct.plot(kind="barh", ax=ax)
+        ax.set_title(f"Cell Types Significantly Different Across {group_col} (p<0.05)", fontsize=12)
+        ax.set_xlabel("% of cells")
+        ax.legend(title=group_col, bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=8)
+        ax.spines[["top", "right"]].set_visible(False)
+        plt.tight_layout()
+        _savefig(fig, os.path.join(plot_dir, f"cell_type_{group_col}_significant_differences"), formats)
+        plt.close(fig)
+
+    if len(groups) == 2:
+        diff = (pct[groups[1]] - pct[groups[0]]).sort_values()
+        fig, ax = plt.subplots(figsize=(9, max(4, 0.35 * len(diff) + 2)))
+        colors = ["indianred" if v > 0 else "steelblue" for v in diff.values]
+        ax.barh(diff.index.astype(str), diff.values, color=colors)
+        ax.axvline(0, color="black", linewidth=0.8)
+        ax.set_title(f"Cell Type % Difference: {groups[1]} vs {groups[0]}", fontsize=12)
+        ax.set_xlabel("Percentage-point difference")
+        ax.spines[["top", "right"]].set_visible(False)
+        plt.tight_layout()
+        _savefig(fig, os.path.join(plot_dir, f"cell_type_{group_col}_difference"), formats)
+        plt.close(fig)
+
+    n_sig = int(chi2_df["significant"].sum())
+    print(f"  [diagnostics] Group statistics ({group_col}, {len(groups)} groups): "
+          f"{n_sig}/{len(cell_types)} cell types significant (p<0.05) -- "
+          f"{data_dir}/cell_type_{group_col}_chi2_statistics.csv")
+
+
+# ── 10. Unassigned-cell diagnostics ──────────────────────────────────────────
+# Added 2026-09-10. This pipeline's rule engine (assign_cell_types_automatic)
+# labels unmatched cells "Unassigned" -- the equivalent of the reference
+# notebook's "Unknown" catch-all. Reproduces the notebook's per-marker
+# known-vs-unknown histogram grid and impact-ranked threshold-adjustment
+# recommendations. Skipped entirely if there are no Unassigned cells.
+
+def plot_unassigned_diagnostics(adata, thresholds: dict, column_map: dict, plot_dir: str,
+                                 data_dir: str, formats=("png", "pdf")):
+    if "cell_type" not in adata.obs.columns:
+        return
+    unassigned_mask = (adata.obs["cell_type"] == "Unassigned").values
+    n_unassigned = int(unassigned_mask.sum())
+    if n_unassigned == 0:
+        print("  [diagnostics] No 'Unassigned' cells -- skipping unassigned-cell diagnostics.")
+        return
+    column_map = column_map or {}
+    known_mask = ~unassigned_mask
+
+    pos_cols = [m for m in thresholds if f"{m}_pos" in adata.obs.columns]
+    if pos_cols:
+        rows = []
+        for m in pos_cols:
+            col = f"{m}_pos"
+            rows.append({
+                "marker": m,
+                "Unassigned": 100 * adata.obs.loc[unassigned_mask, col].mean(),
+                "Known": 100 * adata.obs.loc[known_mask, col].mean(),
+            })
+        comp = pd.DataFrame(rows).set_index("marker")
+        comp.to_csv(os.path.join(data_dir, "unassigned_vs_known_positivity_pct.csv"))
+        fig, ax = plt.subplots(figsize=(max(8, 0.5 * len(pos_cols)), 6))
+        comp.plot(kind="bar", ax=ax, color=["#C44E52", "#4C72B0"])
+        ax.set_title(f"Marker Positivity: Unassigned ({n_unassigned:,} cells) vs Known", fontsize=12)
+        ax.set_ylabel("% positive")
+        ax.tick_params(axis="x", rotation=90)
+        ax.spines[["top", "right"]].set_visible(False)
+        plt.tight_layout()
+        _savefig(fig, os.path.join(plot_dir, "unassigned_vs_known_positivity"), formats)
+        plt.close(fig)
+
+    markers = list(thresholds.keys())
+    n_cols = 3
+    n_rows = max(1, -(-len(markers) // n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 4 * n_rows))
+    axes = np.atleast_1d(axes).flatten()
+    recommendations = {}
+
+    for i, marker in enumerate(markers):
+        vals, real_col = _get_column(adata, marker, column_map)
+        ax = axes[i]
+        if vals is None:
+            ax.axis("off")
+            continue
+        unk_expr = vals[unassigned_mask]
+        kn_expr = vals[known_mask]
+        threshold = thresholds[marker]
+        unk_mean = float(np.mean(unk_expr)) if len(unk_expr) else float("nan")
+        kn_mean = float(np.mean(kn_expr)) if len(kn_expr) else float("nan")
+        ax.hist(kn_expr, bins=40, alpha=0.5, color="#4C72B0", label=f"Known (μ={kn_mean:.2f})")
+        ax.hist(unk_expr, bins=40, alpha=0.5, color="#C44E52", label=f"Unassigned (μ={unk_mean:.2f})")
+        ax.axvline(threshold, color="black", linestyle="--", linewidth=1.2,
+                    label=f"Threshold: {threshold:.2f}")
+        pct_unk_pos = 100 * float(np.mean(unk_expr > threshold)) if len(unk_expr) else 0.0
+        if unk_mean > kn_mean:
+            suggested = float(np.percentile(unk_expr, 90)) if len(unk_expr) else threshold
+            direction = "up" if suggested > threshold else "down"
+        else:
+            suggested, direction = threshold, "none"
+        if direction != "none":
+            ax.axvline(suggested, color="#C44E52", linestyle=":", linewidth=1.2,
+                        label=f"Suggested: {suggested:.2f}")
+        recommendations[marker] = {
+            "current_threshold": threshold, "unassigned_mean": unk_mean, "known_mean": kn_mean,
+            "unassigned_pct_positive": pct_unk_pos, "suggested_threshold": suggested,
+            "direction": direction, "impact_score": pct_unk_pos * abs(suggested - threshold),
+        }
+        ax.set_title(marker, fontsize=9)
+        ax.legend(fontsize=6, loc="upper right")
+    for j in range(len(markers), len(axes)):
+        axes[j].axis("off")
+    fig.suptitle(f"Marker Expression: Unassigned ({n_unassigned:,}) vs Known Cells", fontsize=14, y=1.01)
+    plt.tight_layout()
+    _savefig(fig, os.path.join(plot_dir, "unassigned_marker_analysis_grid"), formats)
+    plt.close(fig)
+
+    rec_df = pd.DataFrame(recommendations).T.sort_values("impact_score", ascending=False)
+    rec_df.to_csv(os.path.join(data_dir, "unassigned_threshold_recommendations.csv"))
+
+    top = rec_df.head(min(10, len(rec_df)))
+    if not top.empty and top["impact_score"].max() > 0:
+        fig, ax = plt.subplots(figsize=(10, max(3, 0.4 * len(top) + 1.5)))
+        ax.barh(top.index.astype(str)[::-1], top["impact_score"].values[::-1], color="#DD8452")
+        ax.set_title("Top Markers by Potential Impact on Unassigned-Cell Reclassification", fontsize=11)
+        ax.set_xlabel("Impact score (Unassigned+% x |suggested threshold shift|)")
+        ax.spines[["top", "right"]].set_visible(False)
+        plt.tight_layout()
+        _savefig(fig, os.path.join(plot_dir, "unassigned_threshold_recommendations_top10"), formats)
+        plt.close(fig)
+
+    print(f"  [diagnostics] Unassigned-cell diagnostics: {n_unassigned:,} / {len(adata):,} cells "
+          f"({100 * n_unassigned / len(adata):.1f}%) -- recommendations in "
+          f"{data_dir}/unassigned_threshold_recommendations.csv")
+
+
+# ── 11. Report bundle: HTML + PDF + text summary ─────────────────────────────
+# Added 2026-09-10, to mirror the reference notebook's report/ output.
+# Composed from the PNGs this module already wrote to plot_dir (rather than
+# a third duplicate of every plotting call, which is how the notebook does
+# it -- once for the main script, once as a base64 PNG for its Jinja2 HTML,
+# once again inside PdfPages -- three copies of the same plotting logic
+# that can silently drift apart). Built with plain string formatting, not
+# jinja2/markdown: this must also run unattended on JupyterHub/HPC, where
+# those two packages are not guaranteed to be installed, so pulling them in
+# just for report text would be a fragile, avoidable new dependency.
+
+def generate_report(adata, thresholds: dict, fit_info: dict, column_map: dict,
+                     group_col: str, data_dir: str, plot_dir: str):
+    import base64
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    report_dir = os.path.join(os.path.dirname(os.path.normpath(plot_dir)), "cell_typing_report")
+    os.makedirs(report_dir, exist_ok=True)
+
+    total_cells = int(len(adata))
+    n_markers = len(thresholds)
+    ct_counts = adata.obs["cell_type"].value_counts() if "cell_type" in adata.obs.columns else pd.Series(dtype=int)
+    n_cell_types = int(len(ct_counts))
+    n_unassigned = int(ct_counts.get("Unassigned", 0))
+    pct_unassigned = 100 * n_unassigned / total_cells if total_cells else 0.0
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    figures = [("cell_type_counts.png", "Cell Type Distribution"),
+               ("umap_cell_types_all.png", "UMAP -- Cell Types")]
+    if group_col:
+        figures.append((f"umap_by_{group_col}.png", f"UMAP -- {group_col}"))
+    figures += [
+        ("cell_type_marker_positivity_heatmap.png", "Marker Positivity (%) by Cell Type"),
+        ("cell_type_marker_expression_heatmap.png", "Mean Marker Expression by Cell Type"),
+        ("cell_type_marker_dotplot.png", "Marker Expression Across Cell Types"),
+    ]
+    if group_col:
+        figures += [
+            (f"cell_type_by_{group_col}_stacked100.png", f"Cell Type Composition by {group_col}"),
+            (f"cell_type_{group_col}_significant_differences.png", f"Significant Differences Across {group_col}"),
+            (f"cell_type_{group_col}_difference.png", f"{group_col} Difference"),
+        ]
+    if n_unassigned:
+        figures += [
+            ("unassigned_vs_known_positivity.png", "Unassigned vs Known: Marker Positivity"),
+            ("unassigned_threshold_recommendations_top10.png", "Top Threshold-Adjustment Candidates"),
+        ]
+    figures = [(fname, title) for fname, title in figures
+               if os.path.exists(os.path.join(plot_dir, fname))]
+
+    threshold_rows = []
+    for marker, thr in thresholds.items():
+        pos_col = f"{marker}_pos"
+        pct_pos = 100 * adata.obs[pos_col].mean() if pos_col in adata.obs.columns else float("nan")
+        threshold_rows.append((marker, thr, pct_pos))
+
+    chi2_df = None
+    if group_col:
+        chi2_csv = os.path.join(data_dir, f"cell_type_{group_col}_chi2_statistics.csv")
+        if os.path.exists(chi2_csv):
+            chi2_df = pd.read_csv(chi2_csv, index_col=0)
+            if "significant" in chi2_df.columns:
+                chi2_df["significant"] = chi2_df["significant"].astype(bool)
+
+    def _b64(fname):
+        with open(os.path.join(plot_dir, fname), "rb") as f:
+            return base64.b64encode(f.read()).decode("utf-8")
+
+    html = [f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Cell Typing Analysis Report</title>
+<style>
+body {{ font-family: Arial, sans-serif; margin: 24px; color: #222; }}
+h1, h2, h3 {{ color: #333366; }}
+.container {{ max-width: 1100px; margin: 0 auto; }}
+.section {{ margin-bottom: 32px; border-bottom: 1px solid #eee; padding-bottom: 20px; }}
+.figure {{ margin: 15px 0; text-align: center; }}
+.figure img {{ max-width: 100%; border: 1px solid #ddd; }}
+table {{ border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 13px; }}
+th, td {{ border: 1px solid #ddd; padding: 6px 8px; text-align: left; }}
+th {{ background-color: #f2f2f2; }}
+tr:nth-child(even) {{ background-color: #fafafa; }}
+.highlight {{ background-color: #fff3cd; }}
+.footer {{ font-size: 11px; color: #777; margin-top: 30px; text-align: center; }}
+</style></head><body><div class="container">
+<div class="section">
+<h1>Cell Typing Analysis Report</h1>
+<p><strong>Generated:</strong> {now_str}</p>
+<p><strong>Total cells:</strong> {total_cells:,}</p>
+<p><strong>Markers used:</strong> {n_markers}</p>
+<p><strong>Cell types identified:</strong> {n_cell_types}</p>
+<p><strong>Unassigned:</strong> {n_unassigned:,} cells ({pct_unassigned:.2f}%)</p>
+</div>
+"""]
+
+    if figures:
+        html.append('<div class="section"><h2>Overview</h2>')
+        for fname, title in figures:
+            html.append(f'<div class="figure"><h3>{title}</h3>'
+                        f'<img src="data:image/png;base64,{_b64(fname)}" alt="{title}"></div>')
+        html.append("</div>")
+
+    html.append('<div class="section"><h2>Cell Type Counts</h2><table>'
+                '<tr><th>Cell Type</th><th>Count</th><th>%</th></tr>')
+    for ct, count in ct_counts.items():
+        pct = 100 * count / total_cells if total_cells else 0
+        cls = ' class="highlight"' if ct == "Unassigned" else ""
+        html.append(f"<tr{cls}><td>{ct}</td><td>{count:,}</td><td>{pct:.2f}%</td></tr>")
+    html.append("</table></div>")
+
+    html.append('<div class="section"><h2>GMM-Detected Marker Thresholds</h2><table>'
+                '<tr><th>Marker</th><th>Threshold</th><th>% Positive</th></tr>')
+    for marker, thr, pct_pos in threshold_rows:
+        html.append(f"<tr><td>{marker}</td><td>{thr:.3f}</td><td>{pct_pos:.2f}%</td></tr>")
+    html.append("</table></div>")
+
+    if chi2_df is not None:
+        n_sig = int(chi2_df["significant"].sum()) if "significant" in chi2_df.columns else 0
+        html.append(f'<div class="section"><h2>{group_col} Comparison</h2>'
+                    f'<p>{n_sig} of {len(chi2_df)} cell types differ significantly '
+                    f'across {group_col} (p&lt;0.05, chi-square).</p><table>'
+                    '<tr><th>Cell Type</th><th>Chi-square</th><th>P-value</th><th>Significant</th></tr>')
+        for ct, row in chi2_df.iterrows():
+            cls = ' class="highlight"' if row.get("significant") else ""
+            html.append(f"<tr{cls}><td>{ct}</td><td>{row.get('chi2', float('nan')):.3f}</td>"
+                        f"<td>{row.get('p_value', float('nan')):.4f}</td>"
+                        f"<td>{'Yes' if row.get('significant') else 'No'}</td></tr>")
+        html.append("</table></div>")
+
+    html.append(f'<div class="footer">Generated automatically by SPATIA cell_typing.py on {now_str}. '
+                f'Full plot set (per-marker distributions/UMAPs, CSVs) in the sibling '
+                f'cell_typing_plots/ and cell_typing_data/ directories.</div>')
+    html.append("</div></body></html>")
+
+    with open(os.path.join(report_dir, "cell_typing_report.html"), "w") as f:
+        f.write("".join(html))
+
+    pdf_path = os.path.join(report_dir, "cell_typing_report.pdf")
+    with PdfPages(pdf_path) as pdf:
+        fig = plt.figure(figsize=(8.5, 11))
+        fig.text(0.5, 0.88, "Cell Typing Analysis Report", ha="center", fontsize=22, weight="bold")
+        fig.text(0.5, 0.82, f"Generated: {now_str}", ha="center", fontsize=12)
+        fig.text(0.5, 0.78, f"Total cells: {total_cells:,}", ha="center", fontsize=12)
+        fig.text(0.5, 0.75, f"Markers used: {n_markers}", ha="center", fontsize=12)
+        fig.text(0.5, 0.72, f"Cell types identified: {n_cell_types}", ha="center", fontsize=12)
+        fig.text(0.5, 0.69, f"Unassigned: {n_unassigned:,} ({pct_unassigned:.2f}%)", ha="center", fontsize=12)
+        plt.axis("off")
+        pdf.savefig(fig)
+        plt.close(fig)
+
+        for fname, title in figures:
+            try:
+                img = plt.imread(os.path.join(plot_dir, fname))
+                fig, ax = plt.subplots(figsize=(11, 8.5))
+                ax.imshow(img)
+                ax.axis("off")
+                ax.set_title(title, fontsize=13)
+                pdf.savefig(fig)
+                plt.close(fig)
+            except Exception:
+                plt.close("all")
+
+    lines = [
+        "CELL TYPING ANALYSIS SUMMARY", "=" * 40,
+        f"Generated: {now_str}", f"Total cells: {total_cells:,}",
+        f"Markers used: {n_markers}", f"Cell types identified: {n_cell_types}",
+        f"Unassigned: {n_unassigned:,} ({pct_unassigned:.2f}%)",
+        "", "CELL TYPE DISTRIBUTION", "-" * 40,
+    ]
+    for ct, count in ct_counts.items():
+        pct = 100 * count / total_cells if total_cells else 0
+        lines.append(f"{ct}: {count:,} cells ({pct:.2f}%)")
+    if chi2_df is not None:
+        lines += ["", f"{str(group_col).upper()} COMPARISON", "-" * 40]
+        sig = chi2_df[chi2_df["significant"]] if "significant" in chi2_df.columns else chi2_df.iloc[0:0]
+        lines.append(f"Significantly different cell types: {len(sig)}")
+        for ct, row in sig.iterrows():
+            lines.append(f"  * {ct}: p={row.get('p_value', float('nan')):.4f}")
+    with open(os.path.join(report_dir, "cell_typing_report_summary.txt"), "w") as f:
+        f.write("\n".join(lines) + "\n")
+
+    print(f"  [diagnostics] Report bundle written to {report_dir}/ "
+          f"(cell_typing_report.html, .pdf, _summary.txt)")
+
+
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 def generate_cell_typing_diagnostics(adata, thresholds: dict, fit_info: dict, column_map: dict,
@@ -1535,4 +1967,30 @@ def generate_cell_typing_diagnostics(adata, thresholds: dict, fit_info: dict, co
     except Exception as e:
         print(f"  WARNING: UMAP diagnostics failed (non-fatal): {e}")
 
-    print(f"\n[diagnostics] Complete. Outputs in: {plot_dir} (figures) / {data_dir} (CSVs)")
+    try:
+        plot_dotplot(adata, thresholds, column_map, plot_dir, formats)
+    except Exception as e:
+        print(f"  WARNING: dotplot failed (non-fatal): {e}")
+
+    try:
+        plot_marker_umaps(adata, thresholds, column_map, plot_dir, formats)
+    except Exception as e:
+        print(f"  WARNING: per-marker UMAPs failed (non-fatal): {e}")
+
+    try:
+        plot_group_statistics(adata, group_col, plot_dir, data_dir, formats)
+    except Exception as e:
+        print(f"  WARNING: group statistics failed (non-fatal): {e}")
+
+    try:
+        plot_unassigned_diagnostics(adata, thresholds, column_map, plot_dir, data_dir, formats)
+    except Exception as e:
+        print(f"  WARNING: unassigned-cell diagnostics failed (non-fatal): {e}")
+
+    try:
+        generate_report(adata, thresholds, fit_info, column_map, group_col, data_dir, plot_dir)
+    except Exception as e:
+        print(f"  WARNING: report bundle generation failed (non-fatal): {e}")
+
+    print(f"\n[diagnostics] Complete. Outputs in: {plot_dir} (figures) / {data_dir} (CSVs) / "
+          f"{os.path.join(os.path.dirname(os.path.normpath(plot_dir)), 'cell_typing_report')} (report)")
