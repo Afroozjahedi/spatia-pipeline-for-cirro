@@ -1449,12 +1449,20 @@ def compute_and_plot_umaps(adata, plot_dir: str, data_dir: str, group_col: str, 
     dozens of markers, not thousands of genes -- so PCA isn't needed the
     way it is for scRNA-seq). No cell subsampling either, matching
     Afrouz's explicit choice to run on the full pooled cohort.
+
+    use_rep="X" is REQUIRED below, not cosmetic (bug found 2026-09-10 on
+    the first real 80-marker/300k-cell run): scanpy's sc.pp.neighbors
+    silently ignores "no PCA" intent once .X has more dimensions than its
+    own internal default PC count (50) -- without use_rep="X" it prints
+    "Falling back to preprocessing with sc.pp.pca and default params" and
+    runs PCA anyway. The earlier synthetic test (6 markers) never
+    triggered this, since 6 < 50. Confirmed via the real run's own log.
     """
     if "X_umap" not in adata.obsm:
         print(f"  [diagnostics] Computing neighbors -> UMAP directly on the marker matrix "
               f"({adata.n_vars} markers, {adata.n_obs:,} cells, no PCA/subsampling -- "
               f"matches the reference notebook's approach)...")
-        sc.pp.neighbors(adata, n_neighbors=15, random_state=random_state)
+        sc.pp.neighbors(adata, n_neighbors=15, random_state=random_state, use_rep="X")
         sc.tl.umap(adata, random_state=random_state)
     else:
         print("  [diagnostics] X_umap already present (semi_automatic clustering ran earlier) -- reusing it.")
