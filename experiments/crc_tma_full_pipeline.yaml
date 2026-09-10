@@ -195,7 +195,21 @@ preprocessing:
 
 cell_typing:
   mode: "automatic"
-  input_file: ""
+  # This is a TMA: preprocessing.py pools per-region (each reg069/reg070/...
+  # core is its own tissue_id after coordinate/group stripping -- see
+  # extract_tissue_identifier()), so it writes one h5ad PER CORE, never one
+  # cohort-wide file. cell_typing.py's input_file is a single hardcoded path
+  # (sc.read(input_file), no glob/loop) -- it needs ONE file covering the
+  # whole cohort so GMM thresholds are fit jointly across cores/patients,
+  # not separately per core (which would bake any core-to-core staining
+  # drift into inconsistent thresholds). Run pool_tissues_for_celltyping.py
+  # FIRST to concatenate every core's h5ad into this file:
+  #   python pool_tissues_for_celltyping.py \
+  #     --input-dir  "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA_full/results/combined_processed_data/individual_processed_data" \
+  #     --output-file "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA_full/results/combined_processed_data/cohort_pooled.h5ad"
+  # set 2026-09-10 -- resolves the empty-input_file crash (ValueError:
+  # Reading with filekey '.' failed ... write/..h5ad does not exist).
+  input_file: "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA_full/results/combined_processed_data/cohort_pooled.h5ad"
   analysis_name: "CRC_TMA_full"
   markers:
     # TODO-was: "fill in from channelNames.txt once segmentation output is
