@@ -75,6 +75,13 @@ except ImportError:
     HAS_SCANPY = False
     print("[cell_typing] WARNING: scanpy not installed — semi_automatic mode unavailable.")
 
+# Diagnostic/reporting plots (GMM per-marker distributions, positivity/
+# expression heatmaps, restyled counts chart, stacked-by-group chart, UMAP)
+# -- separate module, added 2026-09-10 at Afrouz's request. Imported lazily
+# inside run_cell_typing() (not here at module load) so a bug or missing
+# dependency in the plotting module can never block import of cell_typing.py
+# itself -- see the try/except around its call site below.
+
 
 # ── Config helpers ────────────────────────────────────────────────────────────
 
@@ -987,6 +994,27 @@ def run_cell_typing(cfg: dict) -> None:
 
     else:
         raise ValueError(f"Unknown cell_typing.mode: '{mode}'. Use 'automatic' or 'semi_automatic'.")
+
+    # -- Diagnostic plot suite (GMM per-marker distributions, positivity/
+    # expression heatmaps, restyled counts chart, stacked-by-group chart,
+    # UMAP by cell_type/group/core) -----------------------------------
+    # Only reached by a completed automatic run or semi_automatic Phase 2
+    # (Phase 1 returns early above, before cell_type exists). Local import
+    # + try/except, matching preprocessing.py's summary-report hook: a bug
+    # here must never fail the cell_typing step itself, since triads/
+    # functional/survival depend on this function's actual output, not on
+    # these plots.
+    if "cell_type" in adata_cd45.obs.columns:
+        try:
+            from spatia.analysis.cell_typing_plots import generate_cell_typing_diagnostics
+            generate_cell_typing_diagnostics(
+                adata_cd45, thresholds, fit_info, column_map, data_dir, plot_dir,
+                transform=gmm_transform, arcsinh_cofactor=arcsinh_cofactor,
+                random_state=random_state,
+            )
+        except Exception as e:
+            print(f"WARNING: cell-typing diagnostic plots failed (non-fatal -- "
+                  f"cell_typing itself succeeded): {e}")
 
 
 # ── Shared output logic ───────────────────────────────────────────────────────
