@@ -378,7 +378,8 @@ def compute_marker_thresholds(adata, markers: list, std_multipliers: dict,
                                arcsinh_cofactor: float = 5.0,
                                threshold_mode: str = "std_multiplier",
                                confidence_level: float = 0.8,
-                               confidence_overrides: Optional[dict] = None) -> Tuple[dict, dict]:
+                               confidence_overrides: Optional[dict] = None,
+                               column_map: Optional[dict] = None) -> Tuple[dict, dict]:
     """
     Fits a GMM per marker and returns (thresholds, fit_info).
 
@@ -398,16 +399,32 @@ def compute_marker_thresholds(adata, markers: list, std_multipliers: dict,
     confidence_overrides: per-marker gmm.confidence_level overrides,
         mirroring how std_multipliers/per_marker_overrides already work --
         only used when threshold_mode == "posterior".
+
+    column_map: {short_marker_name: actual_adata_column_name}, optional.
+        Added 2026-09-10 for panels where the config's marker names (and
+        cell_type_definitions.yaml's *_pos rules, and gmm.per_marker_overrides)
+        use clean short names like "CD45", but the real column in this
+        dataset's adata is something like "CD45 - hematopoietic cells (C14)"
+        (CODEX-style export with descriptions + cycle suffixes -- see
+        docs/spatia_analysis_cell_typing.md Notes/risks). Every dict key
+        below (thresholds, fit_info, and later new_cols in
+        add_positivity_columns) stays keyed by the SHORT name `m` throughout
+        -- only the adata lookup itself is redirected to the real column via
+        column_map.get(m, m). A config with no column_map (the previous,
+        still-default behavior) resolves every marker to itself, identical
+        to before this parameter existed.
     """
     confidence_overrides = confidence_overrides or {}
+    column_map = column_map or {}
     thresholds: Dict[str, float] = {}
     fit_info: Dict[str, dict] = {}
 
     for m in markers:
-        if m not in adata.var_names:
-            print(f"    [GMM] marker '{m}' not in data — skipping")
+        real_col = column_map.get(m, m)
+        if real_col not in adata.var_names:
+            print(f"    [GMM] marker '{m}' (column '{real_col}') not in data — skipping")
             continue
-        vals = adata[:, m].X
+        vals = adata[:, real_col].X
         if hasattr(vals, "toarray"):
             vals = vals.toarray().flatten()
         else:
@@ -441,7 +458,8 @@ def compute_marker_thresholds(adata, markers: list, std_multipliers: dict,
 
 
 def add_positivity_columns(adata, thresholds: dict, fit_info: Optional[dict] = None,
-                            transform: str = "none", arcsinh_cofactor: float = 5.0) -> None:
+                            transform: str = "none", arcsinh_cofactor: float = 5.0,
+                            column_map: Optional[dict] = None) -> None:
     """
     Adds boolean columns '<marker>_pos' and intensity columns '<marker>_intensity'
     (0=negative, 1=+, 2=++, 3=+++) to adata.obs in-place. In "posterior" mode
@@ -455,14 +473,24 @@ def add_positivity_columns(adata, thresholds: dict, fit_info: Optional[dict] = N
         only needs the scalar thresholds dict (kept as a required, simple
         argument so any external caller with just thresholds still works
         exactly as before this feature was added).
+
+    column_map: same {short_name: real_column_name} resolution as
+        compute_marker_thresholds() (added 2026-09-10) -- new_cols is still
+        keyed as "<marker>_pos"/"<marker>_intensity" using the SHORT name
+        `marker` (from `thresholds`, which is itself keyed by short names),
+        so cell_type_definitions.yaml's rules (which reference short-name
+        "*_pos" columns) keep working unchanged. Only the adata lookup is
+        redirected.
     """
     fit_info = fit_info or {}
+    column_map = column_map or {}
     new_cols: dict[str, np.ndarray] = {}
 
     for marker, threshold in thresholds.items():
-        if marker not in adata.var_names:
+        real_col = column_map.get(marker, marker)
+        if real_col not in adata.var_names:
             continue
-        vals = adata[:, marker].X
+        vals = adata[:, real_col].X
         if hasattr(vals, "toarray"):
             vals = vals.toarray().flatten()
         else:
@@ -521,7 +549,8 @@ def gate_cd45_positive(adata, cd45_std_multiplier: float, n_components: int = 2,
                         random_state: int = 42, plot_dir: str = None,
                         transform: str = "none", arcsinh_cofactor: float = 5.0,
                         threshold_mode: str = "std_multiplier",
-                        confidence_level: float = 0.8):
+                        confidence_level: float = 0.8,
+                        cd45_col: str = "CD45"):
     """
     Returns adata filtered to CD45+ cells.
     Saves a threshold histogram to plot_dir if provided.
@@ -532,12 +561,19 @@ def gate_cd45_positive(adata, cd45_std_multiplier: float, n_components: int = 2,
     std_multiplier-only path while other markers can use posteriors.
 
     transform/arcsinh_cofactor: Q16 remediation, see `_transform_values()`.
+
+    cd45_col: the actual adata column name for CD45 (added 2026-09-10).
+        Defaults to the literal "CD45" -- unchanged prior behavior for any
+        panel where that's already the real column name. Pass
+        markers.column_map.get("CD45", "CD45") from run_cell_typing() for a
+        panel (like this CRC one) whose real CD45 column is something like
+        "CD45 - hematopoietic cells (C14)".
     """
-    if "CD45" not in adata.var_names:
-        print("  [CD45 gate] WARNING: CD45 not found — returning all cells")
+    if cd45_col not in adata.var_names:
+        print(f"  [CD45 gate] WARNING: '{cd45_col}' not found — returning all cells")
         return adata
 
-    vals = adata[:, "CD45"].X
+    vals = adata[:, cd45_col].X
     if hasattr(vals, "toarray"):
         vals = vals.toarray().flatten()
     else:
@@ -769,6 +805,13 @@ def run_cell_typing(cfg: dict) -> None:
     markers_cfg   = ct_cfg["markers"]
     panel         = markers_cfg["panel"]
     gating_only   = markers_cfg.get("gating_only", ["CD45"])
+    # {short_marker_name: actual_adata_column_name} -- added 2026-09-10 for
+    # panels (like this CRC one) whose real h5ad columns are the CODEX
+    # export's full "<name> - <description> (C<n>)" strings, not the clean
+    # short names used in `panel`/gating_only/gmm.per_marker_overrides/
+    # cell_type_definitions.yaml. Empty by default -- identical prior
+    # behavior (exact match) for any config that doesn't set it.
+    column_map    = markers_cfg.get("column_map", {})
 
     gmm_cfg       = ct_cfg["gmm"]
     cd45_mult     = gmm_cfg["cd45_std_multiplier"]
@@ -833,11 +876,17 @@ def run_cell_typing(cfg: dict) -> None:
             random_state=random_state, plot_dir=plot_dir,
             transform=gmm_transform, arcsinh_cofactor=arcsinh_cofactor,
             threshold_mode=threshold_mode, confidence_level=confidence_level,
+            cd45_col=column_map.get("CD45", "CD45"),
         )
 
     # ── Markers for analysis (exclude gating-only markers) ───
-    markers_for_analysis = [m for m in panel if m not in gating_only and m in adata_cd45.var_names]
-    missing = [m for m in panel if m not in gating_only and m not in adata_cd45.var_names]
+    # Resolved through column_map so a marker like "CD45" whose real column
+    # is "CD45 - hematopoietic cells (C14)" is correctly found here instead
+    # of being reported missing (added 2026-09-10).
+    markers_for_analysis = [m for m in panel
+                             if m not in gating_only and column_map.get(m, m) in adata_cd45.var_names]
+    missing = [m for m in panel
+               if m not in gating_only and column_map.get(m, m) not in adata_cd45.var_names]
     if missing:
         print(f"  [cell_typing] WARNING: markers not in data: {missing}")
 
@@ -851,6 +900,7 @@ def run_cell_typing(cfg: dict) -> None:
         transform=gmm_transform, arcsinh_cofactor=arcsinh_cofactor,
         threshold_mode=threshold_mode, confidence_level=confidence_level,
         confidence_overrides=confidence_overrides,
+        column_map=column_map,
     )
     threshold_report = pd.DataFrame({
         "threshold": thresholds,
@@ -865,7 +915,8 @@ def run_cell_typing(cfg: dict) -> None:
 
     # ── Add positivity columns ────────────────────────────────
     add_positivity_columns(adata_cd45, thresholds, fit_info=fit_info,
-                            transform=gmm_transform, arcsinh_cofactor=arcsinh_cofactor)
+                            transform=gmm_transform, arcsinh_cofactor=arcsinh_cofactor,
+                            column_map=column_map)
 
     # ══════════════════════════════════════════════════════════
     # AUTOMATIC MODE

@@ -269,6 +269,77 @@ cell_typing:
       - CD138
       - MMP12
     gating_only: []
+    # {short_marker_name: actual_adata_column_name} -- added 2026-09-10.
+    # This panel's real h5ad/CSV columns are the CODEX export's full
+    # "<name> - <description> (C<n>)" strings (confirmed directly against
+    # data/crc_tma_full/channelNames.txt and a real
+    # *_combined_all_experiment_groups.csv header the user uploaded), not
+    # the clean short names above -- e.g. the real "CD45" column is
+    # "CD45 - hematopoietic cells (C14)". `panel`/gating_only/
+    # gmm.per_marker_overrides/cell_type_definitions.yaml all keep using
+    # the short names; only this map redirects the actual adata lookup
+    # (see compute_marker_thresholds/add_positivity_columns/
+    # gate_cd45_positive in cell_typing.py). Four entries are a real name
+    # substitution, not just punctuation -- confirm these four are correct:
+    # CK -> Cytokeratin, GzmB -> Granzyme B, ChromoA -> Chromogranin A,
+    # CCR4 -> CD194 (the column's leading name; CCR4 only appears in its
+    # description "CD194 - CCR4 chemokine R").
+    column_map:
+      CD45: "CD45 - hematopoietic cells (C14)"
+      CD44: "CD44 - stroma (C6)"
+      FOXP3: "FOXP3 - regulatory T cells (C7)"
+      CDX2: "CDX2 - intestinal epithelia (C8)"
+      CD8: "CD8 - cytotoxic T cells (C10)"
+      p53: "p53 - tumor suppressor (C11)"
+      GATA3: "GATA3 - Th2 helper T cells (C12)"
+      Tbet: "T-bet - Th1 cells (C15)"
+      betacatenin: "beta-catenin - Wnt signaling (C16)"
+      HLA_DR: "HLA-DR - MHC-II (C18)"
+      PDL1: "PD-L1 - checkpoint (C19)"
+      Ki67: "Ki67 - proliferation (C20)"
+      CD45RA: "CD45RA - naive T cells (C22)"
+      CD4: "CD4 - T helper cells (C23)"
+      CD21: "CD21 - DCs (C24)"
+      MUC1: "MUC-1 - epithelia (C26)"
+      CD30: "CD30 - costimulator (C27)"
+      CD2: "CD2 - T cells (C28)"
+      Vimentin: "Vimentin - cytoplasm (C30)"
+      CD20: "CD20 - B cells (C31)"
+      LAG3: "LAG-3 - checkpoint (C32)"
+      CD5: "CD5 - T cells (C35)"
+      IDO1: "IDO-1 - metabolism (C36)"
+      CK: "Cytokeratin - epithelia (C38)"
+      CD11b: "CD11b - macrophages (C39)"
+      CD56: "CD56 - NK cells (C40)"
+      aSMA: "aSMA - smooth muscle (C42)"
+      BCL2: "BCL-2 - apoptosis (C43)"
+      CD25: "CD25 - IL-2 Ra (C44)"
+      CollagenIV: "Collagen IV - bas. memb. (C46)"
+      CD11c: "CD11c - DCs (C47)"
+      PD1: "PD-1 - checkpoint (C48)"
+      GzmB: "Granzyme B - cytotoxicity (C50)"
+      EGFR: "EGFR - signaling (C51)"
+      VISTA: "VISTA - costimulator (C52)"
+      CD15: "CD15 - granulocytes (C54)"
+      CCR4: "CD194 - CCR4 chemokine R (C55)"
+      ICOS: "ICOS - costimulator (C56)"
+      MMP9: "MMP9 - matrix metalloproteinase (C58)"
+      Synaptophysin: "Synaptophysin - neuroendocrine (C59)"
+      CD71: "CD71 - transferrin R (C60)"
+      GFAP: "GFAP - nerves (C62)"
+      CD7: "CD7 - T cells (C63)"
+      CD3: "CD3 - T cells (C64)"
+      ChromoA: "Chromogranin A - neuroendocrine (C66)"
+      CD163: "CD163 - macrophages (C67)"
+      CD57: "CD57 - NK cells (C68)"
+      CD45RO: "CD45RO - memory cells (C71)"
+      CD68: "CD68 - macrophages (C72)"
+      CD31: "CD31 - vasculature (C75)"
+      Podoplanin: "Podoplanin - lymphatics (C76)"
+      CD34: "CD34 - vasculature (C79)"
+      CD38: "CD38 - multifunctional (C80)"
+      CD138: "CD138 - plasma cells (C83)"
+      MMP12: "MMP12 - matrix metalloproteinase (C84)"
   gmm:
     n_components: 2
     random_state: 42
@@ -284,7 +355,12 @@ cell_typing:
   clustering:
     n_neighbors: 15
     leiden_resolution: 0.5
-  cell_type_definitions_file: ""   # open -- see Q-FullPipeline-GMMThresholds below
+  cell_type_definitions_file: "cell_type_definitions/crc_tma.yaml"   # set 2026-09-10 -- resolves
+    # Q-FullPipeline-GMMThresholds's open marker-list question along the way: this file's
+    # required/excluded marker names (CD8, GzmB, HLA_DR, ...) were checked and match this
+    # config's markers.panel short names, not spatia/cell_type_definitions.yaml's default
+    # (which is the LILRB2 mouse panel -- B220/Ly6C/NKP46/SIGLEC F -- wrong species for this
+    # CRC dataset entirely, do not point here).
   cluster_labels_file: null
 
 analysis:
