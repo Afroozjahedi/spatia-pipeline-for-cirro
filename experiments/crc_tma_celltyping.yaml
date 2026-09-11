@@ -164,6 +164,47 @@ cell_typing:
     transform: "none"
     arcsinh_cofactor: 5.0
 
+    # per_marker_transform_overrides (added 2026-09-11): the 15 markers
+    # documented above 30% exact-zero intensity get "arcsinh" here while
+    # the rest of the panel stays at the global "none" default — isolating
+    # the transform fix to just the markers it's meant for, instead of the
+    # blanket arcsinh sweep from 2026-08-18 that regressed accuracy (that
+    # earlier test applied arcsinh to ALL markers at once, including ones
+    # that didn't need it, and ran before two later fixes: the 2026-08-19
+    # exact-zero exclusion in _fit_gmm, and the 2026-09-11 generalization
+    # of that exclusion from a literal `== 0` check to _detect_point_mass()
+    # -- see that function's docstring for why the literal check matters:
+    # it only finds the right point mass on raw, un-normalized data).
+    # List derived from a standalone marker_shape_diagnosis.py run against
+    # this exact h5ad (zero_frac >= 0.30, matching the "14/53" figure
+    # already documented above): GzmB, CD20, CK, CD15, ChromoA, CD138,
+    # MMP9, CD31, CD7, HLA_DR, MUC1, NaKATPase, CollagenIV, Synaptophysin,
+    # CD45. CD15 (granulocytes) and CD45 (used in most other cell-type
+    # rules) are the two highest-leverage markers on this list.
+    #
+    # NOTE: NaKATPase is NOT listed below even though the diagnosis flagged
+    # it (zero_frac=0.366) -- it's present in the h5ad (56 marker columns,
+    # per the real run's "Loaded 258,385 cells x 56 markers" log line) but
+    # is NOT in the `markers.panel` list above (55 markers), so it's
+    # already excluded from cell typing entirely regardless of transform.
+    # An override for it here would be a silent no-op. Worth a quick check
+    # with Afrouz on whether that panel exclusion was deliberate.
+    per_marker_transform_overrides:
+      GzmB: "arcsinh"
+      CD20: "arcsinh"
+      CK: "arcsinh"
+      CD15: "arcsinh"
+      ChromoA: "arcsinh"
+      CD138: "arcsinh"
+      MMP9: "arcsinh"
+      CD31: "arcsinh"
+      CD7: "arcsinh"
+      HLA_DR: "arcsinh"
+      MUC1: "arcsinh"
+      CollagenIV: "arcsinh"
+      Synaptophysin: "arcsinh"
+      CD45: "arcsinh"
+
     # threshold_mode (2026-08-19): "std_multiplier" (default, unchanged
     # from all prior runs -- mean_low + std_multiplier * std_low) or
     # "posterior" (GMM posterior probability of positive-component

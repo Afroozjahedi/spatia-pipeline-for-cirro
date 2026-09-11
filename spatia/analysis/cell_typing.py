@@ -233,6 +233,44 @@ def _inverse_transform_scalar(value_t: float, transform: str, arcsinh_cofactor: 
 
 # ── GMM fitting (shared by std_multiplier and posterior modes) ────────────────
 
+def _detect_point_mass(values: np.ndarray, min_frac: float = 0.05) -> Optional[float]:
+    """
+    Detect a single repeated constant value that makes up at least
+    `min_frac` of `values` -- e.g. a hardware/detector floor sitting at
+    exactly 0 in raw fluorescence intensity, OR that same floor after a
+    linear normalization (z-score, etc.) has shifted it to some other
+    constant (mean and std are per-marker, so the floor value differs by
+    marker; it is emphatically not 0 anymore).
+
+    Added 2026-09-11 to generalize _fit_gmm's zero-exclusion (previously
+    hardcoded to `values == 0`) so it still finds the point mass on data
+    that already went through spatia/analysis/preprocessing.py's per-image
+    z-score normalization (sp.pp.format(..., method="zscore")) before
+    reaching cell_typing -- which is what the REAL pipeline run does,
+    unlike the crc_tma_celltyping.yaml validation dataset (raw CSV
+    intensities, no normalization, where the floor genuinely is 0 and the
+    old check happened to be correct by coincidence). A linear transform
+    moves a point mass to a new constant, it does not remove it -- the
+    same GMM-collapse failure mode this function's zero-exclusion exists
+    to prevent (see docstring below) would otherwise resurface silently
+    on z-scored real data because `== 0` would simply stop matching it.
+
+    Returns the detected value, or None if no single value reaches
+    min_frac (i.e. no meaningful point mass -- most markers on already
+    zero-excluded/normalized data). Values are rounded to 6 decimals first
+    so floating-point noise doesn't split one truly-repeated value (e.g.
+    an exact 0.0 written by multiple upstream tools) into near-duplicate
+    bins that individually fall under min_frac.
+    """
+    if len(values) == 0:
+        return None
+    rounded = np.round(values, 6)
+    vals, counts = np.unique(rounded, return_counts=True)
+    idx = np.argmax(counts)
+    frac = counts[idx] / len(values)
+    return float(vals[idx]) if frac >= min_frac else None
+
+
 def _fit_gmm(values: np.ndarray, n_components: int = 2, random_state: int = 42,
              n_init: int = 1, max_cells: int = 50_000, transform: str = "none",
              arcsinh_cofactor: float = 5.0, yeojohnson_lambda: Optional[float] = None) -> dict:
@@ -250,18 +288,32 @@ def _fit_gmm(values: np.ndarray, n_components: int = 2, random_state: int = 42,
         "clean"             : raw (untransformed) finite values, for the
                                percentile fallback when gmm is None
 
-    Zero-inflation note: when transform != "none", exact-zero raw values
-    are excluded from the GMM fit (still included in "clean" for the
-    fallback). A monotonic transform (arcsinh/log1p/yeojohnson) reshapes
-    smooth right-skew, but it cannot fix a genuine point mass at exactly
-    zero -- every one of these transforms maps 0 -> 0, so a real "30-50%
-    of cells have exact-zero intensity" spike (documented for 14/53 CRC
-    markers) survives the transform unchanged and can still make one GMM
-    component collapse onto it, exactly the degeneracy the transform was
-    meant to fix. Excluding true zeros and fitting the 2-component GMM on
-    the remaining continuum is the standard complement to transforming.
-    transform="none" is left untouched (no zero exclusion) to keep that
-    path exactly backward compatible with pre-2026-08-19 behavior.
+    Zero-inflation note: when transform != "none", the dominant point-mass
+    value is excluded from the GMM fit (still included in "clean" for the
+    fallback) -- see _detect_point_mass(). A monotonic transform
+    (arcsinh/log1p/yeojohnson) reshapes smooth right-skew, but it cannot
+    fix a genuine point mass: every one of these transforms maps a
+    constant to a constant, so a real "30-50% of cells sit at the same
+    floor value" spike (documented for 14/53 CRC markers, using raw
+    fluorescence where that floor is exactly 0) survives the transform
+    unchanged and can still make one GMM component collapse onto it,
+    exactly the degeneracy the transform was meant to fix. Excluding the
+    point mass and fitting the 2-component GMM on the remaining continuum
+    is the standard complement to transforming.
+
+    Generalized 2026-09-11 from a hardcoded `values == 0` check to
+    _detect_point_mass(), which finds whatever constant is actually
+    repeated -- because on data that already went through
+    preprocessing.py's per-image z-score normalization before reaching
+    cell_typing (the real pipeline's path, as opposed to the
+    crc_tma_celltyping.yaml validation dataset's raw un-normalized CSV),
+    a floor that was exactly 0 pre-normalization is shifted to some other
+    marker-specific constant post-normalization -- a linear transform
+    moves a point mass, it does not remove it. The old `== 0` check would
+    silently stop finding it in that case, reintroducing this exact
+    degeneracy on real data even with this exclusion "on".
+    transform="none" is left untouched (no point-mass exclusion) to keep
+    that path exactly backward compatible with pre-2026-08-19 behavior.
     Confirmed with a standalone test: on a 33%-exact-zero, right-skewed
     synthetic marker, yeojohnson WITHOUT this exclusion scored 52.6%
     agreement with ground truth (worse than doing nothing) because the
@@ -277,10 +329,14 @@ def _fit_gmm(values: np.ndarray, n_components: int = 2, random_state: int = 42,
         return result
 
     if transform != "none":
-        fit_input = clean[clean.flatten() != 0].reshape(-1, 1)
+        point_mass = _detect_point_mass(clean.flatten())
+        if point_mass is not None:
+            fit_input = clean[np.abs(clean.flatten() - point_mass) > 1e-9].reshape(-1, 1)
+        else:
+            fit_input = clean
         if len(fit_input) < 10:
-            print(f"    [GMM] WARNING: fewer than 10 non-zero values after excluding exact "
-                  f"zeros for transform='{transform}' — falling back to percentile threshold")
+            print(f"    [GMM] WARNING: fewer than 10 values after excluding the point mass "
+                  f"({point_mass}) for transform='{transform}' — falling back to percentile threshold")
             return result
     else:
         fit_input = clean
@@ -400,7 +456,8 @@ def compute_marker_thresholds(adata, markers: list, std_multipliers: dict,
                                threshold_mode: str = "std_multiplier",
                                confidence_level: float = 0.8,
                                confidence_overrides: Optional[dict] = None,
-                               column_map: Optional[dict] = None) -> Tuple[dict, dict]:
+                               column_map: Optional[dict] = None,
+                               transform_overrides: Optional[dict] = None) -> Tuple[dict, dict]:
     """
     Fits a GMM per marker and returns (thresholds, fit_info).
 
@@ -413,13 +470,28 @@ def compute_marker_thresholds(adata, markers: list, std_multipliers: dict,
         add_positivity_columns uses to decide positivity for that marker.
 
     fit_info : {marker: {"gmm", "transform_params", "low_idx", "high_idx",
-        "threshold_mode", "confidence_level"}} -- everything
+        "threshold_mode", "confidence_level", "transform"}} -- everything
         add_positivity_columns needs to make the actual per-cell call,
-        including the fitted GMM itself for "posterior" mode.
+        including the fitted GMM itself for "posterior" mode. "transform"
+        (added 2026-09-11) is the transform actually used to fit THIS
+        marker -- transform_overrides.get(m, transform) -- so downstream
+        consumers (add_positivity_columns' posterior-mode path,
+        plot_marker_distributions, plot_marker_umaps) never need the
+        global `transform` value passed in separately to stay correct
+        when different markers use different transforms.
 
     confidence_overrides: per-marker gmm.confidence_level overrides,
         mirroring how std_multipliers/per_marker_overrides already work --
         only used when threshold_mode == "posterior".
+
+    transform_overrides: {marker: transform_name}, optional. Added
+        2026-09-11 so an individual marker can be fit in a different
+        transform space than the global `transform` default -- e.g. a
+        zero-inflated marker (see docs/spatia_analysis_cell_typing.md's
+        marker-shape-diagnosis notes) can use "arcsinh" while the rest of
+        the panel stays "none", without forcing one transform on all 55
+        markers. A marker not listed here falls back to `transform`,
+        identical to prior behavior for any config that doesn't set this.
 
     column_map: {short_marker_name: actual_adata_column_name}, optional.
         Added 2026-09-10 for panels where the config's marker names (and
@@ -437,6 +509,7 @@ def compute_marker_thresholds(adata, markers: list, std_multipliers: dict,
     """
     confidence_overrides = confidence_overrides or {}
     column_map = column_map or {}
+    transform_overrides = transform_overrides or {}
     thresholds: Dict[str, float] = {}
     fit_info: Dict[str, dict] = {}
 
@@ -451,28 +524,32 @@ def compute_marker_thresholds(adata, markers: list, std_multipliers: dict,
         else:
             vals = np.array(vals).flatten()
 
+        marker_transform = transform_overrides.get(m, transform)
         fit = _fit_gmm(vals, n_components=n_components, random_state=random_state,
-                       n_init=n_init, max_cells=max_cells, transform=transform,
+                       n_init=n_init, max_cells=max_cells, transform=marker_transform,
                        arcsinh_cofactor=arcsinh_cofactor)
 
         mult = std_multipliers.get(m, default_std)
         conf = confidence_overrides.get(m, confidence_level)
+        override_note = "  [override]" if m in transform_overrides else ""
 
         if threshold_mode == "posterior":
-            t = _gmm_posterior_effective_threshold(fit, conf, transform, arcsinh_cofactor)
+            t = _gmm_posterior_effective_threshold(fit, conf, marker_transform, arcsinh_cofactor)
             lam_note = f"  lambda={fit['transform_params']['lambda']:.3f}" if "lambda" in fit["transform_params"] else ""
-            print(f"    {m:<20} mode=posterior  confidence={conf:.2f}  "
-                  f"effective_threshold={t:.4f}{lam_note}")
+            print(f"    {m:<20} mode=posterior  confidence={conf:.2f}  transform={marker_transform}"
+                  f"  effective_threshold={t:.4f}{lam_note}{override_note}")
         else:
-            t = _gmm_threshold_from_fit(fit, mult, transform, arcsinh_cofactor)
+            t = _gmm_threshold_from_fit(fit, mult, marker_transform, arcsinh_cofactor)
             lam_note = f"  lambda={fit['transform_params']['lambda']:.3f}" if "lambda" in fit["transform_params"] else ""
-            print(f"    {m:<20} mode=std_multiplier  std_mult={mult:.1f}  threshold={t:.4f}{lam_note}")
+            print(f"    {m:<20} mode=std_multiplier  std_mult={mult:.1f}  transform={marker_transform}"
+                  f"  threshold={t:.4f}{lam_note}{override_note}")
 
         thresholds[m] = t
         fit_info[m] = {
             **fit,
             "threshold_mode": threshold_mode,
             "confidence_level": conf,
+            "transform": marker_transform,
         }
 
     return thresholds, fit_info
@@ -525,7 +602,14 @@ def add_positivity_columns(adata, thresholds: dict, fit_info: Optional[dict] = N
             high_idx = info["high_idx"]
             low_idx = info["low_idx"]
             tparams = info.get("transform_params", {})
-            vals_t, _ = _transform_values(vals.reshape(-1, 1), transform, arcsinh_cofactor,
+            # Use THIS marker's actual fitted transform (added 2026-09-11
+            # alongside per-marker transform_overrides in
+            # compute_marker_thresholds) rather than the function's global
+            # `transform` default -- otherwise a marker fit with an
+            # override would have its GMM evaluated against values
+            # transformed the wrong way here.
+            marker_transform = info.get("transform", transform)
+            vals_t, _ = _transform_values(vals.reshape(-1, 1), marker_transform, arcsinh_cofactor,
                                            tparams.get("lambda"))
             posterior = gmm.predict_proba(vals_t)[:, high_idx]
             # Floor: never call a cell positive below the negative
@@ -861,6 +945,11 @@ def run_cell_typing(cfg: dict) -> None:
         )
     confidence_level = gmm_cfg.get("confidence_level", 0.8)
     confidence_overrides = gmm_cfg.get("per_marker_confidence_overrides", {})
+    # Per-marker transform overrides (added 2026-09-11): a marker can be
+    # fit in a different transform space than gmm.transform's global
+    # default -- e.g. zero-inflated markers get "arcsinh" while the rest
+    # of the panel stays "none". See compute_marker_thresholds docstring.
+    transform_overrides = gmm_cfg.get("per_marker_transform_overrides", {})
 
     # Merge per-marker overrides with default
     std_multipliers = {m: default_std for m in panel}
@@ -922,11 +1011,16 @@ def run_cell_typing(cfg: dict) -> None:
         threshold_mode=threshold_mode, confidence_level=confidence_level,
         confidence_overrides=confidence_overrides,
         column_map=column_map,
+        transform_overrides=transform_overrides,
     )
     threshold_report = pd.DataFrame({
         "threshold": thresholds,
         "threshold_mode": {m: threshold_mode for m in thresholds},
-        "transform": {m: gmm_transform for m in thresholds},
+        # Per-marker actual transform (added 2026-09-11) -- reads
+        # fit_info[m]["transform"], not the global gmm_transform, so a
+        # marker with a per_marker_transform_overrides entry is reported
+        # correctly instead of showing the panel-wide default.
+        "transform": {m: fit_info[m]["transform"] for m in thresholds},
         "transform_lambda": {
             m: fit_info[m]["transform_params"].get("lambda") for m in thresholds
         },
@@ -1115,10 +1209,10 @@ def _inverse_transform_scalar_local(value_t, transform: str, arcsinh_cofactor: f
     avoid a circular import (cell_typing.py imports FROM this module).
     Covers "none"/"arcsinh"/"log1p" exactly. "yeojohnson" is intentionally
     NOT reproduced here (it needs the fitted lambda's full inverse formula)
-    -- for that one transform, plot_marker_distributions() falls back to
-    histogram + threshold line only, no GMM component curves, rather than
-    risk a silently-wrong inverse. Not a gap for Afrouz's current config
-    (gmm.transform: "none" -- confirmed from her actual run log).
+    -- not needed by plot_marker_distributions() any more (2026-09-11): the
+    transformed-space panel now uses the FORWARD transform (see
+    _yeojohnson_forward_local below), which has a closed form for every
+    supported transform including yeojohnson, so no inverse is required.
     """
     if transform == "none":
         return float(value_t)
@@ -1128,6 +1222,38 @@ def _inverse_transform_scalar_local(value_t, transform: str, arcsinh_cofactor: f
         return float(np.expm1(value_t))
     else:
         raise ValueError(f"transform '{transform}' not supported for local inverse")
+
+
+def _yeojohnson_forward_local(x: np.ndarray, lmbda: float) -> np.ndarray:
+    """
+    Forward Yeo-Johnson transform, vectorized. Local re-implementation
+    (not imported, same decoupling reasoning as _inverse_transform_scalar_local
+    above) -- standard closed form, e.g. Yeo & Johnson (2000):
+        x >= 0, lmbda != 0 :  ((x + 1)**lmbda - 1) / lmbda
+        x >= 0, lmbda == 0 :  log(x + 1)
+        x <  0, lmbda != 2 :  -((-x + 1)**(2 - lmbda) - 1) / (2 - lmbda)
+        x <  0, lmbda == 2 :  -log(-x + 1)
+    Added 2026-09-11 so plot_marker_distributions() can draw a correct
+    transformed-space panel (and native-space GMM component curves, no
+    Jacobian correction needed since the mixture is drawn directly in the
+    space it was fit in) for yeojohnson markers too -- previously that
+    transform fell back to histogram + threshold line only, with no
+    curves, because only the (harder) inverse was implemented and only
+    for arcsinh/log1p/none.
+    """
+    x = np.asarray(x, dtype=float)
+    out = np.empty_like(x)
+    pos = x >= 0
+    if lmbda != 0:
+        out[pos] = ((x[pos] + 1) ** lmbda - 1) / lmbda
+    else:
+        out[pos] = np.log1p(x[pos])
+    neg = ~pos
+    if lmbda != 2:
+        out[neg] = -((-x[neg] + 1) ** (2 - lmbda) - 1) / (2 - lmbda)
+    else:
+        out[neg] = -np.log1p(-x[neg])
+    return out
 
 
 def _get_column(adata, marker: str, column_map: dict):
@@ -1148,24 +1274,43 @@ def plot_marker_distributions(adata, thresholds: dict, fit_info: dict, column_ma
                                plot_dir: str, transform: str = "none",
                                arcsinh_cofactor: float = 5.0, formats=("png", "pdf")):
     """
-    One figure per marker: histogram of raw expression, the fitted 2-component
-    GMM (REUSING fit_info[marker]["gmm"] -- the exact fit that produced the
-    real threshold, not a fresh re-fit), and the threshold line. This is more
-    correct than re-fitting a naive GMM for the plot (what the reference
-    mouse-study notebook does): it also respects this panel's documented
-    zero-inflation handling (14/53 CRC markers have 30-50% exact-zero
-    intensity -- see cell_typing.py's _fit_gmm docstring), since fit_info's
-    "clean"/"gmm" already reflect that exclusion.
+    Three panels per marker, left to right:
+      1. Raw expression -- histogram + threshold line (raw-scale, always
+         meaningful regardless of transform).
+      2. This marker's own transformed space -- histogram of the actual
+         transformed values PLUS the fitted GMM component curves drawn
+         natively in that space (no Jacobian correction needed, since this
+         is exactly the space compute_marker_thresholds() fit the GMM in --
+         more correct than overlaying curves on the raw axis, which the
+         single-panel version before 2026-09-11 did approximately). Reads
+         fit_info[marker]["transform"] -- the transform THIS marker
+         actually used (per_marker_transform_overrides-aware), not the
+         `transform` argument, which is only a fallback for markers with
+         no fit_info entry. If that marker's transform is "none", this
+         panel is identical in shape to panel 1 (labeled as such) rather
+         than omitted, so every marker gets the same 3-panel layout.
+      3. Positive vs. negative split -- the raw-expression histogram
+         colored by this marker's actual `{marker}_pos` call, so the plot
+         shows what the threshold decision actually did to the real cell
+         population, not just where the line sits.
 
-    Component curves are drawn as relative shapes on the raw x-axis (no
-    Jacobian correction for the transform) -- this is a diagnostic overlay
-    to sanity-check separation and threshold placement, not a rigorous
-    raw-space density estimate.
+    Panel 2's curves REUSE fit_info[marker]["gmm"] -- the exact fit that
+    produced the real threshold, not a fresh re-fit -- and respect this
+    panel's documented zero-inflation handling (14/53 CRC markers have
+    30-50% exact-zero/point-mass intensity -- see cell_typing.py's
+    _fit_gmm / _detect_point_mass docstrings), since fit_info's
+    "clean"/"gmm" already reflect that exclusion. yeojohnson markers now
+    get real component curves too (2026-09-11, via _yeojohnson_forward_local)
+    -- previously skipped because only the harder inverse transform was
+    implemented, and inverting isn't needed when panel 2 draws natively in
+    transformed space instead of back on the raw axis.
     """
     column_map = column_map or {}
     fit_info = fit_info or {}
     sub_dir = os.path.join(plot_dir, "marker_distributions")
     os.makedirs(sub_dir, exist_ok=True)
+
+    NEG_COLOR, POS_COLOR = "#4C72B0", "#DD8452"  # colorblind-safe blue/orange pair
 
     n_done, skipped = 0, []
     for marker, threshold in thresholds.items():
@@ -1175,12 +1320,13 @@ def plot_marker_distributions(adata, thresholds: dict, fit_info: dict, column_ma
             skipped.append(marker)
             continue
 
-        clean = np.asarray(info.get("clean", vals)).flatten()
-        clean = clean[np.isfinite(clean)]
+        finite_mask = np.isfinite(vals)
+        clean = vals[finite_mask]
         if len(clean) < 10:
             skipped.append(marker)
             continue
 
+        marker_transform = info.get("transform", transform)
         gmm = info["gmm"]
         low_idx, high_idx = info["low_idx"], info["high_idx"]
         means_t = gmm.means_.flatten()
@@ -1188,49 +1334,100 @@ def plot_marker_distributions(adata, thresholds: dict, fit_info: dict, column_ma
         weights = gmm.weights_
         tparams = info.get("transform_params", {})
 
+        pos_col = f"{marker}_pos"
+        pos_bool = (adata.obs[pos_col].to_numpy()[finite_mask]
+                    if pos_col in adata.obs.columns else None)
+
         try:
             lo, hi = np.percentile(clean, [0.1, 99.9])
             if lo >= hi:
                 lo, hi = float(np.min(clean)), float(np.max(clean))
             x_raw = np.linspace(lo, hi, 500)
 
-            fig, ax = plt.subplots(figsize=(9, 5.5))
-            ax.hist(clean, bins=60, alpha=0.55, density=True, color="#8c8c8c",
-                    edgecolor="white", linewidth=0.3, label=f"All cells (n={len(clean):,})")
+            fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(19, 5.5))
 
-            if transform == "yeojohnson":
-                # No local inverse for this transform -- histogram + threshold
-                # only (see _inverse_transform_scalar_local docstring).
-                curves_drawn = False
+            # ── Panel 1: raw expression ──────────────────────────────
+            ax1.hist(clean, bins=60, alpha=0.7, density=True, color="#8c8c8c",
+                     edgecolor="white", linewidth=0.3, label=f"All cells (n={len(clean):,})")
+            ax1.axvline(threshold, color="#C44E52", linestyle="--", linewidth=1.8,
+                        label=f"Threshold: {threshold:.3f}")
+            ax1.set_title("Raw expression", fontsize=11)
+            ax1.set_xlabel("Expression level (raw)")
+            ax1.set_ylabel("Density")
+            ax1.legend(fontsize="small", frameon=False)
+
+            # ── Panel 2: this marker's own transformed space ────────
+            if marker_transform == "none":
+                ax2.hist(clean, bins=60, alpha=0.7, density=True, color="#8c8c8c",
+                         edgecolor="white", linewidth=0.3)
+                ax2.axvline(threshold, color="#C44E52", linestyle="--", linewidth=1.8)
+                ax2.set_title("Transformed space (transform: none)", fontsize=11)
+                ax2.set_xlabel("Expression level (raw)")
             else:
-                x_t = (np.arcsinh(x_raw / arcsinh_cofactor) if transform == "arcsinh"
-                       else np.log1p(x_raw) if transform == "log1p" else x_raw)
+                if marker_transform == "arcsinh":
+                    clean_t = np.arcsinh(clean / arcsinh_cofactor)
+                    x_t = np.arcsinh(x_raw / arcsinh_cofactor)
+                elif marker_transform == "log1p":
+                    clean_t = np.log1p(clean)
+                    x_t = np.log1p(x_raw)
+                elif marker_transform == "yeojohnson":
+                    lam = tparams.get("lambda", 1.0)
+                    clean_t = _yeojohnson_forward_local(clean, lam)
+                    x_t = _yeojohnson_forward_local(x_raw, lam)
+                else:
+                    clean_t, x_t = clean, x_raw
+
+                ax2.hist(clean_t, bins=60, alpha=0.7, density=True, color="#8c8c8c",
+                         edgecolor="white", linewidth=0.3, label=f"All cells (n={len(clean_t):,})")
                 comp_names = {low_idx: "negative", high_idx: "positive"}
                 mixture = np.zeros_like(x_t)
                 for i in (low_idx, high_idx):
                     comp_pdf = weights[i] * norm.pdf(x_t, means_t[i], stds_t[i])
                     mixture += comp_pdf
-                    ax.plot(x_raw, comp_pdf, linewidth=2,
-                            label=f"{comp_names[i]} component (μ={means_t[i]:.2f}, w={weights[i]:.2f})")
-                ax.plot(x_raw, mixture, "k--", linewidth=1.3, label="GMM mixture")
-                curves_drawn = True
+                    ax2.plot(x_t, comp_pdf, linewidth=2,
+                             label=f"{comp_names[i]} (μ={means_t[i]:.2f}, w={weights[i]:.2f})")
+                ax2.plot(x_t, mixture, "k--", linewidth=1.3, label="GMM mixture")
+                # Threshold in this same transformed space: forward-transform
+                # the already-known raw threshold (exact, since it was
+                # produced by inverse-transforming this same fit).
+                if marker_transform == "arcsinh":
+                    threshold_t = np.arcsinh(threshold / arcsinh_cofactor)
+                elif marker_transform == "log1p":
+                    threshold_t = np.log1p(threshold)
+                else:
+                    threshold_t = _yeojohnson_forward_local(np.array([threshold]), tparams.get("lambda", 1.0))[0]
+                ax2.axvline(threshold_t, color="#C44E52", linestyle="--", linewidth=1.8,
+                            label=f"Threshold: {threshold_t:.3f}")
+                ax2.set_title(f"Transformed space (transform: {marker_transform})", fontsize=11)
+                ax2.set_xlabel("Expression level (transformed)")
+                ax2.legend(fontsize="small", frameon=False)
+            ax2.set_ylabel("Density")
 
-            ax.axvline(threshold, color="#C44E52", linestyle="--", linewidth=1.8,
-                        label=f"Threshold: {threshold:.3f}")
+            # ── Panel 3: positive vs. negative split ─────────────────
+            if pos_bool is not None and pos_bool.any() and (~pos_bool).any():
+                ax3.hist([clean[~pos_bool], clean[pos_bool]], bins=60, stacked=True,
+                         density=False, color=[NEG_COLOR, POS_COLOR],
+                         label=[f"negative (n={int((~pos_bool).sum()):,})",
+                                f"positive (n={int(pos_bool.sum()):,})"],
+                         edgecolor="white", linewidth=0.2)
+                ax3.legend(fontsize="small", frameon=False)
+            else:
+                ax3.hist(clean, bins=60, color="#8c8c8c", edgecolor="white", linewidth=0.3)
+            ax3.axvline(threshold, color="#C44E52", linestyle="--", linewidth=1.8)
+            ax3.set_title("Positive / negative split (raw scale)", fontsize=11)
+            ax3.set_xlabel("Expression level (raw)")
+            ax3.set_ylabel("Cells")
 
-            pos_col = f"{marker}_pos"
             if pos_col in adata.obs.columns:
                 pct_pos = 100 * adata.obs[pos_col].mean()
                 n_pos = int(adata.obs[pos_col].sum())
-                title = f"{marker}  ({real_col})\nPositive: {n_pos:,} cells ({pct_pos:.1f}%)"
+                suptitle = f"{marker}  ({real_col})\nPositive: {n_pos:,} cells ({pct_pos:.1f}%)"
             else:
-                title = f"{marker}  ({real_col})"
-            ax.set_title(title, fontsize=11)
-            ax.set_xlabel("Expression level (raw)")
-            ax.set_ylabel("Density")
-            ax.legend(fontsize="small", frameon=False)
-            ax.spines[["top", "right"]].set_visible(False)
-            plt.tight_layout()
+                suptitle = f"{marker}  ({real_col})"
+            fig.suptitle(suptitle, fontsize=12)
+            for ax in (ax1, ax2, ax3):
+                ax.spines[["top", "right"]].set_visible(False)
+            plt.tight_layout(rect=[0, 0, 1, 0.93])
 
             safe_marker = marker.replace("/", "_").replace(" ", "_")
             _savefig(fig, os.path.join(sub_dir, f"{safe_marker}_distribution"), formats)
@@ -1533,12 +1730,29 @@ def plot_dotplot(adata, thresholds: dict, column_map: dict, plot_dir: str, forma
 # right). Requires compute_and_plot_umaps() to have already run (reuses
 # its X_umap embedding -- never recomputes it).
 
-def plot_marker_umaps(adata, thresholds: dict, column_map: dict, plot_dir: str, formats=("png", "pdf")):
+def plot_marker_umaps(adata, thresholds: dict, column_map: dict, plot_dir: str,
+                       fit_info: Optional[dict] = None, arcsinh_cofactor: float = 5.0,
+                       formats=("png", "pdf")):
+    """
+    Three panels per marker, left to right, all coloring the SAME fixed 2D
+    UMAP embedding (computed once on the untransformed marker matrix, per
+    this project's no-PCA convention -- only the point colors differ
+    across panels, never the embedding):
+      1. Raw expression.
+      2. This marker's own transformed-space expression -- reads
+         fit_info[marker]["transform"] (per_marker_transform_overrides-aware,
+         added 2026-09-11), i.e. the same space actually used to threshold
+         this marker. Falls back to "none" (identical to panel 1, just a
+         different colormap so it's visually distinguishable) if fit_info
+         has no entry for this marker.
+      3. Positive/negative call (unchanged from before 2026-09-11).
+    """
     if "X_umap" not in adata.obsm or not HAS_SCANPY:
         print("  [diagnostics] Skipping per-marker UMAPs -- no UMAP embedding yet "
               "(compute_and_plot_umaps() must run first).")
         return
     column_map = column_map or {}
+    fit_info = fit_info or {}
     sub_dir = os.path.join(plot_dir, "marker_umaps")
     os.makedirs(sub_dir, exist_ok=True)
 
@@ -1549,12 +1763,35 @@ def plot_marker_umaps(adata, thresholds: dict, column_map: dict, plot_dir: str, 
         if real_col not in adata.var_names or pos_col not in adata.obs.columns:
             skipped.append(marker)
             continue
+        tmp_col = f"__{marker}_transformed_tmp"
         try:
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+            info = fit_info.get(marker, {})
+            marker_transform = info.get("transform", "none")
+
+            fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, 6))
             sc.pl.umap(adata, color=real_col, cmap="plasma", ax=ax1, show=False)
-            ax1.set_title(f"{marker} expression")
-            sc.pl.umap(adata, color=pos_col, cmap="coolwarm", ax=ax2, show=False)
-            ax2.set_title(f"{marker}+ cells (threshold: {threshold:.3f})")
+            ax1.set_title(f"{marker} expression (raw)")
+
+            if marker_transform == "none":
+                sc.pl.umap(adata, color=real_col, cmap="viridis", ax=ax2, show=False)
+                ax2.set_title(f"{marker} expression (transform: none)")
+            else:
+                raw_vals, _ = _get_column(adata, marker, column_map)
+                if marker_transform == "arcsinh":
+                    t_vals = np.arcsinh(raw_vals / arcsinh_cofactor)
+                elif marker_transform == "log1p":
+                    t_vals = np.log1p(raw_vals)
+                elif marker_transform == "yeojohnson":
+                    lam = info.get("transform_params", {}).get("lambda", 1.0)
+                    t_vals = _yeojohnson_forward_local(raw_vals, lam)
+                else:
+                    t_vals = raw_vals
+                adata.obs[tmp_col] = t_vals
+                sc.pl.umap(adata, color=tmp_col, cmap="viridis", ax=ax2, show=False)
+                ax2.set_title(f"{marker} expression (transform: {marker_transform})")
+
+            sc.pl.umap(adata, color=pos_col, cmap="coolwarm", ax=ax3, show=False)
+            ax3.set_title(f"{marker}+ cells (threshold: {threshold:.3f})")
             plt.tight_layout()
             safe_marker = marker.replace("/", "_").replace(" ", "_")
             _savefig(fig, os.path.join(sub_dir, f"{safe_marker}_umap"), formats)
@@ -1563,6 +1800,10 @@ def plot_marker_umaps(adata, thresholds: dict, column_map: dict, plot_dir: str, 
         except Exception as e:
             plt.close("all")
             skipped.append(f"{marker} ({e})")
+        finally:
+            # Never leave the scratch column behind, success or failure.
+            if tmp_col in adata.obs.columns:
+                del adata.obs[tmp_col]
 
     print(f"  [diagnostics] Per-marker UMAPs: {n_done} written to {sub_dir}/"
           + (f"  -- skipped: {skipped}" if skipped else ""))
@@ -1981,7 +2222,8 @@ def generate_cell_typing_diagnostics(adata, thresholds: dict, fit_info: dict, co
         print(f"  WARNING: dotplot failed (non-fatal): {e}")
 
     try:
-        plot_marker_umaps(adata, thresholds, column_map, plot_dir, formats)
+        plot_marker_umaps(adata, thresholds, column_map, plot_dir,
+                           fit_info=fit_info, arcsinh_cofactor=arcsinh_cofactor, formats=formats)
     except Exception as e:
         print(f"  WARNING: per-marker UMAPs failed (non-fatal): {e}")
 
