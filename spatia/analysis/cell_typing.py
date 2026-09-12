@@ -1693,6 +1693,131 @@ def compute_and_plot_umaps(adata, plot_dir: str, data_dir: str, group_col: str, 
           f"{data_dir}/umap_coordinates.csv")
 
 
+def plot_spatial_celltype_overlay(adata, plot_dir: str, tissue_col: str = "tissue_id",
+                                   grid_n: int = 12, formats=("png", "pdf")):
+    """
+    Spatial cell-type overlay (added 2026-09-12): each cell plotted as a
+    colored dot at its actual physical centroid, colored by cell_type, one
+    core/tissue at a time -- the physical-space counterpart to
+    compute_and_plot_umaps()'s marker-space view. Requested by Afrouz as a
+    replacement for a one-off standalone script (make_celltype_overlay.py)
+    she'd been running separately -- folded in here instead so it's part of
+    the normal cell_typing output and travels with the rest of the pipeline
+    via git, rather than living as an untracked side script.
+
+    Requires two columns in adata.obs:
+      - centroid_x / centroid_y -- written by preprocessing.py from
+        segmentation's per-cell centroids (see preprocessing.py's QC-TSV
+        export block, and segmentation.py's *_mesmer_result.csv columns).
+      - `tissue_col` (default "tissue_id") -- written by preprocessing.py's
+        extract_tissue_identifier(), one value per TMA core/tissue region.
+
+    Both are ABSENT for the CRC TMA accuracy-validation path
+    (crc_tma_celltyping.yaml -> prepare_crc_for_celltyping.py), since that
+    h5ad is built directly from a flat CSV export and deliberately skips
+    segmentation/preprocessing entirely (see that script's own docstring).
+    This function detects that and skips cleanly with a clear message --
+    same non-fatal-diagnostics convention as every other section here --
+    rather than erroring or silently producing an empty/wrong plot. It DOES
+    work out of the box for the normal segmentation -> preprocessing ->
+    cell_typing path (e.g. the LILRB2 mouse study, or crc_tma_full_pipeline.yaml),
+    since both required columns are already present in adata.obs by the time
+    cell_typing.py runs there.
+
+    Writes:
+      - one PNG/PDF per core into plot_dir/celltype_overlays/
+      - one combined grid figure (the `grid_n` largest cores, one shared
+        legend, same color per cell type across every core/panel) at
+        plot_dir/spatial_celltype_overlay_grid.{png,pdf} -- this is the one
+        meant for a slide; the per-core folder is for browsing/QC.
+
+    Uses an auto-generated 40-color palette (tab20 + tab20b), same approach
+    as spatia/analysis/visualization.py's build_color_map -- CRC TMA typing
+    produces 23+ cell types, more than fit in a 10-color cycle without
+    collisions, and there's no dataset-agnostic way to hand-pick a fixed
+    palette here (that was true for visualization.py's LEGACY_LILRB2_COLOR_MAP
+    too -- it doesn't match this vocabulary either). "Unassigned" is always
+    pinned to a light neutral grey so it doesn't visually compete with real
+    calls.
+    """
+    if "centroid_x" not in adata.obs.columns or "centroid_y" not in adata.obs.columns:
+        print("  [diagnostics] Spatial cell-type overlay: skipped -- no centroid_x/centroid_y "
+              "in adata.obs (this h5ad wasn't built via segmentation + preprocessing)")
+        return
+    if tissue_col not in adata.obs.columns:
+        print(f"  [diagnostics] Spatial cell-type overlay: skipped -- no '{tissue_col}' column "
+              "in adata.obs (nothing to group cores by)")
+        return
+
+    sub_dir = os.path.join(plot_dir, "celltype_overlays")
+    os.makedirs(sub_dir, exist_ok=True)
+
+    df = adata.obs[["cell_type", tissue_col, "centroid_x", "centroid_y"]].copy()
+    cell_types = sorted(t for t in df["cell_type"].unique() if t != "Unassigned")
+    palette = [plt.cm.tab20(i) for i in range(20)] + [plt.cm.tab20b(i) for i in range(20)]
+    if len(cell_types) > len(palette):
+        print(f"  [diagnostics] NOTE: {len(cell_types)} cell types > {len(palette)} palette "
+              "colors available -- some will repeat.")
+    color_map = {ct: palette[i % len(palette)] for i, ct in enumerate(cell_types)}
+    color_map["Unassigned"] = (0.82, 0.82, 0.82, 1.0)
+
+    core_sizes = df[tissue_col].value_counts()
+
+    n_done = 0
+    for core in core_sizes.index:
+        try:
+            csub = df[df[tissue_col] == core]
+            fig, ax = plt.subplots(figsize=(10, 9))
+            for ct, s in csub.groupby("cell_type"):
+                ax.scatter(s["centroid_x"], s["centroid_y"], s=25,
+                           color=color_map.get(ct, "#646464"), linewidths=0, alpha=0.85,
+                           label=f"{ct} ({len(s):,})")
+            ax.invert_yaxis()
+            ax.set_title(f"{core} (n={len(csub):,})", fontsize=11)
+            ax.set_xlabel("X (px)")
+            ax.set_ylabel("Y (px)")
+            ax.legend(fontsize=6, markerscale=0.6, ncol=2, framealpha=0.9,
+                      loc="upper right", borderpad=0.5)
+            ax.spines[["top", "right"]].set_visible(False)
+            safe_core = str(core).replace("/", "_").replace(" ", "_")
+            _savefig(fig, os.path.join(sub_dir, f"celltype_overlay_{safe_core}"), formats)
+            plt.close(fig)
+            n_done += 1
+        except Exception as e:
+            plt.close("all")
+            print(f"  [diagnostics] Spatial overlay for core '{core}' failed (non-fatal): {e}")
+
+    top_cores = core_sizes.head(grid_n).index.tolist()
+    ncols = min(4, len(top_cores)) or 1
+    nrows = int(np.ceil(len(top_cores) / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5.5 * ncols, 5.5 * nrows))
+    axes = np.atleast_1d(axes).flatten()
+    for ax, core in zip(axes, top_cores):
+        csub = df[df[tissue_col] == core]
+        for ct, s in csub.groupby("cell_type"):
+            ax.scatter(s["centroid_x"], s["centroid_y"], s=18,
+                       color=color_map.get(ct, "#646464"), linewidths=0, alpha=0.85)
+        ax.invert_yaxis()
+        ax.set_title(f"{core} (n={len(csub):,})", fontsize=9)
+        ax.set_xticks([])
+        ax.set_yticks([])
+    for ax in axes[len(top_cores):]:
+        ax.axis("off")
+    handles = [plt.Line2D([0], [0], marker="o", linestyle="", color=c, markersize=7)
+               for c in color_map.values()]
+    fig.legend(handles, list(color_map.keys()), loc="lower center", ncol=6, fontsize=8,
+               frameon=False, bbox_to_anchor=(0.5, -0.02))
+    fig.suptitle(f"Cell types by core — {len(top_cores)} largest of {len(core_sizes)} total "
+                 f"cores ({core_sizes.sum():,} cells)", fontsize=13, fontweight="bold")
+    fig.tight_layout(rect=[0, 0.06, 1, 0.96])
+    _savefig(fig, os.path.join(plot_dir, "spatial_celltype_overlay_grid"), formats)
+    plt.close(fig)
+
+    print(f"  [diagnostics] Spatial cell-type overlay: {n_done} core plots written to {sub_dir}/, "
+          f"grid of {len(top_cores)} largest cores written to "
+          f"{plot_dir}/spatial_celltype_overlay_grid.png")
+
+
 # ── 7. Dotplot: marker expression across cell types ─────────────────────────
 # Added 2026-09-10, at Afrouz's request to mirror her reference notebook's
 # outputs one-for-one. sc.pl.dotplot with dendrogram=True clusters cell
@@ -2215,6 +2340,11 @@ def generate_cell_typing_diagnostics(adata, thresholds: dict, fit_info: dict, co
         compute_and_plot_umaps(adata, plot_dir, data_dir, group_col, tissue_col, random_state, formats)
     except Exception as e:
         print(f"  WARNING: UMAP diagnostics failed (non-fatal): {e}")
+
+    try:
+        plot_spatial_celltype_overlay(adata, plot_dir, tissue_col=tissue_col, formats=formats)
+    except Exception as e:
+        print(f"  WARNING: spatial cell-type overlay failed (non-fatal): {e}")
 
     try:
         plot_dotplot(adata, thresholds, column_map, plot_dir, formats)
