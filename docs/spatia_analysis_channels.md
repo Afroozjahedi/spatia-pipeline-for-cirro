@@ -1,79 +1,23 @@
-# `spatia/analysis/channels.py`
+# Image format support (CODEX / OME-TIFF / QPTIFF)
 
-**Added 2026-09-04.** Not a pipeline step of its own — a support module `segmentation.py` (and, going forward, `preprocessing.py`) calls into for channel-structure detection, panel resolution, and stack normalization.
+Before segmentation runs, the pipeline needs to know how channels are laid out in your raw image files and match each one to a real marker name. This is handled automatically for the formats below — it's not a pipeline step you run yourself, just something segmentation relies on.
 
-**Why this exists:** see `segmentation.py`'s 2026-09-04 changelog for the full incident. Short version — the real CRC TMA cores are CODEX/PhenoCycler raw output: ImageJ hyperstacks with axes `TCYX`, shape `(23, 4, 1440, 1920)` (23 acquisition cycles × 4 channels/cycle = 92 planes), not a flat 92-channel stack. That single fact broke two things on 2026-09-03: the embedded per-image labels are scanner placeholders (`"ch1".."ch4"`, no marker identity), so a name-for-name comparison against the real panel could never pass; and `spacec` reads the file itself and always treats axis 0 as the channel axis, so it saw "23 channels" and crashed with an `IndexError` on a perfectly good file.
+## Supported formats
 
-## What can and cannot be automated
+- **CODEX/PhenoCycler raw hyperstacks (`.tif`)** — fully supported and validated against real CRC TMA data. The pipeline figures out the acquisition structure (cycles × channels) on its own and flattens it to one plane per marker.
+- **Plain flat multi-channel `.tif`** (already one channel per marker) — passes through unchanged.
+- **OME-TIFF (`.ome.tif` / `.ome.tiff`)** — channel names are read automatically from the file when present. Tested on sample files; not yet run through the full pipeline on a real OME-TIFF dataset, since none has come through yet.
+- **QPTIFF (Akoya)** — channel-name reading is built, but hasn't been tried against a real `.qptiff` file. Treat it as unverified until it's actually run on one.
 
-Automatable, because the file's own structure tells us:
-- axis layout and plane count
-- cycle count and channels-per-cycle
-- which planes are the nuclear stain (channel 1 of every cycle, CODEX convention)
-- which plane is the last marker (the last one)
-- a positional template panel (`"cyc01_ch1"`, ...) when no panel file is supplied
+## What you still need to provide
 
-**Not automatable:** the biological identity of each marker. That's experiment metadata from the acquisition sheet, not something present in the pixels — a pipeline that guessed it would be inventing data. The panel file (`channelnames.txt`) stays the one required manual input; this module's job is validating it against the real file (by length, and by a pixel-level periodicity check) rather than trusting it blindly.
+A panel file (`channelnames.txt`) listing your marker names in stack order is required for every format — the pipeline checks this against the real file (channel count, plus the pixel-level check below) rather than guessing marker identity from the image itself, since that's genuinely not something that can be read off the pixels.
 
-## Entry points
+## The nuclear-stain consistency check
 
-```python
-from spatia.analysis import channels as ch
+For CODEX-style data, the pipeline double-checks that the channel order it assumed is actually correct: the nuclear-stain channel from every imaging cycle should correlate with the others, since they're all re-imaging the same nuclei. If this check fails, the run stops rather than continuing on a possibly-scrambled channel order. This is the main safety net against a channel mixup that would otherwise be very hard to notice after the fact — don't turn it off (`channel_check: false`) on a new dataset unless you've independently confirmed the channel order some other way first.
 
-info   = ch.inspect_stack(tiff_path)                 # read structure only, no pixels
-panel  = ch.ensure_panel(channel_file_path, info)     # validate/create the marker panel
-stack  = ch.load_flat_stack(tiff_path, info)          # (C, Y, X) array, acquisition order
-resolved = ch.resolve_channels(panel, info,
-               nuclei_channel="auto",
-               membrane_channel_list=["CD45 - hematopoietic cells"])  # NOT "CD45" alone -- see 2026-09-08 note below
-qc = ch.verify_nuclear_periodicity(stack, info)       # pixel-level order check
-ch.normalize_stack_to_file(tiff_path, out_path, panel, info)
-```
+## Things to know
 
-## Key functions
-
-| Function | Role |
-|---|---|
-| `inspect_stack(path)` → `StackInfo` | Reads only the TIFF header (cheap — safe to call per-image). Determines axis layout (`YX`, `CYX`, `TCYX`, `ZCYX`), true plane count, cycle structure, and where channel names come from (ImageJ `Labels`, OME-XML, or QPTIFF `ImageDescription`). Raises on any other axis order rather than guessing — a `CTYX` file has the same shape family as `TCYX` but the opposite memory order, and reshaping it as though cycle-major would silently permute every marker. |
-| `load_flat_stack(path, info=None)` | Loads pixels and flattens to `(C, Y, X)` in acquisition (cycle-major) order: cycle 1's 4 channels, then cycle 2's, etc. |
-| `read_panel(panel_path)` | One channel name per line, in stack order. |
-| `panel_template(info)` | Positional placeholder names (`"cyc01_ch1"`, ...) derived purely from structure — honest names that say *where* a plane sits without pretending to know what it stains. |
-| `ensure_panel(panel_path, info, auto_template=True)` | Returns the panel for this stack. **The length check here is the validation with real teeth** — it catches a truncated acquisition, a panel from a different experiment, or a core genuinely missing cycles, which is exactly what the old name-equality check was reaching for and missing. Writes a template (with a loud warning) if the file is missing and `auto_template=True`. |
-| `classify_panel(names, info)` | Splits panel positions into `nuclear` / `blank` / `marker` index groups. `blank` indices matter downstream: those planes are identically zero, so any per-channel standard-deviation normalization divides by zero there. |
-| `resolve_channel(spec, names, info, role)` | Turns one config value into an exact panel name. Accepts `"auto"` (nuclei → channel 1 of cycle 1; last_marker → final plane), a short name matched uniquely by exact/prefix/substring against the panel (`"CD45"` → `"CD45 - hematopoietic cells"`), an exact string, or a zero-based index. **Ambiguity raises** — e.g. `"CD4"` prefix-matches CD44/CD45/CD45RA/CD45RO in the CRC panel; picking the first silently would be a coin flip nobody would notice was wrong. |
-| `resolve_channels(names, info, nuclei_channel, membrane_channel_list, last_marker)` | Resolves all three config values in one call, one error style. |
-| `resolve_column(spec, columns, role)` | Added 2026-09-09. Same resolution rules as `resolve_channel()` (`"auto"`/exact/unique-prefix/unique-substring, ambiguity raises), but against a flat list of DataFrame column names instead of a raw-stack panel + `StackInfo`. For `"auto"`, matches `_NUCLEAR_RE` directly rather than using the cycle-position rule (no `StackInfo` available). Used by `preprocessing.py`, which reads already-exported `*_mesmer_result.csv` files — columns are named with the exact resolved panel string (e.g. `"HOECHST1 (C1)"`), so `preprocessing.py` cannot call `resolve_channel()` itself and previously hardcoded the literal `"DAPI"`, which broke on this panel (see `spatia_analysis_preprocessing.md`). |
-| `verify_nuclear_periodicity(arr, info, min_corr=0.5)` | Pixel-level QC for the flattening order. In CODEX, channel 1 of every cycle re-images the same nuclei — so after a correct flatten, those planes must correlate with each other. If they don't, the flatten order or the panel doesn't match this acquisition. Automates the manual correlation check run by hand on `TMA_A/reg011_X01_Y01_Z09.tif` during this session (result: r = 0.87–0.92 across all 23 nuclear positions + DRAQ5). |
-| `normalize_stack_to_file(src_path, dst_path, names, info=None, overwrite=False)` | Writes a flat `(C, Y, X)` ImageJ TIFF with the real marker names embedded in `Labels`, so any downstream tool — `spacec` included — reads the stack the way the panel describes it. Written as plain `.tif`, deliberately **not** `.ome.tif` — `segmentation.py`'s file glob excludes `.ome.tif`, so an OME export here would be silently skipped and the run would report zero files. |
-
-## OME-TIFF / QPTIFF support (added same day, before any real file of either format was run through this pipeline)
-
-`inspect_stack()` also reads channel names from OME-XML (`<Channel Name="...">`, parsed with the stdlib XML parser rather than a regex, since `<Image Name="...">` and `<Plate Name="...">` also carry `Name` attributes a regex would happily collect too) and from QPTIFF per-page `ImageDescription` XML (`<Biomarker>` / `<Name>`).
-
-**The distinction that matters:** `StackInfo.labels_unverifiable` is `True` when a format that *normally* carries channel names (OME-TIFF, QPTIFF) yields none on parsing — this is different from `labels_are_generic()`, which means the file legitimately has no marker identity (raw CODEX). `labels_are_generic()` is explicitly `False` whenever `labels_unverifiable` is `True`. Collapsing these two states would mean applying the panel positionally to a file that may already have real, different channel names embedded — silently mislabeling every marker. `segmentation.py`'s channel check fails loud on the unverifiable case rather than falling through to the count-only comparison used for genuinely generic files.
-
-**Verification status (confidence: high for OME, low for QPTIFF).** OME-TIFF name reading, unnamed-OME detection, and pyramidal-OME handling (3 levels) were unit-tested against synthetic files in this session. **No real `.qptiff` file was available to test against** — the QPTIFF reader is untested against real Akoya/PhenoImager output and should be treated as unverified until it is. A parse failure on a real qptiff will correctly report `labels_unverifiable` rather than silently mislabeling — but "correctly refuses to guess" and "correctly reads real qptiff files" are different claims; only the first one has been checked.
-
-## Format coverage (as of 2026-09-04)
-
-| Format | Status |
-|---|---|
-| CODEX/PhenoCycler `.tif` (ImageJ `TCYX` hyperstack) | Fixed and verified — this is the real CRC TMA data. Pixel-level periodicity check passed by hand on one real core. |
-| Plain flat `.tif` (`CYX`, already segmentation-ready) | Unaffected — `needs_flattening=False`, passes through unchanged. |
-| `.ome.tif` / `.ome.tiff` | Name reading implemented and unit-tested on synthetic files (named, unnamed, 3-level pyramid). **Not yet run through the full segmentation pipeline on a real file** — `segmentation.py`'s glob still excludes `.ome.tif` by design (see `_find_masked_tifs`'s docstring); that exclusion has not been revisited as part of this change. |
-| `.qptiff` | Name-reading code exists, **untested against a real file**. Pyramidal structure and RGB brightfield (`YXS` axes) are known additional wrinkles not yet handled — `inspect_stack()` will raise cleanly on `YXS` rather than mis-processing it, which is the correct behavior for now, not a fix. |
-
-Extending real support to `.ome.tif`/`.qptiff` as first-class segmentation inputs (glob inclusion, pyramid-level selection, RGB handling) is intentionally deferred until after the first successful CODEX production run — see the 2026-09-04 conversation for the reasoning: validating the format this pipeline actually needs today took priority over generalizing to formats with no dataset behind them yet.
-
-## Dependencies
-
-`tifffile`, `numpy`. Both already required by `segmentation.py`; no new external dependency introduced.
-
-## Notes / risks
-
-- **Cycle-major flatten order is an assumption, not something read from metadata (confidence: high that it's correct for this dataset, verified by `verify_nuclear_periodicity`; would NOT be automatically caught if a future acquisition used the opposite convention).** `TCYX`/`ZCYX` flattening assumes the outer axis is cycle/z and reshapes as `(cycle, channel) → cycle*n_per_cycle + channel`. A hypothetical `CTYX` file (channel outer, cycle inner) has the identical shape tuple but the opposite memory layout — `inspect_stack()` does not special-case it and would raise `ValueError: Unhandled TIFF axis order`, which is the safe outcome, but if a future format silently reported itself as `TCYX` while actually being channel-major, only the periodicity check would catch it. That check is therefore load-bearing, not optional — don't run with `channel_check=False` on new acquisition types without independently confirming order first.
-- **Panel identity is trusted, not verified, beyond periodicity (confidence: high, by design).** `verify_nuclear_periodicity` confirms the *nuclear* channels are self-consistent; it says nothing about whether channel 3 of cycle 7 is really `"CD45RA"` and not some other marker imaged in the wrong cycle. That level of verification requires either independent biological knowledge (does the CD45RA stain pattern look right?) or an acquisition log cross-check — outside what pixel statistics alone can confirm.
-- **`resolve_column()` added 2026-09-09 (confidence: high) after the hardcoded-`"DAPI"` failure in `preprocessing.py`.** Segmentation resolves channel names against the raw hyperstack via `resolve_channel()`, but `preprocessing.py` only ever sees the already-exported CSV's columns, with no `StackInfo` to resolve against — so it had silently diverged from the config-driven pattern and hardcoded `"DAPI"` instead, which does not exist as a column in this panel (`"HOECHST1 (C1)"` is the real nuclear column). `resolve_column()` closes that gap by exposing the same matching rules (exact/unique-prefix/unique-substring, ambiguity raises) against a plain list of column names.
-- **`"auto"` corrected same-day after a real-run failure (confidence: high).** The first cut had `"auto"` match the unique column against `_NUCLEAR_RE`. On this 23-cycle CODEX panel that is not unique — the nuclear stain is re-imaged once per cycle, so 24 columns match (`HOECHST1`-`HOECHST23` + `DRAQ5`) — and the real run failed with an ambiguity error, correctly, but uselessly (both preprocessing.py call sites passed `"auto"` straight through with no fallback). `resolve_column()` now takes an optional `panel_names` argument (the acquisition panel in stack order, from `read_panel()`); when given, `"auto"` resolves to `panel_names[0]` instead of pattern-matching — the same concrete value `resolve_channel()`'s `"auto"`/`nuclei_channel` branch always returns (index 0, regardless of cycle count), so preprocessing's "auto" now reproduces exactly what segmentation itself resolved rather than re-deriving it from column names. Without `panel_names`, the old unique-match behavior remains as a fallback (correct for single-cycle panels, same ambiguity error otherwise).
-- **First real production validation (2026-09-08, confidence: high).** This module's ambiguity-detection and periodicity logic were exercised for real for the first time, against the full 138-core CRC TMA batch on Seadragon (not synthetic data, not a single hand-checked core). Two things confirmed: (1) `resolve_channel()`'s ambiguity check caught a real misconfiguration before it could silently run — `crc_tma_full_pipeline.yaml` had `membrane_channel_list: ["CD45"]`, which matches three real panel entries (`CD45 - hematopoietic cells`, `CD45RA - naive T cells`, `CD45RO - memory cells`); the run refused to guess and halted with a clear error instead of picking one. Fixed to the full panel string `"CD45 - hematopoietic cells"`. (2) Once fixed, `verify_nuclear_periodicity()` passed on the real batch at `mean r=0.945`, corroborating the by-hand single-core result (r=0.87-0.92) from 2026-09-04 at production scale.
-- **Panel-specific gotcha for the 92-channel CRC panel:** short-name resolution for `"CD45"` is inherently ambiguous in this panel (`CD45`, `CD45RA`, `CD45RO` all present) — always use the full panel string (`"CD45 - hematopoietic cells"`) in configs for this dataset, not the short form. The same caution likely applies to other CD-family short names with subtype variants in the panel — worth checking before assuming any short name is unique.
+- OME-TIFF and QPTIFF support exist so the pipeline isn't limited to one platform for the methods paper's sake — no dataset in either format has actually gone through segmentation yet. If a real file in either format comes in, budget some time to validate it the way CODEX was validated, before trusting the output.
+- If a file's channel names can't be read from a format that normally carries them (a corrupted or unusual OME-TIFF/QPTIFF), the pipeline refuses to guess and stops with an error rather than silently applying your panel positionally. That's intentional — not something to work around.

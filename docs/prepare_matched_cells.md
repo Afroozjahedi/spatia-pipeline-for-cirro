@@ -1,42 +1,22 @@
-# `prepare_matched_cells.py`
+# Preparing a new dataset for triad detection
 
-**Pipeline position:** Upstream, dataset-agnostic — feeds directly into Step 5 (`triads`), same slot as `prepare_crc_data.py`/`prepare_matusiak_data.py` but for any new dataset instead of one hardcoded one.
+## What this is for
 
-## Purpose
-
-Generic, dataset-agnostic prep step: converts a raw per-cell data file (CSV/TSV, or an AnnData `.h5ad`) into the `{experiment_group}_{sample}_matched_with_boundaries.csv` files `spatia/analysis/triads.py` reads from `paths.input_dir`. `triads.py` never creates its own input — it only reads whatever's already there — so every dataset needs some prep step producing that file/column contract. `prepare_crc_data.py` and `prepare_matusiak_data.py` each did this by hand for one specific dataset, with hardcoded column names and relabeling logic. This script generalizes both into one reusable, fully CLI-driven tool, so a **new** dataset never needs its own bespoke prep script — only its real column names (and, optionally, label-remapping rules) passed as arguments. Deterministic: same input + same arguments always produces the same output files.
-
-`prepare_crc_data.py` and `prepare_matusiak_data.py` are left as-is (already validated against real runs). Use this script for any dataset that isn't one of those two.
-
-## Workflow
-
-```mermaid
-flowchart TD
-    A["Raw per-cell file\n(.csv/.tsv or .h5ad)"] --> B{"--inspect?"}
-    B -->|"yes"| C["Print columns/dtypes (tabular)\nor obs.columns/obsm/var_names (h5ad),\nplus candidate cell-type/group/sample/\ncoordinate column previews. Writes nothing."]
-    C --> D["User confirms real column names\nfrom the printed output — no guessing"]
-    B -->|"no (convert mode)"| E["Validate --cell-type-col/--x-col/--y-col/\n--experiment-group-col/--sample-col\nall present in the input"]
-    E --> F["Rename to centroid_x, centroid_y,\ncell_type, experiment_group"]
-    F --> G{"--experiment-group-map set?"}
-    G -->|"yes"| H["Remap raw group values\n(e.g. 1/2 -> CLR/DII)"]
-    G -->|"no"| I["Use raw group values as-is"]
-    H --> J
-    I --> J{"--cell-type-merge-map set?"}
-    J -->|"yes"| K["Regex-substitute cell_type values\n(e.g. merge CD4+ T cell subtypes)"]
-    J -->|"no"| L["Use raw cell_type values as-is"]
-    K --> M["Validate required output columns\npresent + non-null"]
-    L --> M
-    M --> N["Group by (experiment_group, sample)\nwrite one CSV per group\n(skip already-written files unless --force)"]
-    N --> O["{experiment_group}_{sample}_matched_with_boundaries.csv\n-> paths.input_dir for triads.py"]
-```
+Triad detection needs your per-cell data in one specific format (one CSV per experiment-group/sample, with specific column names). This script converts your raw per-cell data (a CSV/TSV, or an `.h5ad` file) into that format for any new dataset — you don't need a dataset-specific script, just your real column names.
 
 ## Usage
 
-```bash
-# Phase 1 — always first, on the real file
-python prepare_matched_cells.py --inspect --input /path/to/data.csv
+Step 1 — always look first:
 
-# Phase 2 — after confirming real column names from Phase 1's output
+```bash
+python prepare_matched_cells.py --inspect --input /path/to/data.csv
+```
+
+This prints your file's actual columns (and some likely guesses for which ones are your cell type, coordinate, group, and sample columns) without writing anything — use it to confirm the real column names before converting.
+
+Step 2 — convert, using the column names confirmed in step 1:
+
+```bash
 python prepare_matched_cells.py \
     --input  /path/to/data.csv \
     --output data/my_dataset/matched_cells \
@@ -48,24 +28,20 @@ python prepare_matched_cells.py \
     --cell-type-merge-map '{"^CD4\\+ T cells.*": "CD4+ T cells"}'
 ```
 
-Works identically for `.h5ad` input (auto-detected by extension; override with `--format h5ad`) — marker intensities from `adata.X` are merged into the output the same way `prepare_matusiak_data.py` did, for downstream functional-marker analysis.
+Works the same way for `.h5ad` files.
 
-## Key logic
+## Useful options
 
-- **Format auto-detection** (`_detect_format`) — `.csv`/`.tsv`/`.txt` → tabular path; `.h5ad`/`.h5` → AnnData path. Override with `--format` if extensions are non-standard.
-- **`CANDIDATE_COLS`** — the same fuzzy candidate-name dictionary `prepare_matusiak_data.py --inspect` used, generalized to also cover CRC-style names (`X:X`, `ClusterName`, `File Name`, etc.) so `--inspect` is useful on either dataset family.
-- **`--experiment-group-map`** — optional JSON `{raw_value: label}`, generalizes `prepare_crc_data.py`'s hardcoded `GROUP_LABELS = {1: "CLR", 2: "DII"}` into a CLI argument. Omit to keep raw values.
-- **`--cell-type-merge-map`** — optional JSON `{regex: replacement}`, generalizes `prepare_crc_data.py`'s hardcoded CD4+ T-cell-subtype merge into a declarative, reusable mechanism. Applied via a full regex substitution on `cell_type`, in the order given; original (pre-merge) labels are not separately preserved.
-- **Grouping by `(experiment_group, sample)`, not `sample` alone** — same fix `prepare_matusiak_data.py` already had for the case where a sample/region identifier (e.g. `"reg005"`) is reused across two different experiment_groups; grouping on sample alone would silently merge unrelated tissue into one file.
-- **`_validate_required_columns`** — fails loudly (exit 1) if `centroid_x`/`centroid_y`/`cell_type`/`experiment_group` are missing after renaming, and warns (doesn't fail) if any required column has null values in some rows, since a large null count usually indicates a column-name or source-data problem worth checking before trusting triad counts downstream.
-- **Resumable** — like `prepare_matusiak_data.py`, skips a sample's output file if it already exists and is non-empty, unless listed in `--force`.
+- `--experiment-group-map` — relabel raw group codes (e.g. `1`/`2`) to readable names (e.g. `CLR`/`DII`); optional
+- `--cell-type-merge-map` — merge similar cell-type labels into one (e.g. collapse several CD4+ T-cell subtypes into a single label); optional, applied as find-and-replace patterns
+- `--force` — redo a sample even if its output file already exists (by default, already-converted samples are skipped so you can re-run safely)
 
-## Inputs / Outputs
+## What you'll get
 
-- **In:** one raw per-cell file (CSV/TSV or `.h5ad`)
-- **Out:** `{output}/{experiment_group}_{sample}_matched_with_boundaries.csv`, one per (experiment_group, sample) — consumable directly by `run_pipeline.py --steps triads` (or any step reading `paths.input_dir`) with `paths.input_dir` pointed at `--output`
+One CSV per experiment-group/sample combination, ready to point triad detection's input directory at directly.
 
-## Notes / risks
+## Things to know
 
-- **Not yet run against a second real dataset beyond CRC/Matusiak (confidence: high on the logic, medium on real-world column-name edge cases).** What it hasn't been exercised against yet: a real `.h5ad` beyond the code reused from `prepare_matusiak_data.py`'s already-validated logic, and any dataset where coordinates live in `adata.obsm` rather than `adata.obs` (the h5ad path only reads `obs` columns today — `--inspect` will show you if that's the case, but the convert path would need a small extension to pull from `obsm` directly if so).
-- **`--cell-type-merge-map` doesn't preserve the pre-merge label separately (confidence: high, by design, worth confirming it's acceptable).** `prepare_crc_data.py` kept the original `ClusterName` column around (unrenamed) alongside the merged `cell_type`, since it wasn't the same column being overwritten. This script overwrites `cell_type` in place after merging — if you need the pre-merge label preserved for later auditing, add a duplicate column to your source data (or pass a modified copy) before running, since this script doesn't do that automatically.
+- If any required column ends up with missing values after conversion, you'll get a warning rather than a hard failure — a large number of missing values there is usually a sign the wrong column was picked, worth checking before trusting your triad counts.
+- If you use `--cell-type-merge-map`, the original (pre-merge) label isn't kept anywhere separately — if you'll want to audit which original labels got merged together later, keep a copy of your source data with the original column intact before running this.
+- This hasn't yet been used on a dataset where cell coordinates live somewhere other than the standard table format some `.h5ad` files store coordinates separately from the main table. `--inspect` will show you if that's the case for your data; flag it if so, since it needs a small adjustment to handle correctly.
