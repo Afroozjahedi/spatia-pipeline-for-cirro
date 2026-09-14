@@ -366,6 +366,26 @@ cell_typing:
     cd45_std_multiplier: 3.0
     default_std_multiplier: 2.0
     per_marker_overrides: {}
+    # threshold_mode (added 2026-09-14, Afrouz's explicit choice): "posterior"
+    # instead of just inheriting cell_typing.py's own fallback default
+    # (gmm_cfg.get("threshold_mode", "std_multiplier")), which this file was
+    # silently doing before this line existed. NOT changed at the code level,
+    # and NOT changed in experiments/crc_tma_celltyping.yaml -- that config is
+    # the one behind the 24.5%/26.8% (all/core) accuracy number in this repo's
+    # docs/spatia_analysis_cell_typing.md 2026-09-12 addendum, and that number
+    # was produced under threshold_mode=std_multiplier (its default), not
+    # posterior. Flagging for the paper: this production config's cell-typing
+    # output has NOT been re-validated against expert labels under posterior
+    # mode -- if the manuscript cites the 24.5%/26.8% figure as *this*
+    # pipeline's accuracy, that figure and this run's actual settings will
+    # disagree unless compare_expert_vs_auto.py is re-run with
+    # threshold_mode=posterior against crc_tma_celltyping.yaml's validation
+    # h5ad first. See docs/spatia_analysis_cell_typing.md's 2026-09-14 note.
+    threshold_mode: "posterior"
+    # confidence_level is already 0.8 by code default -- set explicitly here
+    # for reproducibility (a methods paper should state this, not rely on an
+    # unwritten default).
+    confidence_level: 0.8
   clustering:
     n_neighbors: 15
     leiden_resolution: 0.5
