@@ -498,6 +498,45 @@ def run_survival_analysis(cfg: dict) -> None:
     annot_file         = s_cfg.get("patient_annotation_file", "")
     patient_id_col      = s_cfg.get("patient_id_col", "patient_id")
 
+    # Auto-rebuild image_patient_map from the raw annotation file, if
+    # configured -- folded directly into this function (2026-09-15), not a
+    # separate pipeline step, since this IS the module that reads
+    # image_patient_map. If analysis.survival.build_image_patient_map is
+    # set, rebuild the map fresh from paths.input_dir every run (reusing
+    # build_image_patient_map.py's own build_map() -- that script stays
+    # as-is, the single place this logic lives) instead of trusting a
+    # static JSON file that can silently drift out of sync with whatever
+    # matched-cell images are actually present.
+    build_map_cfg = s_cfg.get("build_image_patient_map")
+    image_patient_map_path = s_cfg.get("image_patient_map")
+    if build_map_cfg and isinstance(image_patient_map_path, str):
+        import sys as _sys
+        _repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        if _repo_root not in _sys.path:
+            _sys.path.insert(0, _repo_root)
+        from build_image_patient_map import build_map
+
+        mapping = build_map(
+            annotation_file=build_map_cfg["annotation_file"],
+            patient_id_col=build_map_cfg.get("patient_id_col", patient_id_col),
+            spot_col=build_map_cfg["spot_col"],
+            region_sep=build_map_cfg.get("region_sep", ","),
+            image_dir=cfg["paths"]["input_dir"],
+            region_regex=build_map_cfg.get("region_regex", r"reg(\d+)"),
+            file_suffix=build_map_cfg.get("file_suffix", "_matched_with_boundaries.csv"),
+        )
+        if not mapping:
+            print("[survival] ⚠️  build_image_patient_map produced zero entries -- "
+                  "keeping any existing image_patient_map file as-is.")
+        else:
+            out_dir = os.path.dirname(os.path.abspath(image_patient_map_path))
+            if out_dir:
+                os.makedirs(out_dir, exist_ok=True)
+            with open(image_patient_map_path, "w") as f:
+                json.dump(mapping, f, indent=2, sort_keys=True)
+            print(f"[survival] Rebuilt image_patient_map -> {image_patient_map_path} "
+                  f"({len(mapping)} entries)")
+
     # image_patient_map may be an inline dict (small cohorts) or a path to a
     # JSON file (TMA-scale cohorts where inlining ~100+ entries directly in
     # the YAML would be unwieldy) — see build_image_patient_map.py.

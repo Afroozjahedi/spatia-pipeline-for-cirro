@@ -144,7 +144,7 @@ paths:
   # project's existing convention for pipeline outputs (see crc_tma.yaml's
   # commented Seadragon path).
   segmentation_results_dir: "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA_full/segmentation_results"
-  input_dir: "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA_full/segmentation_results"
+  input_dir: "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA_full/matched_cells"
   output_dir: "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA_full/results"
 
 tif_conversion:
@@ -399,7 +399,48 @@ cell_typing:
 
 analysis:
   triad:
-    enabled: false   # turn on once segmentation + cell_typing are validated against
-                      # the existing data/crc_tma/matched_cells/ ground truth
+    enabled: true
+    radius_um: 30.0
+    report_radius_um: 20.0
+    trajectory_min_um: 8.0
+    anchor_type: "CD11c+ DCs"
+    partner_type_1: "CD4+ T cells"
+    partner_type_2: "CD8+ T cells"
+    anchor_name: "DC"
+    partner_1_name: "CD4"
+    partner_2_name: "CD8"
+    matched_only: false
+    min_triad_size: 1
+    # Auto-prep, added 2026-09-15 (see spatia/analysis/triads.py's
+    # _run_matched_cells_prep): only fires if paths.input_dir has no
+    # *_matched_with_boundaries.csv files yet. Right now it doesn't need to
+    # run -- paths.input_dir already points at a matched_cells/ directory
+    # you built by hand today with prepare_matched_cells.py -- this exists
+    # so a future re-run (e.g. after cell_typing regenerates the h5ad) does
+    # that conversion automatically instead of needing that command run by
+    # hand again. Column names below are traced from preprocessing.py/
+    # cell_typing.py's own obs-column-writing code, NOT confirmed against
+    # the real h5ad with --inspect -- confidence ~85%, worth a quick
+    # `python prepare_matched_cells.py --inspect --input <this h5ad>` check
+    # before relying on this block for an actual rebuild.
+    matched_cells:
+      cell_type_col: "cell_type"
+      x_col: "x"
+      y_col: "y"
+      experiment_group_col: "experiment_group"
+      sample_col: "tissue_id"
+  functional:
+    enabled: true
+    report_radius_um: 20.0
+    markers:
+      GzmB: "Granzyme B - cytotoxicity (C50)"
+      PD-1: "PD-1 - checkpoint (C48)"
+      LAG-3: "LAG-3 - checkpoint (C32)"
+      FOXP3: "FOXP3 - regulatory T cells (C7)"
+      ICOS: "ICOS - costimulator (C56)"
+      Ki67: "Ki67 - proliferation (C20)"
+      HLA-DR: "HLA-DR - MHC-II (C18)"
+      PD-L1: "PD-L1 - checkpoint (C19)"
+      CD25: "CD25 - IL-2 Ra (C44)"
   tls:
     enabled: false

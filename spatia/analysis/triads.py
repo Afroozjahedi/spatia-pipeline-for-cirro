@@ -15,11 +15,111 @@ The config dict shape mirrors config_example.yaml.
 
 import os
 import re
+import sys
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.spatial import cKDTree
 from itertools import combinations, permutations
+
+# prepare_matched_cells.py lives at the repo root, not inside the spatia
+# package -- import its conversion functions directly rather than
+# duplicating that logic here (see _run_matched_cells_prep below).
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+
+# ── Matched-cell input auto-prep ──────────────────────────────────────────────
+# Folded directly into this module (2026-09-15) rather than a separate
+# pipeline step -- this IS the module that reads *_matched_with_boundaries.csv
+# files from paths.input_dir, so building them when they're missing belongs
+# here, not one layer removed. Reuses prepare_matched_cells.py's own
+# convert_h5ad/convert_tabular functions (that script stays as-is: a
+# standalone, dataset-agnostic CLI for the --inspect workflow on a brand new
+# dataset, and the single place this conversion logic actually lives).
+#
+# Why this exists: for datasets that go through the pooled-h5ad cell_typing
+# route (e.g. CRC_TMA_full), nothing ever wrote the matched-cell CSV format
+# this module needs -- that conversion previously only happened if you
+# remembered to run prepare_matched_cells.py by hand first. CRC_TMA_full's
+# triads step silently no-op'd ("No matched CSV files found") for exactly
+# that reason. Now: if analysis.triad.matched_cells is set in the config,
+# run_triad_analysis builds its own input before scanning for it.
+#
+# Config:
+#   analysis:
+#     triad:
+#       matched_cells:
+#         input_file: null       # optional; defaults to cell_typing's own
+#                                 # output ({output_dir}/cell_typing_data/
+#                                 #         {analysis_name}_cell_typed.h5ad)
+#         cell_type_col: "cell_type"
+#         x_col: "x"
+#         y_col: "y"
+#         experiment_group_col: "experiment_group"
+#         sample_col: "tissue_id"
+#         experiment_group_map: {}     # optional
+#         cell_type_merge_map: {}      # optional
+#         force: []                    # optional, re-write these samples/files
+#
+# Omit analysis.triad.matched_cells entirely (as every existing config does,
+# e.g. the pilot crc_tma.yaml with its own hand-built matched_cells/
+# directory) and this is a complete no-op -- behavior is unchanged.
+
+def _default_matched_cells_input_file(cfg: dict) -> str:
+    """Fall back to cell_typing's own output h5ad if matched_cells.input_file isn't set."""
+    output_dir    = cfg["paths"]["output_dir"]
+    analysis_name = cfg["cell_typing"]["analysis_name"]
+    return os.path.join(output_dir, "cell_typing_data", f"{analysis_name}_cell_typed.h5ad")
+
+
+def _run_matched_cells_prep(cfg: dict, mc_cfg: dict, output_dir: str) -> None:
+    """
+    Convert a cell-typed h5ad/CSV into the *_matched_with_boundaries.csv
+    files run_triad_analysis reads, via prepare_matched_cells.py's own
+    convert_h5ad/convert_tabular. Idempotent -- already-written per-image
+    files are skipped unless listed in mc_cfg['force'] (same skip logic as
+    the standalone script).
+    """
+    from prepare_matched_cells import convert_h5ad, convert_tabular, _detect_format
+
+    input_file = mc_cfg.get("input_file") or _default_matched_cells_input_file(cfg)
+    required = ["cell_type_col", "x_col", "y_col", "experiment_group_col", "sample_col"]
+    missing = [k for k in required if not mc_cfg.get(k)]
+    if missing:
+        raise ValueError(
+            f"analysis.triad.matched_cells.{missing} must be set -- these are "
+            f"dataset-specific column names, not something this step can guess. Run:\n"
+            f"  python prepare_matched_cells.py --inspect --input {input_file}\n"
+            f"to find the real column names, then add them under "
+            f"analysis.triad.matched_cells: in the config."
+        )
+    if not os.path.exists(input_file):
+        raise FileNotFoundError(
+            f"matched_cells prep: input h5ad/CSV not found: {input_file}\n"
+            f"(analysis.triad.matched_cells.input_file was not set, so this defaulted "
+            f"to cell_typing's own output path -- set it explicitly if that's wrong.)"
+        )
+
+    print(f"[SPATIA] matched_cells prep -- Input : {input_file}")
+    print(f"[SPATIA] matched_cells prep -- Output: {output_dir}")
+
+    kwargs = dict(
+        output_dir=output_dir,
+        cell_type_col=mc_cfg["cell_type_col"], x_col=mc_cfg["x_col"], y_col=mc_cfg["y_col"],
+        experiment_group_col=mc_cfg["experiment_group_col"], sample_col=mc_cfg["sample_col"],
+        experiment_group_map=mc_cfg.get("experiment_group_map", {}) or {},
+        cell_type_merge_map=mc_cfg.get("cell_type_merge_map", {}) or {},
+        force=set(mc_cfg.get("force", []) or []),
+    )
+    fmt = _detect_format(input_file)
+    if fmt == "tabular":
+        sep = "\t" if input_file.lower().endswith(".tsv") else ","
+        convert_tabular(input_file, sep, **kwargs)
+    else:
+        convert_h5ad(input_file, **kwargs)
+    print()
 
 
 # ── Config helpers ────────────────────────────────────────────────────────────
@@ -662,6 +762,12 @@ def run_triad_analysis(cfg: dict) -> None:
     print(f"[SPATIA] Radius     : {radius_um} µm  →  {radius_px:.2f} px")
     print(f"[SPATIA] Input      : {input_dir}")
     print(f"[SPATIA] Output     : {output_dir}\n")
+
+    # Auto-build matched-cell input, if configured (see _run_matched_cells_prep
+    # above) -- no-op unless analysis.triad.matched_cells is set.
+    mc_cfg = t_cfg.get("matched_cells")
+    if mc_cfg:
+        _run_matched_cells_prep(cfg, mc_cfg, input_dir)
 
     # ── Discover input files ──────────────────────────────────
     csv_files = sorted([
