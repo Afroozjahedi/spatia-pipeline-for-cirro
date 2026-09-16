@@ -44,6 +44,20 @@ import sys
 
 import pandas as pd
 
+# Reuse survival.py's own patient-id normalization -- added 2026-09-16 after
+# a real bug: this script previously wrote patient_id as plain str(x), so a
+# float-dtype Patient column (e.g. any annotation file with a NaN in that
+# column) produced "1.0", "2.0", ... while survival.py's _load_annotation()
+# normalizes the SAME annotation file's Patient column via _normalize_code()
+# to "1", "2", ... -- the merge in run_survival_analysis then matched ZERO
+# rows ("With outcome data: 0") despite real overlapping patients on both
+# sides. Importing the same function here is the fix, not a coincidence of
+# formatting -- both sides of that merge must agree.
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+from spatia.analysis.survival import _normalize_code
+
 
 def _spot_to_regions(spot_str, region_sep: str) -> list:
     """'1,2' -> [1, 2] (or whatever separator your annotation file uses)."""
@@ -93,7 +107,7 @@ def build_map(
     patients_with_no_images = []
 
     for _, row in surv_df.dropna(subset=[patient_id_col]).iterrows():
-        patient_id = str(row[patient_id_col])
+        patient_id = _normalize_code(row[patient_id_col])
         regions = _spot_to_regions(row[spot_col], region_sep)
         if not regions:
             continue
