@@ -442,5 +442,47 @@ analysis:
       HLA-DR: "HLA-DR - MHC-II (C18)"
       PD-L1: "PD-L1 - checkpoint (C19)"
       CD25: "CD25 - IL-2 Ra (C44)"
+  survival:
+    enabled: true
+    # Annotation file confirmed present on HPC 2026-09-16 (repo root, not a
+    # "hackathon" subfolder -- Afrouz copied it there directly). Confirmed
+    # via --inspect-style check: 35 unique Patient values, "TMA spot /
+    # region" column present (matches build_image_patient_map.py's own
+    # --spot-col default, no override needed), OS/OS_Censor/DFS/DFS_Censor
+    # present. Region numbers run ~1-70, consistent with the ~70 physical
+    # cores x 2 replicate scans (TMA_A/B, DII_TMA_A/B) = the full 140-image
+    # cohort -- confidence ~85% this is genuinely full-cohort coverage, not
+    # row-by-row verified against the actual image list.
+    # CAVEAT (real, not yet resolved): today's matched_cells/ only has 34
+    # per-image files, well short of the ~140 this annotation file implies
+    # -- likely an upstream segmentation gap (see this file's own "HONEST
+    # STATUS" note above). Survival's patient count will reflect however
+    # many of the 35 patients have at least one of those 34 images, not the
+    # full cohort -- check the run's own "[survival] Patients (subjects)"
+    # line before quoting a number anywhere.
+    patient_annotation_file: "/workspace/SPATIA pipeline paper/spatia-pipeline-for-cirro/patient_with_tls_class.csv"
+    patient_id_col: "Patient"
+    group_col: "Group"
+    group_code_map: {"1": "CLR", "2": "DII"}
+    image_patient_map: "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA_full/image_patient_map_full.json"
+    # Auto-rebuild (added 2026-09-15, spatia/analysis/survival.py) -- rebuilds
+    # image_patient_map above from this annotation file + paths.input_dir on
+    # every run, so it can never silently drift out of sync with whichever
+    # images matched_cells actually produced.
+    build_image_patient_map:
+      annotation_file: "/workspace/SPATIA pipeline paper/spatia-pipeline-for-cirro/patient_with_tls_class.csv"
+      patient_id_col: "Patient"
+      spot_col: "TMA spot / region"
+    area_per_image_um2: 1168128.0
+    split_by: "median"
+    censor_is_one: true
+    outcomes:
+      - name: "Overall Survival (OS)"
+        duration_col: "OS"
+        event_col: "OS_Censor"
+      - name: "Disease-Free Survival (DFS)"
+        duration_col: "DFS"
+        event_col: "DFS_Censor"
+    report_radius_um: 20.0
   tls:
     enabled: false
