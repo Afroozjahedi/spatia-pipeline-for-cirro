@@ -1,0 +1,488 @@
+# ============================================================
+# SPATIA Pipeline Configuration — CRC TMA, FULL PIPELINE (raw image -> triads)
+#
+# Companion to experiments/crc_tma.yaml, which deliberately starts at triads
+# using the hackathon's already-segmented, already-cell-typed CSV. THIS config
+# is for demonstrating the new upstream steps end-to-end against the raw CRC
+# TMA core images (OneDrive Hackathon/TMA_A, TMA_B, DII_TMA_A, DII_TMA_B).
+#
+# HONEST STATUS (see SPATIA_PIPELINE_LOG.md for the full write-up):
+#   - tif_conversion / roi_masking / segmentation modules are written and,
+#     for tif_conversion + roi_masking, smoke-tested end-to-end against a
+#     synthetic 92-channel image built from the REAL channelNames.txt panel.
+#   - segmentation.py's CSV-export logic (the part downstream code depends
+#     on) is verified against a synthetic segmentation mask. The actual
+#     spacec/Mesmer call itself is NOT verified -- spacec could not be
+#     installed in the build sandbox (pulls torch, ~900MB, exhausted disk).
+#   - NOT run against real CRC pixels: the sandbox used to build this could
+#     not fetch .tif files from OneDrive at all (tool limitation, confirmed
+#     on files from 3.6MB to 508MB). Real validation needs to happen where
+#     the raw cores are actually reachable (local machine / Seadragon).
+#   - Nuance worth flagging: the raw per-core files already in OneDrive
+#     (e.g. TMA_A/reg011_X01_Y01_Z09.tif) appear to be POST-core-extraction
+#     already (each is a single ~1920x1440x92ch core, not a whole-TMA-slide
+#     grid) -- so for THIS historical dataset, tif_conversion and
+#     roi_masking may have little or nothing to do (files are already plain
+#     .tif, already per-core). segmentation is the step that would actually
+#     need to run to reproduce data/crc_tma/matched_cells/*.csv from raw
+#     pixels. Treat raw_image_dir below as segmentation's direct input for
+#     this dataset specifically, not assumed to need tif_conversion/roi_masking
+#     first -- confirm with Afrouz before assuming otherwise.
+#
+# Run with:
+#   python run_pipeline.py --config experiments/crc_tma_full_pipeline.yaml \
+#       --steps segmentation preprocessing
+#
+# CHANGELOG -- 2026-09-04 (Afrouz + Claude consulting session)
+# --------------------------------------------------------------
+# The 2026-09-03 run against all four TMA folders failed completely (see
+# spatia/analysis/segmentation.py's changelog for the root cause: raw cores are
+# CODEX hyperstacks, not flat 92-channel stacks -- now handled by the new
+# spatia/analysis/channels.py). Three settings changed here as a result:
+#
+#   channel_file          -- was repo-relative ("data/crc_tma_full/
+#                             channelNames.txt"), which could never resolve on
+#                             a fresh clone: .gitignore is a whitelist that
+#                             excludes data/, so this file is never committed.
+#                             It only worked before by accident of which
+#                             directory run_pipeline.py happened to be launched
+#                             from. Now an absolute rsrch6 path.
+#   nuclei_channel        -- was the literal string "HOECHST1"; now "auto",
+#                             which resolves structurally (channel 1 of cycle
+#                             1 -- the CODEX nuclear convention) instead of by
+#                             exact string match. Equivalent value for this
+#                             panel, but survives channelNames.txt formatting
+#                             changes (e.g. a " (C1)" suffix) that would
+#                             otherwise silently break the old literal match.
+#   membrane_channel_list -- was the full panel string "CD45 - hematopoietic
+#                             cells"; now the short name "CD45", which
+#                             channels.resolve_channel() matches against the
+#                             full panel entry. Ambiguous short names (e.g.
+#                             "CD4", which prefix-matches 4 entries in this
+#                             panel) raise rather than guessing.
+#   keep_normalized / normalized_dir / channel_check -- new keys, documented
+#                             inline in the segmentation: block below.
+#
+# STATUS AS OF THIS CHANGELOG: the fix has been code-reviewed and unit-tested
+# against synthetic CODEX/OME data (see channels.py), but NOT yet confirmed
+# against a real segmentation run on rsrch6 -- that smoke test (3 cores from
+# TMA_A) is the next step, not yet reported back as of this commit. Treat the
+# "HONEST STATUS" block above as still current until that run is confirmed;
+# update it (and this note) once it is.
+# ============================================================
+
+experiment:
+  name: "CRC_TMA_cirro_sample"
+  description: "CRC TMA — small subset (few cores/group) for a Cirro/Nextflow/Docker smoke test, mirrors crc_tma_full_pipeline.yaml"
+  groups: ["CLR", "DII"]
+  # Keyed by slide_folder (immediate parent dir of each raw core .tif) --
+  # raw filenames like "reg011_X01_Y01_Z09.tif" carry no CLR/DII marker at
+  # all, only the folder does. See resolve_experiment_group() in
+  # spatia/analysis/preprocessing.py (added 2026-08-28) for the lookup that
+  # reads this. TMA_A/TMA_B are replicate scans of the same CLR cores;
+  # DII_TMA_A/DII_TMA_B are replicate scans of the same DII cores.
+  image_experiment_group_map:
+    TMA_A: "CLR"
+    TMA_B: "CLR"
+    DII_TMA_A: "DII"
+    DII_TMA_B: "DII"
+
+imaging:
+  microns_per_pixel: 0.65
+  experiment_group_areas_um2:
+    CLR: 79432704.0
+    DII: 84105216.0
+
+paths:
+  # UPDATED 2026-08-28: raw data moved off OneDrive onto Seadragon (rsrch6).
+  # Inferred from the SMB path Afrouz gave for DII_TMA_A:
+  #   smb://d1prprsh6ccifs/home/trans_mol_path/ajahedi/SPATIA pipeline paper/data/DII_TMA_A
+  # -> mapped to the native Linux mount used everywhere else in this project
+  #    (matches /rsrch6/home/trans_mol_path/ajahedi/... in SPATIA_PIPELINE_LOG.md
+  #    and the triad-analysis project's own cluster paths).
+  # CONFIDENCE: high that the /rsrch6 prefix + rest-of-path mapping is right
+  # (exact account/lab path match), NOT verified with an actual `ls` on
+  # JupyterHub yet -- do that before running. Also NOT yet confirmed that
+  # TMA_A / TMA_B / DII_TMA_B sit as siblings of DII_TMA_A under the same
+  # data/ parent (assumed here since crc_tma_full_pipeline.yaml's own
+  # original description names all four together) -- worth a quick `ls`
+  # of the parent to confirm all four are actually there before running.
+
+  # Not read by segmentation.py directly (masked_roi_dir below is the real
+  # input) -- kept here for documentation of where the raw data lives.
+  raw_image_dir: "/rsrch6/home/trans_mol_path/ajahedi/SPATIA pipeline paper/data"
+
+  # If tif_conversion IS needed: standard-TIFF output goes here.
+  converted_tif_dir: "data/crc_tma_full/converted_tif"
+
+  # QuPath ROI/TMA export. For this dataset, cores already appear pre-extracted
+  # (see status note) -- qupath_roi_dir may end up unused if roi_masking is
+  # skipped in favor of segmentation reading raw_image_dir directly.
+  qupath_roi_dir: "data/crc_tma_full/qupath_roi"
+
+  # THE real segmentation input (segmentation.py reads paths.masked_roi_dir,
+  # not raw_image_dir -- see 2026-08-27 finding). Points at the SAME parent
+  # as raw_image_dir above: segmentation.py walks this recursively and picks
+  # up TMA_A/, TMA_B/, DII_TMA_A/, DII_TMA_B/ as separate "slides" (their
+  # folder name becomes the slide_id) -- no roi_masking step needed since
+  # these cores are already pre-extracted (see status note at top of file).
+  masked_roi_dir: "/rsrch6/home/trans_mol_path/ajahedi/SPATIA pipeline paper/data_cirro_sample"
+
+  # Real 92-channel CRC panel -- written 2026-08-28 from Afrouz's own channel
+  # list (spacec/QuPath scanner metadata), NOT reconstructed or guessed.
+  # Repo-relative: resolves correctly once this repo is on Seadragon and
+  # run_pipeline.py is run from the repo root.
+  # FIXED 2026-09-03: was repo-relative ("data/crc_tma_full/channelNames.txt"),
+  # which cannot work -- .gitignore is a whitelist that excludes data/, so this
+  # file is never in a fresh clone, and the path only resolved at all when
+  # run_pipeline.py happened to be launched from the right directory. Absolute
+  # path to where the panel actually lives on rsrch6.
+  channel_file: "/rsrch6/home/trans_mol_path/ajahedi/SPATIA pipeline paper/data/crc_tma_full/channelNames.txt"
+
+  # Segmentation writes here; preprocessing reads from here -- same directory,
+  # no separate wiring needed. Moved to scratch (not home) to match this
+  # project's existing convention for pipeline outputs (see crc_tma.yaml's
+  # commented Seadragon path).
+  segmentation_results_dir: "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA_full/segmentation_results"
+  input_dir: "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA_full/matched_cells"
+  output_dir: "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA_full/results_cirro_sample"
+
+tif_conversion:
+  enabled: false   # see status note -- likely a no-op for this dataset's pre-extracted cores
+  image_format: ".qptiff"
+  preserve_metadata: true
+
+roi_masking:
+  enabled: false   # see status note -- cores already appear pre-extracted
+
+segmentation:
+  enabled: true
+  seg_method: "mesmer"
+  # UPDATED 2026-09-03: "auto" resolves structurally rather than by string --
+  # channel 1 of cycle 1, which in CODEX/PhenoCycler acquisition is always the
+  # nuclear stain. Equivalent to the old "HOECHST1" for this panel, but it no
+  # longer breaks when the panel file's spelling changes (e.g. entries carrying
+  # a " (C1)" suffix) and it works unchanged on any other CODEX panel.
+  nuclei_channel: "auto"
+  # Short names now resolve against the full panel entry
+  # ("CD45" -> "CD45 - hematopoietic cells"). Ambiguous prefixes raise rather
+  # than guessing -- "CD4" would match CD44/CD45/CD45RA/CD45RO.
+  membrane_channel_list: ["CD45 - hematopoietic cells"]
+  compartment: "whole-cell"
+  input_format: "Multichannel"
+  resize_factor: 1
+  size_cutoff: 0
+  generate_overlays: true
+  # Raw cores are ImageJ hyperstacks (23 cycles x 4 channels). spacec reads the
+  # file itself and treats axis 0 as channels, so each image is flattened to a
+  # labeled 92-plane CYX TIFF here first. Same size as the source (~508 MB), so
+  # by default each copy is deleted right after its image is segmented -- peak
+  # extra disk is one file, not a second copy of the dataset.
+  keep_normalized: false
+  normalized_dir: "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA_full/_normalized"
+  # Verifies plane count against the panel, and checks nuclear periodicity on
+  # the pixels once per batch. Leave true.
+  channel_check: true
+
+preprocessing:
+  last_marker: "DRAQ5"   # last channel in the real 92-channel panel (channelNames.txt)
+  qc_filter:
+    size_percentile: 1
+    dapi_percentile: 1
+  noise:
+    cut_off: 0.01
+    count_bin: 50
+
+cell_typing:
+  mode: "automatic"
+  # This is a TMA: preprocessing.py pools per-region (each reg069/reg070/...
+  # core is its own tissue_id after coordinate/group stripping -- see
+  # extract_tissue_identifier()), so it writes one h5ad PER CORE, never one
+  # cohort-wide file. cell_typing.py's input_file is a single hardcoded path
+  # (sc.read(input_file), no glob/loop) -- it needs ONE file covering the
+  # whole cohort so GMM thresholds are fit jointly across cores/patients,
+  # not separately per core (which would bake any core-to-core staining
+  # drift into inconsistent thresholds). Run pool_tissues_for_celltyping.py
+  # FIRST to concatenate every core's h5ad into this file:
+  #   python pool_tissues_for_celltyping.py \
+  #     --input-dir  "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA_full/results/combined_processed_data/individual_processed_data" \
+  #     --output-file "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA_full/results/combined_processed_data/cohort_pooled.h5ad"
+  # set 2026-09-10 -- resolves the empty-input_file crash (ValueError:
+  # Reading with filekey '.' failed ... write/..h5ad does not exist).
+  input_file: "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA_full/results/combined_processed_data/cohort_pooled.h5ad"
+  analysis_name: "CRC_TMA_full"
+  markers:
+    # TODO-was: "fill in from channelNames.txt once segmentation output is
+    # validated". This sandbox still cannot reach
+    # OneDrive/Hackathon/channelNames.txt directly (confirmed again on
+    # 2026-07-22 -- outside this session's connected folders). However the
+    # SAME underlying CRC dataset's short marker names are already known
+    # and pipeline-verified via the pre-segmented-CSV route: this is the
+    # exact 50-name panel from experiments/crc_tma_celltyping.yaml /
+    # prepare_crc_for_celltyping.py's MARKER_RENAME dict, which already ran
+    # successfully (see crc_accuracy_report.csv, crc_confusion_matrix.png,
+    # dated 2026-07-01). Copied here as a reuse of an already-established
+    # name list, not a new marker-selection decision -- flag to Afrouz:
+    # please confirm this 50-marker list is complete/correct for the raw
+    # 92-channel image too (92 raw channels include blanks/DAPI-per-cycle
+    # not present as named markers here).
+    panel:
+      - CD45
+      - CD44
+      - FOXP3
+      - CDX2
+      - CD8
+      - p53
+      - GATA3
+      - Tbet
+      - betacatenin
+      - HLA_DR
+      - PDL1
+      - Ki67
+      - CD45RA
+      - CD4
+      - CD21
+      - MUC1
+      - CD30
+      - CD2
+      - Vimentin
+      - CD20
+      - LAG3
+      - CD5
+      - IDO1
+      - CK
+      - CD11b
+      - CD56
+      - aSMA
+      - BCL2
+      - CD25
+      - CollagenIV
+      - CD11c
+      - PD1
+      - GzmB
+      - EGFR
+      - VISTA
+      - CD15
+      - CCR4
+      - ICOS
+      - MMP9
+      - Synaptophysin
+      - CD71
+      - GFAP
+      - CD7
+      - CD3
+      - ChromoA
+      - CD163
+      - CD57
+      - CD45RO
+      - CD68
+      - CD31
+      - Podoplanin
+      - CD34
+      - CD38
+      - CD138
+      - MMP12
+    gating_only: []
+    # {short_marker_name: actual_adata_column_name} -- added 2026-09-10.
+    # This panel's real h5ad/CSV columns are the CODEX export's full
+    # "<name> - <description> (C<n>)" strings (confirmed directly against
+    # data/crc_tma_full/channelNames.txt and a real
+    # *_combined_all_experiment_groups.csv header the user uploaded), not
+    # the clean short names above -- e.g. the real "CD45" column is
+    # "CD45 - hematopoietic cells (C14)". `panel`/gating_only/
+    # gmm.per_marker_overrides/cell_type_definitions.yaml all keep using
+    # the short names; only this map redirects the actual adata lookup
+    # (see compute_marker_thresholds/add_positivity_columns/
+    # gate_cd45_positive in cell_typing.py). Four entries are a real name
+    # substitution, not just punctuation -- confirm these four are correct:
+    # CK -> Cytokeratin, GzmB -> Granzyme B, ChromoA -> Chromogranin A,
+    # CCR4 -> CD194 (the column's leading name; CCR4 only appears in its
+    # description "CD194 - CCR4 chemokine R").
+    column_map:
+      CD45: "CD45 - hematopoietic cells (C14)"
+      CD44: "CD44 - stroma (C6)"
+      FOXP3: "FOXP3 - regulatory T cells (C7)"
+      CDX2: "CDX2 - intestinal epithelia (C8)"
+      CD8: "CD8 - cytotoxic T cells (C10)"
+      p53: "p53 - tumor suppressor (C11)"
+      GATA3: "GATA3 - Th2 helper T cells (C12)"
+      Tbet: "T-bet - Th1 cells (C15)"
+      betacatenin: "beta-catenin - Wnt signaling (C16)"
+      HLA_DR: "HLA-DR - MHC-II (C18)"
+      PDL1: "PD-L1 - checkpoint (C19)"
+      Ki67: "Ki67 - proliferation (C20)"
+      CD45RA: "CD45RA - naive T cells (C22)"
+      CD4: "CD4 - T helper cells (C23)"
+      CD21: "CD21 - DCs (C24)"
+      MUC1: "MUC-1 - epithelia (C26)"
+      CD30: "CD30 - costimulator (C27)"
+      CD2: "CD2 - T cells (C28)"
+      Vimentin: "Vimentin - cytoplasm (C30)"
+      CD20: "CD20 - B cells (C31)"
+      LAG3: "LAG-3 - checkpoint (C32)"
+      CD5: "CD5 - T cells (C35)"
+      IDO1: "IDO-1 - metabolism (C36)"
+      CK: "Cytokeratin - epithelia (C38)"
+      CD11b: "CD11b - macrophages (C39)"
+      CD56: "CD56 - NK cells (C40)"
+      aSMA: "aSMA - smooth muscle (C42)"
+      BCL2: "BCL-2 - apoptosis (C43)"
+      CD25: "CD25 - IL-2 Ra (C44)"
+      CollagenIV: "Collagen IV - bas. memb. (C46)"
+      CD11c: "CD11c - DCs (C47)"
+      PD1: "PD-1 - checkpoint (C48)"
+      GzmB: "Granzyme B - cytotoxicity (C50)"
+      EGFR: "EGFR - signaling (C51)"
+      VISTA: "VISTA - costimulator (C52)"
+      CD15: "CD15 - granulocytes (C54)"
+      CCR4: "CD194 - CCR4 chemokine R (C55)"
+      ICOS: "ICOS - costimulator (C56)"
+      MMP9: "MMP9 - matrix metalloproteinase (C58)"
+      Synaptophysin: "Synaptophysin - neuroendocrine (C59)"
+      CD71: "CD71 - transferrin R (C60)"
+      GFAP: "GFAP - nerves (C62)"
+      CD7: "CD7 - T cells (C63)"
+      CD3: "CD3 - T cells (C64)"
+      ChromoA: "Chromogranin A - neuroendocrine (C66)"
+      CD163: "CD163 - macrophages (C67)"
+      CD57: "CD57 - NK cells (C68)"
+      CD45RO: "CD45RO - memory cells (C71)"
+      CD68: "CD68 - macrophages (C72)"
+      CD31: "CD31 - vasculature (C75)"
+      Podoplanin: "Podoplanin - lymphatics (C76)"
+      CD34: "CD34 - vasculature (C79)"
+      CD38: "CD38 - multifunctional (C80)"
+      CD138: "CD138 - plasma cells (C83)"
+      MMP12: "MMP12 - matrix metalloproteinase (C84)"
+  gmm:
+    n_components: 2
+    random_state: 42
+    # NOT copied from crc_tma_celltyping.yaml (which uses 2.0 here, plus a
+    # non-empty per_marker_overrides block and a cell_type_definitions_file).
+    # Those are threshold/gating judgment calls on top of the marker list,
+    # not a name-reuse -- left as this file's original placeholder values
+    # and surfaced as an open decision (Q-FullPipeline-GMMThresholds) rather
+    # than silently copied.
+    cd45_std_multiplier: 3.0
+    default_std_multiplier: 2.0
+    per_marker_overrides: {}
+    # threshold_mode (added 2026-09-14, Afrouz's explicit choice): "posterior"
+    # instead of just inheriting cell_typing.py's own fallback default
+    # (gmm_cfg.get("threshold_mode", "std_multiplier")), which this file was
+    # silently doing before this line existed. NOT changed at the code level,
+    # and NOT changed in experiments/crc_tma_celltyping.yaml -- that config is
+    # the one behind the 24.5%/26.8% (all/core) accuracy number in this repo's
+    # docs/spatia_analysis_cell_typing.md 2026-09-12 addendum, and that number
+    # was produced under threshold_mode=std_multiplier (its default), not
+    # posterior. Flagging for the paper: this production config's cell-typing
+    # output has NOT been re-validated against expert labels under posterior
+    # mode -- if the manuscript cites the 24.5%/26.8% figure as *this*
+    # pipeline's accuracy, that figure and this run's actual settings will
+    # disagree unless compare_expert_vs_auto.py is re-run with
+    # threshold_mode=posterior against crc_tma_celltyping.yaml's validation
+    # h5ad first. See docs/spatia_analysis_cell_typing.md's 2026-09-14 note.
+    threshold_mode: "posterior"
+    # confidence_level is already 0.8 by code default -- set explicitly here
+    # for reproducibility (a methods paper should state this, not rely on an
+    # unwritten default).
+    confidence_level: 0.8
+  clustering:
+    n_neighbors: 15
+    leiden_resolution: 0.5
+  cell_type_definitions_file: "cell_type_definitions/crc_tma.yaml"   # set 2026-09-10 -- resolves
+    # Q-FullPipeline-GMMThresholds's open marker-list question along the way: this file's
+    # required/excluded marker names (CD8, GzmB, HLA_DR, ...) were checked and match this
+    # config's markers.panel short names, not spatia/cell_type_definitions.yaml's default
+    # (which is the LILRB2 mouse panel -- B220/Ly6C/NKP46/SIGLEC F -- wrong species for this
+    # CRC dataset entirely, do not point here).
+  cluster_labels_file: null
+
+analysis:
+  triad:
+    enabled: true
+    radius_um: 30.0
+    report_radius_um: 20.0
+    trajectory_min_um: 8.0
+    anchor_type: "CD11c+ DCs"
+    partner_type_1: "CD4+ T cells"
+    partner_type_2: "CD8+ T cells"
+    anchor_name: "DC"
+    partner_1_name: "CD4"
+    partner_2_name: "CD8"
+    matched_only: false
+    min_triad_size: 1
+    # Auto-prep, added 2026-09-15 (see spatia/analysis/triads.py's
+    # _run_matched_cells_prep): only fires if paths.input_dir has no
+    # *_matched_with_boundaries.csv files yet. Right now it doesn't need to
+    # run -- paths.input_dir already points at a matched_cells/ directory
+    # you built by hand today with prepare_matched_cells.py -- this exists
+    # so a future re-run (e.g. after cell_typing regenerates the h5ad) does
+    # that conversion automatically instead of needing that command run by
+    # hand again. Column names below are traced from preprocessing.py/
+    # cell_typing.py's own obs-column-writing code, NOT confirmed against
+    # the real h5ad with --inspect -- confidence ~85%, worth a quick
+    # `python prepare_matched_cells.py --inspect --input <this h5ad>` check
+    # before relying on this block for an actual rebuild.
+    matched_cells:
+      cell_type_col: "cell_type"
+      x_col: "x"
+      y_col: "y"
+      experiment_group_col: "experiment_group"
+      sample_col: "tissue_id"
+  functional:
+    enabled: true
+    report_radius_um: 20.0
+    markers:
+      GzmB: "Granzyme B - cytotoxicity (C50)"
+      PD-1: "PD-1 - checkpoint (C48)"
+      LAG-3: "LAG-3 - checkpoint (C32)"
+      FOXP3: "FOXP3 - regulatory T cells (C7)"
+      ICOS: "ICOS - costimulator (C56)"
+      Ki67: "Ki67 - proliferation (C20)"
+      HLA-DR: "HLA-DR - MHC-II (C18)"
+      PD-L1: "PD-L1 - checkpoint (C19)"
+      CD25: "CD25 - IL-2 Ra (C44)"
+  survival:
+    enabled: true
+    # Annotation file confirmed present on HPC 2026-09-16 (repo root, not a
+    # "hackathon" subfolder -- Afrouz copied it there directly). Confirmed
+    # via --inspect-style check: 35 unique Patient values, "TMA spot /
+    # region" column present (matches build_image_patient_map.py's own
+    # --spot-col default, no override needed), OS/OS_Censor/DFS/DFS_Censor
+    # present. Region numbers run ~1-70, consistent with the ~70 physical
+    # cores x 2 replicate scans (TMA_A/B, DII_TMA_A/B) = the full 140-image
+    # cohort -- confidence ~85% this is genuinely full-cohort coverage, not
+    # row-by-row verified against the actual image list.
+    # CAVEAT (real, not yet resolved): today's matched_cells/ only has 34
+    # per-image files, well short of the ~140 this annotation file implies
+    # -- likely an upstream segmentation gap (see this file's own "HONEST
+    # STATUS" note above). Survival's patient count will reflect however
+    # many of the 35 patients have at least one of those 34 images, not the
+    # full cohort -- check the run's own "[survival] Patients (subjects)"
+    # line before quoting a number anywhere.
+    patient_annotation_file: "/workspace/SPATIA pipeline paper/spatia-pipeline-for-cirro/patient_with_tls_class.csv"
+    patient_id_col: "Patient"
+    group_col: "Group"
+    group_code_map: {"1": "CLR", "2": "DII"}
+    image_patient_map: "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA_full/results_cirro_sample/image_patient_map_sample.json"
+    # Auto-rebuild (added 2026-09-15, spatia/analysis/survival.py) -- rebuilds
+    # image_patient_map above from this annotation file + paths.input_dir on
+    # every run, so it can never silently drift out of sync with whichever
+    # images matched_cells actually produced.
+    build_image_patient_map:
+      annotation_file: "/workspace/SPATIA pipeline paper/spatia-pipeline-for-cirro/patient_with_tls_class.csv"
+      patient_id_col: "Patient"
+      spot_col: "TMA spot / region"
+    area_per_image_um2: 1168128.0
+    split_by: "median"
+    censor_is_one: true
+    outcomes:
+      - name: "Overall Survival (OS)"
+        duration_col: "OS"
+        event_col: "OS_Censor"
+      - name: "Disease-Free Survival (DFS)"
+        duration_col: "DFS"
+        event_col: "DFS_Censor"
+    report_radius_um: 20.0
+  tls:
+    enabled: false
