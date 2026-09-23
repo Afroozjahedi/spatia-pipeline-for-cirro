@@ -192,6 +192,14 @@ preprocessing:
   noise:
     cut_off: 0.01
     count_bin: 50
+  # Added 2026-09-23: Python port of 04-1_preprocessing_visualization_for_Qupath.ipynb,
+  # now wired into run_preprocessing() itself (spatia/analysis/preprocessing.py's
+  # run_qupath_export()). Writes one QuPath-importable *_qupath_cells.tsv per image
+  # (every raw cell labeled Included/Excl_SmallArea/Excl_LowDAPI/etc.) plus 3 QC PNGs
+  # per image, to {output_dir}/qupath_exports/. Set to false to skip (adds runtime:
+  # one raw mesmer_result.csv re-read + 3 plots per image).
+  qupath_export:
+    enabled: true
 
 cell_typing:
   mode: "automatic"
@@ -429,6 +437,15 @@ analysis:
       y_col: "y"
       experiment_group_col: "experiment_group"
       sample_col: "tissue_id"
+    # Added 2026-09-23: folds export_triads_for_qupath.py (repo root, still usable
+    # standalone) into run_triad_analysis() itself. Converts every *_triad_pairs.csv
+    # this run just wrote into a QuPath-importable *_triads.tsv, ready for
+    # 07-2_triad_visualization.groovy. anchor/partner1/partner2 cell-type labels
+    # default to this block's own anchor_type/partner_type_1/partner_type_2 above
+    # ("CD11c+ DCs" / "CD4+ T cells" / "CD8+ T cells") -- set the
+    # *_cell_type keys below only to override that.
+    qupath_export:
+      enabled: true
   functional:
     enabled: true
     report_radius_um: 20.0

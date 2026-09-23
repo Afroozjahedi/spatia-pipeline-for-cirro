@@ -15,13 +15,14 @@ Cleans up the raw per-cell measurements coming out of segmentation before anythi
 - `preprocessing.last_marker` — where your marker columns end and metadata columns begin; `"auto"` resolves it from your panel file, or specify the actual last marker name yourself
 - `preprocessing.qc_filter.size_percentile` / `.dapi_percentile` (both default `1`) — how aggressively to filter out too-small or too-dim cells
 - `preprocessing.noise.cut_off` / `.count_bin` — tuning knobs for automatic noise removal; the defaults work for most data
+- `preprocessing.qupath_export.enabled` (default off) — turns on the QuPath QC export described below as part of this same step, no second command needed
 
 ## What you'll get
 
 - Per-tissue and combined processed data files (CSV + h5ad), ready for cell typing
 - Marker visualization images to check filtering and normalization worked as expected
 - A QC summary report (tissue/group breakdown, why cells were removed, marker-level QC)
-- Optionally, a QuPath-importable export classifying every original cell as kept or excluded (and why), for visual review
+- If `preprocessing.qupath_export.enabled` is set: a QuPath-importable TSV per image, classifying every original cell as kept or excluded (and why — small area, low signal, or both), plus 3 QC plots per image (spatial map, classification counts, signal-vs-area scatter with the thresholds drawn in), all under `{output_dir}/qupath_exports/`
 
 ## Things to know
 

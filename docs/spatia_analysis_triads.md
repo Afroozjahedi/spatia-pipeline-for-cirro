@@ -15,6 +15,7 @@ Finds "triads" — an anchor cell type with both of two partner cell types simul
 - `analysis.triad.radius_um` — the search radius that defines "nearby"
 - `analysis.triad.anchor_type`, `.partner_type_1`, `.partner_type_2` — the three cell types that define your triad. Leaving these unset makes the pipeline try every possible 3-way combination of cell types instead, which is thorough but can be slow with more than a handful of cell types
 - `analysis.triad.report_radius_um` — a tighter radius used just for the QC plots, if you want to visualize a stricter subset than what you searched with
+- `analysis.triad.qupath_export.enabled` (default off) — also export every triad found to a QuPath-importable TSV as part of this same step (see [Exporting triads for QuPath visualization](export_triads_for_qupath.md))
 
 ## What you'll get
 
@@ -22,6 +23,7 @@ Finds "triads" — an anchor cell type with both of two partner cell types simul
 - A combined summary across all images (`triad_summary.csv`) and experiment-group comparison plots/tables (counts, density, distances)
 - QC overlay images per image so you can visually confirm the triads found actually make sense
 - A trajectory plot showing triad count vs. distance threshold, useful for justifying your chosen radius
+- If `analysis.triad.qupath_export.enabled` is set: one QuPath-importable `*_triads.tsv` per image under `{output_dir}/triad_qupath_exports/`, ready for the triad-visualization QuPath script
 
 ## Things to know
 

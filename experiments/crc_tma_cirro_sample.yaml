@@ -192,6 +192,9 @@ preprocessing:
   noise:
     cut_off: 0.01
     count_bin: 50
+  # Mirrors crc_tma_full_pipeline.yaml -- see that file for the full comment.
+  qupath_export:
+    enabled: true
 
 cell_typing:
   mode: "automatic"
@@ -429,6 +432,9 @@ analysis:
       y_col: "y"
       experiment_group_col: "experiment_group"
       sample_col: "tissue_id"
+    # Mirrors crc_tma_full_pipeline.yaml -- see that file for the full comment.
+    qupath_export:
+      enabled: true
   functional:
     enabled: true
     report_radius_um: 20.0

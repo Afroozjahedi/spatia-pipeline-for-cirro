@@ -796,6 +796,34 @@ def run_preprocessing(cfg: dict) -> dict:
         print(f"  Tissues:  {tissues_dir}")
         print(f"  Viz:      {viz_dir}")
         print(f"  Logs:     {log_dir}")
+
+        # Optional QuPath QC export -- no-op unless preprocessing.qupath_export.enabled
+        # is set in the config. Folded in here (2026-09-23) rather than left as a
+        # second, separately-invoked entry point: run_qupath_export() only needs
+        # this function's own output on disk (combined_processed_data/), which is
+        # already written by this point in the same run. run_qupath_export() itself
+        # is unchanged and still works standalone -- e.g. to re-export QC TSVs for
+        # an older run without re-running preprocessing.
+        #
+        # Config:
+        #   preprocessing:
+        #     qupath_export:
+        #       enabled: true
+        #
+        # This is the Python port of 04-1_preprocessing_visualization_for_Qupath.ipynb
+        # (per-cell Included/Excluded QC classification + QuPath TSV + 3 QC plots),
+        # generalized off that notebook's hardcoded USER_CONDITIONS = ["WT", "KO"] to
+        # read experiment.groups from the config instead -- see run_qupath_export()
+        # above for the full implementation.
+        qe_cfg = pp_cfg.get("qupath_export") if isinstance(pp_cfg, dict) else None
+        if qe_cfg and qe_cfg.get("enabled", False):
+            print(f"\npreprocessing.qupath_export.enabled -- running QuPath QC export...")
+            try:
+                run_qupath_export(cfg)
+            except Exception as e:
+                print(f"\n⚠️  QuPath QC export failed (non-fatal -- preprocessing output "
+                      f"above is complete and unaffected): {e}")
+
         print(f"\nProcessing complete: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("=" * 80)
 

@@ -122,6 +122,66 @@ def _run_matched_cells_prep(cfg: dict, mc_cfg: dict, output_dir: str) -> None:
     print()
 
 
+# ── QuPath triad export (optional, folded 2026-09-23) ─────────────────────────
+# export_triads_for_qupath.py (repo root) stays as-is: a standalone CLI you can
+# still run by hand against any older output_dir. This wraps its own
+# export_one_image() function directly so a normal run_triad_analysis() call
+# can also produce QuPath-ready TSVs without a second manual invocation --
+# same "fold a manual script into its consuming module" pattern as
+# _run_matched_cells_prep above.
+#
+# Config:
+#   analysis:
+#     triad:
+#       qupath_export:
+#         enabled: true
+#         anchor_cell_type: null     # optional; defaults to analysis.triad.anchor_type,
+#                                     # then "Dendritic cells"
+#         partner1_cell_type: null   # defaults to analysis.triad.partner_type_1,
+#                                     # then "CD4 T cells"
+#         partner2_cell_type: null   # defaults to analysis.triad.partner_type_2,
+#                                     # then "CD8 T cells"
+#         output_dir: null           # optional; defaults to {output_dir}/triad_qupath_exports
+#
+# Omit analysis.triad.qupath_export entirely and this is a complete no-op.
+
+def _run_qupath_export(t_cfg: dict, qe_cfg: dict, output_dir: str) -> None:
+    """
+    Convert every *_triad_pairs.csv just written in output_dir into a
+    QuPath-importable *_triads.tsv file, ready for
+    07-2_triad_visualization.groovy. See module docstring above for config.
+    """
+    from export_triads_for_qupath import export_one_image
+
+    anchor   = qe_cfg.get("anchor_cell_type")   or t_cfg.get("anchor_type")     or "Dendritic cells"
+    partner1 = qe_cfg.get("partner1_cell_type") or t_cfg.get("partner_type_1")  or "CD4 T cells"
+    partner2 = qe_cfg.get("partner2_cell_type") or t_cfg.get("partner_type_2")  or "CD8 T cells"
+    export_dir = qe_cfg.get("output_dir") or os.path.join(output_dir, "triad_qupath_exports")
+    os.makedirs(export_dir, exist_ok=True)
+
+    csv_files = sorted(
+        f for f in os.listdir(output_dir)
+        if f.endswith("_triad_pairs.csv") and not f.startswith("._")
+    )
+    if not csv_files:
+        print(f"[SPATIA] qupath_export -- no *_triad_pairs.csv found in {output_dir}, nothing to export")
+        return
+
+    print(f"[SPATIA] qupath_export -- converting {len(csv_files)} file(s) to QuPath TSV "
+          f"(anchor={anchor!r}, partner1={partner1!r}, partner2={partner2!r})")
+    total = 0
+    for csv_file in csv_files:
+        image_id = csv_file.replace("_triad_pairs.csv", "")
+        try:
+            n = export_one_image(os.path.join(output_dir, csv_file), export_dir,
+                                  anchor, partner1, partner2)
+        except (RuntimeError, ValueError) as e:
+            print(f"[SPATIA] qupath_export -- {image_id}: {e} -- skipping.")
+            continue
+        total += n
+    print(f"[SPATIA] qupath_export -- {total} triads exported -> {export_dir}/")
+
+
 # ── Config helpers ────────────────────────────────────────────────────────────
 
 def _get_experiment_group_areas(cfg: dict) -> dict:
@@ -955,5 +1015,12 @@ def run_triad_analysis(cfg: dict) -> None:
     plot_experiment_group_comparison(summary_df, all_triads_combined, output_dir, radius_um, group_areas, experiment_groups,
                               report_radius_um=report_radius_um,
                               trajectory_min_um=trajectory_min_um)
+
+    # Optional: export every *_triad_pairs.csv just written to QuPath-importable
+    # TSVs (see _run_qupath_export above). No-op unless analysis.triad.qupath_export
+    # is set.
+    qe_cfg = t_cfg.get("qupath_export")
+    if qe_cfg and qe_cfg.get("enabled", False):
+        _run_qupath_export(t_cfg, qe_cfg, output_dir)
 
     print(f"\n[SPATIA] All outputs saved to: {output_dir}")
