@@ -1,15 +1,21 @@
 {
-  "_comment": "DRAFT — the web form end users see when launching this pipeline in Cirro. Only exposes the config file path for now, deliberately minimal. NOT deciding which individual SPATIA config parameters (conditions, marker thresholds, triad radius, etc.) should be exposed as separate form fields vs. bundled into one uploaded YAML — that's a UX call for Afrouz, not something to invent unilaterally (operating rule 1). Flagging as an open question rather than guessing at a full form schema.",
+  "_comment": "UPDATED 2026-09-24 -- now takes TWO uploads: the samplesheet (sample metadata, changes per dataset) and the params config (pipeline settings, stable across datasets/reused per pipeline version). Still NOT deciding which individual SPATIA parameters (conditions, marker thresholds, triad radius, etc.) should be exposed as separate form fields vs. bundled into config_file -- that remains a UX call for Afrouz (operating rule 1), unchanged from the original draft note.",
   "form": {
     "type": "object",
     "properties": {
+      "samplesheet": {
+        "type": "string",
+        "format": "file",
+        "title": "Samplesheet (.csv)",
+        "description": "sample_id,image_path,group -- one row per sample. Generated from an existing experiment YAML via derive_samplesheet.py, or written by hand for a new dataset."
+      },
       "config_file": {
         "type": "string",
         "format": "file",
-        "title": "SPATIA experiment config (.yaml)",
-        "description": "Upload the experiment YAML (e.g. experiments/crc_tma.yaml). All pipeline parameters — conditions, paths, thresholds — are read from this file."
+        "title": "SPATIA pipeline params (.yaml)",
+        "description": "Pipeline parameters only -- thresholds, which steps run, marker panel, etc. No sample paths or metadata (those come from the samplesheet above)."
       }
     },
-    "required": ["config_file"]
+    "required": ["samplesheet", "config_file"]
   }
 }

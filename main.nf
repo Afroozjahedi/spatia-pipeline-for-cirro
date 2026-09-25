@@ -24,6 +24,20 @@
  * each. Pass --container spatia-pipeline-spacec-base:latest or similar if
  * you build the second one instead.)
  *
+ * SAMPLESHEET — added 2026-09-24, in response to Cirro admin (Dima)
+ * feedback: sample metadata (which image belongs to which sample/group)
+ * now comes from a separate samplesheet CSV (sample_id,image_path,group)
+ * instead of being hand-written into --config. This is STILL Q10's single
+ * batched process — one call handles every sample in the samplesheet, the
+ * same way run_pipeline.py already walked --config's masked_roi_dir
+ * before. See run_pipeline.py's _apply_samplesheet() for exactly how the
+ * override works, and its docstring for the one constraint it enforces
+ * (all samplesheet rows must share one parent directory, since
+ * segmentation.py still walks a single masked_roi_dir).
+ * --config's own experiment.image_experiment_group_map / paths.masked_roi_dir
+ * are IGNORED whenever --samplesheet is passed (samplesheet wins); if you
+ * omit --samplesheet, behavior is unchanged from before this date.
+ *
  * NOT YET RUN — no Nextflow/Docker runtime available in the sandbox this
  * was written in. Needs a real test (small CRC config, e.g.
  * experiments/crc_tma.yaml) before trusting the channel/publish wiring.
@@ -31,7 +45,8 @@
 
 nextflow.enable.dsl = 2
 
-params.config       = "experiments/crc_tma.yaml"   // path to the SPATIA experiment YAML
+params.config       = "experiments/crc_tma_full_pipeline.params.yaml"  // pipeline parameters only (no sample metadata)
+params.samplesheet  = "experiments/samplesheet.csv"                    // sample_id,image_path,group -- optional, see run_pipeline.py --help
 params.output_dir   = "results"                     // Nextflow-local publish dir
 params.container    = "spatia-pipeline:latest"      // image built from ./Dockerfile
 
@@ -44,6 +59,7 @@ process run_spatia_pipeline {
 
     input:
     path config_file
+    path samplesheet_file
 
     output:
     path "results/**", emit: results
@@ -51,11 +67,12 @@ process run_spatia_pipeline {
 
     script:
     """
-    python /app/run_pipeline.py --config ${config_file}
+    python /app/run_pipeline.py --config ${config_file} --samplesheet ${samplesheet_file}
     """
 }
 
 workflow {
-    config_ch = Channel.fromPath(params.config)
-    run_spatia_pipeline(config_ch)
+    config_ch      = Channel.fromPath(params.config)
+    samplesheet_ch = Channel.fromPath(params.samplesheet)
+    run_spatia_pipeline(config_ch, samplesheet_ch)
 }

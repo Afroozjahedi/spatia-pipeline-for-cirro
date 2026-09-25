@@ -39,6 +39,7 @@ Exit codes
 """
 
 import argparse
+import csv
 import sys
 import time
 import traceback
@@ -171,6 +172,73 @@ def _step_enabled_in_config(step: str, cfg: dict) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SAMPLESHEET OVERRIDE — optional, added 2026-09-24 for Cirro packaging
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _apply_samplesheet(cfg: dict, samplesheet_path: Path) -> dict:
+    """
+    Overrides cfg["experiment"]["image_experiment_group_map"] and
+    cfg["paths"]["masked_roi_dir"] with sample metadata read from a
+    samplesheet CSV (columns: sample_id, image_path, group), instead of
+    the hand-written values in the YAML. Everything else in cfg (all
+    pipeline parameters -- thresholds, which steps run, marker panel,
+    etc.) is untouched.
+
+    This keeps the pipeline's existing single-batched-call design (Q10):
+    it does not change how many times the pipeline runs, only where the
+    sample list comes from. segmentation.py still walks ONE masked_roi_dir
+    and picks up each sample's folder name -- so every image_path in the
+    samplesheet must share the same parent directory. If your samples
+    do not share one parent, this override does not apply cleanly -- run
+    without --samplesheet and use the YAML's own image_experiment_group_map
+    instead, or extend this function, rather than relying on it silently.
+    """
+    if not samplesheet_path.exists():
+        print(f"ERROR: samplesheet not found: {samplesheet_path}", file=sys.stderr)
+        sys.exit(2)
+
+    rows = []
+    with open(samplesheet_path, newline="") as fh:
+        reader = csv.DictReader(fh)
+        missing = {"sample_id", "image_path", "group"} - set(reader.fieldnames or [])
+        if missing:
+            print(
+                f"ERROR: {samplesheet_path} is missing required column(s): {sorted(missing)}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        for row in reader:
+            rows.append(row)
+
+    if not rows:
+        print(f"ERROR: {samplesheet_path} has no sample rows.", file=sys.stderr)
+        sys.exit(2)
+
+    parents = {str(Path(r["image_path"]).parent) for r in rows}
+    if len(parents) != 1:
+        print(
+            "ERROR: samplesheet rows must share one parent directory "
+            "(segmentation.py walks a single masked_roi_dir) -- found "
+            f"{len(parents)} distinct parents: {sorted(parents)}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    masked_roi_dir = parents.pop()
+    group_map = {r["sample_id"]: r["group"] for r in rows}
+
+    cfg.setdefault("experiment", {})["image_experiment_group_map"] = group_map
+    cfg.setdefault("paths", {})["masked_roi_dir"] = masked_roi_dir
+
+    print(f"Samplesheet : {samplesheet_path} ({len(rows)} samples) -- overrides "
+          f"experiment.image_experiment_group_map and paths.masked_roi_dir from --config")
+    for r in rows:
+        print(f"  {r['sample_id']:14s} group={r['group']:4s} path={r['image_path']}")
+
+    return cfg
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -184,6 +252,18 @@ def main():
         "--config", "-c",
         required=True,
         help="Path to experiment YAML config file",
+    )
+    parser.add_argument(
+        "--samplesheet",
+        default=None,
+        help=(
+            "Optional samplesheet CSV (sample_id,image_path,group). When given, "
+            "overrides experiment.image_experiment_group_map and "
+            "paths.masked_roi_dir from --config with the samplesheet's contents "
+            "-- everything else in --config (thresholds, steps, marker panel, "
+            "etc.) is used unchanged. Omit this flag to run exactly as before "
+            "(sample metadata read from --config as it always has been)."
+        ),
     )
     parser.add_argument(
         "--steps",
@@ -223,6 +303,9 @@ def main():
     except yaml.YAMLError as exc:
         print(f"ERROR: invalid YAML in {config_path}:\n{exc}", file=sys.stderr)
         sys.exit(2)
+
+    if args.samplesheet:
+        cfg = _apply_samplesheet(cfg, Path(args.samplesheet))
 
     exp_name = cfg.get("experiment", {}).get("name", config_path.stem)
 

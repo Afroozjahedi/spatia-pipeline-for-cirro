@@ -1,0 +1,5 @@
+sample_id,image_path,group
+TMA_A,/rsrch6/home/trans_mol_path/ajahedi/SPATIA pipeline paper/data/TMA_A,CLR
+TMA_B,/rsrch6/home/trans_mol_path/ajahedi/SPATIA pipeline paper/data/TMA_B,CLR
+DII_TMA_A,/rsrch6/home/trans_mol_path/ajahedi/SPATIA pipeline paper/data/DII_TMA_A,DII
+DII_TMA_B,/rsrch6/home/trans_mol_path/ajahedi/SPATIA pipeline paper/data/DII_TMA_B,DII

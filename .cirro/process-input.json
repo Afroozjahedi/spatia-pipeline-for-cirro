@@ -1,6 +1,7 @@
 {
-  "_comment": "DRAFT — maps process-form.json fields to Nextflow --params. Matches main.nf's single params.config input (Q10: one black-box process).",
+  "_comment": "UPDATED 2026-09-24 -- maps both process-form.json fields to Nextflow --params. Matches main.nf's two-input single process (Q10: still one black-box process, now fed a samplesheet + a params file instead of one combined YAML).",
   "params": {
-    "config": "{{ form.config_file }}"
+    "config": "{{ form.config_file }}",
+    "samplesheet": "{{ form.samplesheet }}"
   }
 }

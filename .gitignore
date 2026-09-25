@@ -19,6 +19,7 @@
 !spatia/*.yaml
 
 !run_pipeline.py
+!derive_samplesheet.py
 
 # Dataset-agnostic prep script for survival.py's image_patient_map (TMA cohorts)
 !build_image_patient_map.py
@@ -38,6 +39,10 @@
 
 !experiments/
 !experiments/*.yaml
+!experiments/*.csv
+!.github/
+!.github/workflows/
+!.github/workflows/*.yml
 
 # Docs for the core pipeline steps only (not ui/, run_agentic.py's agentic
 # layer, or validation.py — those aren't tracked in this whitelist repo).
