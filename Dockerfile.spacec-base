@@ -4,8 +4,8 @@
 #
 # Written 2026-07-29 (Q24), after Afrouz confirmed she already has a
 # working container at:
-#   ghcr.io/break-through-cancer/btc-spatial-proteomics/spacec
-# (https://github.com/break-through-cancer/btc-spatial-proteomics/pkgs/container/spacec)
+#   ghcr.io/break-through-cancer/spacec
+# (https://github.com/break-through-cancer/spacec/pkgs/container/spacec)
 #
 # WHY THIS FILE EXISTS ALONGSIDE ./Dockerfile
 # --------------------------------------------
@@ -37,14 +37,14 @@
 #     confirmed either way from here)
 #
 # Before trusting this file: `docker run --rm -it
-# ghcr.io/break-through-cancer/btc-spatial-proteomics/spacec:latest bash`
+# ghcr.io/break-through-cancer/spacec:cpu bash`
 # and check `which python`, `python --version`, `pip list | grep -i spacec`,
 # and whether a conda env needs activating — then adjust the lines below
 # to match what you actually find, particularly the ENV PATH line near the
 # bottom if this turns out to be a conda-based image like ./Dockerfile's.
 # ============================================================
 
-FROM ghcr.io/break-through-cancer/btc-spatial-proteomics/spacec:latest
+FROM ghcr.io/break-through-cancer/spacec:cpu
 
 WORKDIR /app
 

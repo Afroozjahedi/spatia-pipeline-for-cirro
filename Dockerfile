@@ -99,7 +99,7 @@ ENTRYPOINT ["python", "run_pipeline.py"]
 # flagging honestly rather than claiming it's verified.
 #
 # 2026-07-29 (Q24): Afrouz confirmed she already has a real spacec
-# container (ghcr.io/break-through-cancer/btc-spatial-proteomics/spacec)
+# container (ghcr.io/break-through-cancer/spacec)
 # rather than needing this from-scratch conda/pip build. See
 # Dockerfile.spacec-base in this same directory for an alternate version
 # that builds FROM that image instead of continuumio/miniconda3 — lower

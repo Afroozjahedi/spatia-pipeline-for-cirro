@@ -1,7 +1,7 @@
 # build-spatia-image.yml — added 2026-09-25 for the Cirro/Summit deadline push.
 #
 # Builds Dockerfile.spacec-base (SPATIA layered on top of Dylan's spacec
-# container, ghcr.io/break-through-cancer/btc-spatial-proteomics/spacec)
+# container, ghcr.io/break-through-cancer/spacec)
 # and pushes the result to ghcr.io under THIS repo -- no AWS credentials
 # needed for this step. Manual trigger only (workflow_dispatch), on
 # purpose: Dockerfile.spacec-base has never been built anywhere, so the
