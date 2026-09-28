@@ -1,4 +1,4 @@
 {
-  "config": "{{ form.config_file }}",
-  "samplesheet": "{{ form.samplesheet }}"
+  "config": "$.dataset.params.config_file",
+  "samplesheet": "$.dataset.params.samplesheet"
 }
