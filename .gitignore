@@ -92,3 +92,4 @@
 !.cirro/
 !.cirro/*.json
 !.cirro/*.config
+!.cirro/*.py

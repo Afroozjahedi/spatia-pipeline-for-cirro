@@ -1,4 +1,6 @@
 {
-  "config": "$.dataset.params.config_file",
-  "samplesheet": "$.dataset.params.samplesheet"
+  "config": "$.dataset.s3|/config/pipeline_params.yaml",
+  "samplesheet": "$.dataset.s3|/config/samplesheet.csv",
+  "config_file_upload": "$.dataset.params.config_file",
+  "samplesheet_upload": "$.dataset.params.samplesheet"
 }
