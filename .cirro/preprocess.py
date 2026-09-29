@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Decode the SPATIA params YAML and samplesheet CSV that Cirro embeds as
-inline base64 data URIs, and write them to this dataset's own config/
-folder as real files.
+Decode the SPATIA pipeline-params YAML that Cirro embeds as an inline
+base64 data URI, and write it to this dataset's own config/ folder as a
+real file.
 
 Why this exists (found 2026-09-28 by comparing a run's actual debug log
-against process-input.json): process-form.json's two fields use
+against process-input.json): process-form.json's "config_file" field uses
 "format": "file" (direct browser upload). Cirro renders a "format": "file"
 form value into process-input.json as an inline base64 data URI --
   data:application/x-yaml;name=crc_tma_full_pipeline.params.yaml;base64,....
@@ -23,19 +23,20 @@ before Nextflow launches -- our logs show "RUNNING PREPROCESS" every run,
 just "Skipping preprocess script" since we didn't have one) reads the raw
 form value from ds.params, and writes the real content to a FIXED S3
 location that process-input.json maps separately via the
-"$.dataset.s3|/config/..." convention -- e.g. sopa writes its derived
-samplesheet to ds.params["input"], which process-input.json maps to
-"$.dataset.s3|/config/manifest.csv". main.nf then reads that fixed,
+"$.dataset.s3|/config/..." convention. main.nf then reads that fixed,
 already-resolved S3 URI via Channel.fromPath(), which Nextflow can
 actually stage.
 
-This script does the same thing for our two uploads:
-  config_file_upload / samplesheet_upload  (raw data URIs, from the form)
-  -> decoded and written to ->
-  config / samplesheet  (fixed S3 paths process-input.json already points
-                          main.nf's params.config / params.samplesheet at)
-
-Then the raw upload params are removed so Nextflow never sees the data URIs.
+UPDATED 2026-09-29 -- samplesheet handling REMOVED from this script.
+Per Cirro admin (Dima), the samplesheet no longer comes through the
+run-launch form at all: it now lives on the dataset itself, uploaded via
+Cirro's native "Upload Samplesheet" feature. That native upload is a real
+file at a real S3 path from the start -- it never becomes a data URI, so
+there is nothing for this script to decode for it. process-input.json
+reads it directly via a fixed "$.dataset.s3|/samplesheet.csv" mapping.
+This script now only exists for config_file, which is still a raw
+"format": "file" browser upload and still needs the decode-and-relocate
+treatment described above.
 """
 import base64
 
@@ -66,16 +67,10 @@ if __name__ == "__main__":
     ds = PreprocessDataset.from_running()
 
     config_bytes = decode_data_uri(ds.params["config_file_upload"])
-    samplesheet_bytes = decode_data_uri(ds.params["samplesheet_upload"])
-
     write_to_s3(config_bytes, ds.params["config"])
-    write_to_s3(samplesheet_bytes, ds.params["samplesheet"])
-
     ds.logger.info(f"Wrote decoded config file to {ds.params['config']}")
-    ds.logger.info(f"Wrote decoded samplesheet to {ds.params['samplesheet']}")
 
-    # Raw uploads only exist to carry the data URIs into this script --
-    # remove them so Nextflow's params never contain the huge blobs
+    # Raw upload param only exists to carry the data URI into this script --
+    # remove it so Nextflow's params never contain the huge blob
     # (mirrors sopa's own cleanup of its spatial_data/image_file params).
     ds.remove_param("config_file_upload", force=True)
-    ds.remove_param("samplesheet_upload", force=True)

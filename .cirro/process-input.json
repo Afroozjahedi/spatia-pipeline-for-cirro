@@ -1,6 +1,6 @@
 {
+  "_comment": "UPDATED 2026-09-29. 'samplesheet' now points at the native per-dataset samplesheet Cirro stores when you use the dataset's own 'Upload Samplesheet' feature (Dima's suggestion) -- NOT at a form upload anymore. ASSUMPTION (unconfirmed against Cirro internals, ~75% confidence, based on the Files panel showing samplesheet.csv sitting at the dataset's top level): the file lands at the dataset's own S3 root as /samplesheet.csv. If a run fails trying to read this path, open the dataset's 'Workflow Parameters' or 'Files' panel, confirm the real relative path/filename Cirro used, and update this line to match -- do not guess again, check the evidence.",
   "config": "$.dataset.s3|/config/pipeline_params.yaml",
-  "samplesheet": "$.dataset.s3|/config/samplesheet.csv",
-  "config_file_upload": "$.dataset.params.config_file",
-  "samplesheet_upload": "$.dataset.params.samplesheet"
+  "samplesheet": "$.dataset.s3|/samplesheet.csv",
+  "config_file_upload": "$.dataset.params.config_file"
 }

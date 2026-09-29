@@ -1,21 +1,15 @@
 {
-  "_comment": "UPDATED 2026-09-24 -- now takes TWO uploads: the samplesheet (sample metadata, changes per dataset) and the params config (pipeline settings, stable across datasets/reused per pipeline version). Still NOT deciding which individual SPATIA parameters (conditions, marker thresholds, triad radius, etc.) should be exposed as separate form fields vs. bundled into config_file -- that remains a UX call for Afrouz (operating rule 1), unchanged from the original draft note.",
+  "_comment": "UPDATED 2026-09-29 -- samplesheet removed from this form. Per Cirro admin (Dima): the samplesheet now lives on the DATASET itself via Cirro's native \"Upload Samplesheet\" feature (see the Samples/Datasets docs), not as a per-run browser upload here. process-input.json now reads it straight from the dataset's own S3 prefix instead of decoding an uploaded blob. This form now carries only the pipeline params YAML, which still goes through preprocess.py's data-URI decode step (see .cirro/preprocess.py) since it is still a raw browser upload, not a native Cirro object.",
   "form": {
     "type": "object",
     "properties": {
-      "samplesheet": {
-        "type": "string",
-        "format": "file",
-        "title": "Samplesheet (.csv)",
-        "description": "sample_id,image_path,group -- one row per sample. Generated from an existing experiment YAML via derive_samplesheet.py, or written by hand for a new dataset."
-      },
       "config_file": {
         "type": "string",
         "format": "file",
         "title": "SPATIA pipeline params (.yaml)",
-        "description": "Pipeline parameters only -- thresholds, which steps run, marker panel, etc. No sample paths or metadata (those come from the samplesheet above)."
+        "description": "Pipeline parameters only -- thresholds, which steps run, marker panel, etc. No sample paths or metadata (those come from the dataset's own samplesheet, uploaded via Cirro's native Samples/Upload Samplesheet feature)."
       }
     },
-    "required": ["samplesheet", "config_file"]
+    "required": ["config_file"]
   }
 }
