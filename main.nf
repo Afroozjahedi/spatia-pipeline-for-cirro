@@ -48,7 +48,7 @@ nextflow.enable.dsl = 2
 params.config       = "experiments/crc_tma_full_pipeline.params.yaml"  // pipeline parameters only (no sample metadata)
 params.samplesheet  = "experiments/samplesheet.csv"                    // sample_id,image_path,group -- optional, see run_pipeline.py --help
 params.output_dir   = "results"                     // Nextflow-local publish dir
-params.container    = "spatia-pipeline:latest"      // image built from ./Dockerfile
+params.container    = params.container ?: "spatia-pipeline:latest"  // default for manual/local runs -- Cirro overrides this via process-compute.config's params.container (see 2026-09-30 fix: this used to be an unconditional assignment that silently stomped any container Cirro supplied)
 
 process run_spatia_pipeline {
     tag "${params.config}"
