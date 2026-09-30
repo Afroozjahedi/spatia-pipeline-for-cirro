@@ -1,0 +1,9 @@
+sample,file,group
+reg004_X01_Y01_Z09,data_cirro_sample/DII_TMA_A/reg004_X01_Y01_Z09.tif,DII
+reg003_X01_Y01_Z08,data_cirro_sample/DII_TMA_A/reg003_X01_Y01_Z08.tif,DII
+reg004_X01_Y01_Z07,data_cirro_sample/DII_TMA_B/reg004_X01_Y01_Z07.tif,DII
+reg003_X01_Y01_Z06,data_cirro_sample/DII_TMA_B/reg003_X01_Y01_Z06.tif,DII
+reg012_X01_Y01_Z09,data_cirro_sample/TMA_A/reg012_X01_Y01_Z09.tif,CLR
+reg011_X01_Y01_Z09,data_cirro_sample/TMA_A/reg011_X01_Y01_Z09.tif,CLR
+reg002_X01_Y01_Z07,data_cirro_sample/TMA_B/reg002_X01_Y01_Z07.tif,CLR
+reg001_X01_Y01_Z08,data_cirro_sample/TMA_B/reg001_X01_Y01_Z08.tif,CLR

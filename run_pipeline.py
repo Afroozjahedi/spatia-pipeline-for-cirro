@@ -40,6 +40,7 @@ Exit codes
 
 import argparse
 import csv
+import os
 import sys
 import time
 import traceback
@@ -258,17 +259,29 @@ def _apply_samplesheet(cfg: dict, samplesheet_path: Path) -> dict:
         print(f"ERROR: {samplesheet_path} has no sample rows.", file=sys.stderr)
         sys.exit(2)
 
+    # WIDENED 2026-09-30: this used to require every row's file to share the
+    # EXACT SAME immediate parent directory, which broke the moment a
+    # samplesheet covered more than one raw-data folder (e.g. TMA_A, TMA_B,
+    # DII_TMA_A, DII_TMA_B -- Afrouz's actual CRC TMA layout). That
+    # requirement was stricter than segmentation.py actually needs:
+    # segmentation.py's process_images() walks masked_roi_dir with os.walk()
+    # (recursive, any depth) and computes each file's own slide_id from its
+    # OWN immediate parent folder name (os.path.basename(os.path.dirname(
+    # input_file)), segmentation.py line 420) -- it never assumed every file
+    # sits directly in masked_roi_dir itself. So masked_roi_dir only needs to
+    # be a common ANCESTOR of every row's file, not their shared immediate
+    # parent. os.path.commonpath gives exactly that (and still equals the
+    # single shared parent in the common case of one folder, so this is a
+    # strict widening, not a behavior change for existing single-folder
+    # samplesheets).
     parents = {str(Path(r[file_col]).parent) for r in rows}
+    masked_roi_dir = os.path.commonpath([r[file_col] for r in rows])
     if len(parents) != 1:
         print(
-            "ERROR: samplesheet rows must share one parent directory "
-            "(segmentation.py walks a single masked_roi_dir) -- found "
-            f"{len(parents)} distinct parents: {sorted(parents)}",
-            file=sys.stderr,
+            f"Samplesheet rows span {len(parents)} folders {sorted(parents)} -- "
+            f"using their common ancestor '{masked_roi_dir}' as masked_roi_dir "
+            "(segmentation.py walks it recursively, so this is fine)."
         )
-        sys.exit(2)
-
-    masked_roi_dir = parents.pop()
     group_map = {r[sample_col]: r["group"] for r in rows}
 
     cfg.setdefault("experiment", {})["image_experiment_group_map"] = group_map
