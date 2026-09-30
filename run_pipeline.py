@@ -222,6 +222,35 @@ def _resolve_samplesheet_columns(fieldnames: list) -> tuple:
     return sample_col, file_col
 
 
+def _common_dir(paths: list) -> str:
+    """
+    Return the common ancestor directory of a list of file paths.
+
+    Deliberately does NOT use os.path.commonpath or pathlib.Path: both
+    treat consecutive slashes as redundant and collapse them, which turns
+    's3://bucket/a/b.tif' into 's3:/bucket/a/b.tif' (single slash) -- not a
+    valid S3 URI, and the exact bug that broke the 2026-09-30 run (masked_roi_dir
+    resolved to 's3:/...', segmentation.py's S3FileSystem then couldn't find
+    it). Plain string-splitting on '/' preserves the empty component between
+    the two slashes after 's3:', so it round-trips correctly for both S3 URIs
+    and ordinary POSIX paths.
+    """
+    def _dirname(path: str) -> str:
+        idx = path.rfind("/")
+        return path[:idx] if idx >= 0 else path
+
+    split = [_dirname(p).split("/") for p in paths]
+    common = []
+    for parts in zip(*split):
+        if len(set(parts)) == 1:
+            common.append(parts[0])
+        else:
+            break
+    if not common:
+        raise ValueError(f"No common directory among: {paths}")
+    return "/".join(common)
+
+
 def _apply_samplesheet(cfg: dict, samplesheet_path: Path) -> dict:
     """
     Overrides cfg["experiment"]["image_experiment_group_map"] and
@@ -270,12 +299,19 @@ def _apply_samplesheet(cfg: dict, samplesheet_path: Path) -> dict:
     # input_file)), segmentation.py line 420) -- it never assumed every file
     # sits directly in masked_roi_dir itself. So masked_roi_dir only needs to
     # be a common ANCESTOR of every row's file, not their shared immediate
-    # parent. os.path.commonpath gives exactly that (and still equals the
-    # single shared parent in the common case of one folder, so this is a
-    # strict widening, not a behavior change for existing single-folder
-    # samplesheets).
-    parents = {str(Path(r[file_col]).parent) for r in rows}
-    masked_roi_dir = os.path.commonpath([r[file_col] for r in rows])
+    # parent.
+    #
+    # FIXED 2026-09-30 (same day, real run failure): the first version of
+    # this used os.path.commonpath(), which collapsed 's3://bucket/...'
+    # down to 's3:/bucket/...' (single slash) -- an invalid S3 URI that
+    # made segmentation.py 404 with "masked_roi_dir not found" on the very
+    # next real Cirro run. Use the S3-safe _common_dir() helper above
+    # instead (still equals the single shared parent in the common case of
+    # one folder, so this remains a strict widening, not a behavior change,
+    # for existing single-folder samplesheets).
+    file_paths = [r[file_col] for r in rows]
+    masked_roi_dir = _common_dir(file_paths)
+    parents = {_common_dir([p]) for p in file_paths}
     if len(parents) != 1:
         print(
             f"Samplesheet rows span {len(parents)} folders {sorted(parents)} -- "
