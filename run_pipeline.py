@@ -175,20 +175,70 @@ def _step_enabled_in_config(step: str, cfg: dict) -> bool:
 # SAMPLESHEET OVERRIDE — optional, added 2026-09-24 for Cirro packaging
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Column-name aliases accepted in a samplesheet CSV. Cirro's own native
+# samplesheet convention (confirmed 2026-09-30 against a real samplesheet
+# Afrouz uploaded through Cirro's "Samples" feature) is sample,file,group --
+# NOT the sample_id,image_path,group names this function originally required
+# (those were this repo's own invented names, written before we'd seen what
+# Cirro actually produces). Both are accepted below so nothing that already
+# depends on the old names breaks; SAMPLE_COL/FILE_COL below is the
+# preferred/canonical pair going forward -- see derive_samplesheet.py, which
+# now writes sample,file,group directly.
+_SAMPLE_COL_ALIASES = ("sample", "sample_id")
+_FILE_COL_ALIASES = ("file", "image_path")
+
+
+def _resolve_samplesheet_columns(fieldnames: list) -> tuple:
+    """
+    Picks whichever alias of the sample-id and file-path columns is present
+    in this CSV's actual header, preferring Cirro's own names (sample, file)
+    over this repo's older names (sample_id, image_path) when a file somehow
+    has both. Returns (sample_col, file_col). Raises via sys.exit(2) with a
+    clear message listing both accepted spellings if neither alias for a
+    required column is present, or if "group" itself is missing.
+    """
+    fieldset = set(fieldnames or [])
+
+    sample_col = next((c for c in _SAMPLE_COL_ALIASES if c in fieldset), None)
+    file_col = next((c for c in _FILE_COL_ALIASES if c in fieldset), None)
+    missing = []
+    if sample_col is None:
+        missing.append("/".join(_SAMPLE_COL_ALIASES))
+    if file_col is None:
+        missing.append("/".join(_FILE_COL_ALIASES))
+    if "group" not in fieldset:
+        missing.append("group")
+
+    if missing:
+        print(
+            f"ERROR: samplesheet is missing required column(s): {missing} "
+            f"(sample id column accepts either {_SAMPLE_COL_ALIASES}, "
+            f"file/path column accepts either {_FILE_COL_ALIASES})",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    return sample_col, file_col
+
+
 def _apply_samplesheet(cfg: dict, samplesheet_path: Path) -> dict:
     """
     Overrides cfg["experiment"]["image_experiment_group_map"] and
     cfg["paths"]["masked_roi_dir"] with sample metadata read from a
-    samplesheet CSV (columns: sample_id, image_path, group), instead of
-    the hand-written values in the YAML. Everything else in cfg (all
-    pipeline parameters -- thresholds, which steps run, marker panel,
-    etc.) is untouched.
+    samplesheet CSV, instead of the hand-written values in the YAML.
+    Everything else in cfg (all pipeline parameters -- thresholds, which
+    steps run, marker panel, etc.) is untouched.
+
+    Column names: accepts either Cirro's own convention (sample, file,
+    group) or this repo's earlier names (sample_id, image_path, group) --
+    see _resolve_samplesheet_columns. Whichever pair is present in the
+    actual CSV header is used; you do not need to pick one.
 
     This keeps the pipeline's existing single-batched-call design (Q10):
     it does not change how many times the pipeline runs, only where the
     sample list comes from. segmentation.py still walks ONE masked_roi_dir
-    and picks up each sample's folder name -- so every image_path in the
-    samplesheet must share the same parent directory. If your samples
+    and picks up each sample's folder name -- so every file/image_path in
+    the samplesheet must share the same parent directory. If your samples
     do not share one parent, this override does not apply cleanly -- run
     without --samplesheet and use the YAML's own image_experiment_group_map
     instead, or extend this function, rather than relying on it silently.
@@ -200,13 +250,7 @@ def _apply_samplesheet(cfg: dict, samplesheet_path: Path) -> dict:
     rows = []
     with open(samplesheet_path, newline="") as fh:
         reader = csv.DictReader(fh)
-        missing = {"sample_id", "image_path", "group"} - set(reader.fieldnames or [])
-        if missing:
-            print(
-                f"ERROR: {samplesheet_path} is missing required column(s): {sorted(missing)}",
-                file=sys.stderr,
-            )
-            sys.exit(2)
+        sample_col, file_col = _resolve_samplesheet_columns(reader.fieldnames)
         for row in reader:
             rows.append(row)
 
@@ -214,7 +258,7 @@ def _apply_samplesheet(cfg: dict, samplesheet_path: Path) -> dict:
         print(f"ERROR: {samplesheet_path} has no sample rows.", file=sys.stderr)
         sys.exit(2)
 
-    parents = {str(Path(r["image_path"]).parent) for r in rows}
+    parents = {str(Path(r[file_col]).parent) for r in rows}
     if len(parents) != 1:
         print(
             "ERROR: samplesheet rows must share one parent directory "
@@ -225,15 +269,16 @@ def _apply_samplesheet(cfg: dict, samplesheet_path: Path) -> dict:
         sys.exit(2)
 
     masked_roi_dir = parents.pop()
-    group_map = {r["sample_id"]: r["group"] for r in rows}
+    group_map = {r[sample_col]: r["group"] for r in rows}
 
     cfg.setdefault("experiment", {})["image_experiment_group_map"] = group_map
     cfg.setdefault("paths", {})["masked_roi_dir"] = masked_roi_dir
 
-    print(f"Samplesheet : {samplesheet_path} ({len(rows)} samples) -- overrides "
+    print(f"Samplesheet : {samplesheet_path} ({len(rows)} samples, columns "
+          f"'{sample_col}'/'{file_col}'/'group') -- overrides "
           f"experiment.image_experiment_group_map and paths.masked_roi_dir from --config")
     for r in rows:
-        print(f"  {r['sample_id']:14s} group={r['group']:4s} path={r['image_path']}")
+        print(f"  {r[sample_col]:14s} group={r['group']:4s} path={r[file_col]}")
 
     return cfg
 
@@ -257,7 +302,8 @@ def main():
         "--samplesheet",
         default=None,
         help=(
-            "Optional samplesheet CSV (sample_id,image_path,group). When given, "
+            "Optional samplesheet CSV (columns: sample or sample_id, file or "
+            "image_path, group). When given, "
             "overrides experiment.image_experiment_group_map and "
             "paths.masked_roi_dir from --config with the samplesheet's contents "
             "-- everything else in --config (thresholds, steps, marker panel, "

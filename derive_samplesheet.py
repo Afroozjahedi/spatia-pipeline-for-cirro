@@ -63,14 +63,14 @@ def load_sample_rows(config_path: Path):
     rows = []
     for folder, group in group_map.items():
         image_path = f"{masked_roi_dir.rstrip('/')}/{folder}"
-        rows.append({"sample_id": folder, "image_path": image_path, "group": group})
+        rows.append({"sample": folder, "file": image_path, "group": group})
     return rows
 
 
 def write_samplesheet(rows, out_path: Path):
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["sample_id", "image_path", "group"])
+        writer = csv.DictWriter(f, fieldnames=["sample", "file", "group"])
         writer.writeheader()
         writer.writerows(rows)
 
@@ -97,7 +97,7 @@ def write_params_file(config_path: Path, out_path: Path):
         if re.match(r"^\s*image_experiment_group_map:\s*$", stripped):
             in_group_map_block = True
             out_lines.append(
-                "  # image_experiment_group_map: -- MOVED to samplesheet CSV (sample_id/group columns)\n"
+                "  # image_experiment_group_map: -- MOVED to samplesheet CSV (sample/group columns)\n"
             )
             continue
         if in_group_map_block:
@@ -111,7 +111,7 @@ def write_params_file(config_path: Path, out_path: Path):
 
         if re.match(r'^\s*(raw_image_dir|masked_roi_dir):\s*".*"\s*$', stripped):
             out_lines.append(
-                f"  # {stripped.strip()}  -- MOVED to samplesheet CSV (image_path column)\n"
+                f"  # {stripped.strip()}  -- MOVED to samplesheet CSV (file column)\n"
             )
             continue
 
@@ -135,7 +135,7 @@ def main():
     print(f"Wrote {len(rows)} sample rows to {args.samplesheet_out}")
     print(f"Wrote params file (sample metadata commented out) to {args.params_out}")
     for r in rows:
-        print(f"  {r['sample_id']:14s} group={r['group']:4s} path={r['image_path']}")
+        print(f"  {r['sample']:14s} group={r['group']:4s} path={r['file']}")
 
 
 if __name__ == "__main__":
