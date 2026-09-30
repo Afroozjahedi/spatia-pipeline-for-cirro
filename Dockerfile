@@ -85,7 +85,18 @@ COPY cell_type_definitions/ ./cell_type_definitions/
 # callers to know about `conda run`.
 ENV PATH=/opt/conda/envs/spatia/bin:$PATH
 
-ENTRYPOINT ["python", "run_pipeline.py"]
+# REMOVED 2026-09-30: this ENTRYPOINT broke every Cirro/Nextflow/AWS Batch
+# run. Nextflow hands the container its own wrapper command
+# (bash -o pipefail -c "...") -- with ENTRYPOINT hardcoded to
+# ["python","run_pipeline.py"], Docker appends that wrapper as ARGUMENTS to
+# it instead of replacing it, so run_pipeline.py actually received
+# `bash -o pipefail -c ...` as argv and failed with "unrecognized
+# arguments: bash -o pipefail" (confirmed directly against a real failed
+# run, PW_DATASET=3a40ae70, 2026-09-30). main.nf already spells out the
+# full `python /app/run_pipeline.py --config ... --samplesheet ...`
+# command itself, so Nextflow-driven runs never needed this entrypoint.
+# Tradeoff: manual `docker run <image> --config ...` no longer works --
+# use `docker run <image> python run_pipeline.py --config ...` instead.
 
 # ============================================================
 # Build/verification status (2026-07-21, updated 2026-07-29): written and
