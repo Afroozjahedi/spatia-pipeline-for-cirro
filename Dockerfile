@@ -58,7 +58,7 @@ RUN conda install -y -c conda-forge llvmlite numba \
 # setup_local_env.sh; Afrouz has since said that script was never actually
 # validated, so that guidance is corrected here now that a real source
 # exists.)
-RUN pip install --no-cache-dir spacec==0.0.10 lifelines kneed seaborn pyyaml
+RUN pip install --no-cache-dir spacec==0.0.10 lifelines kneed seaborn pyyaml boto3
 
 # ---- scanpy (added 2026-07-29, Q24) ----
 # spatia.analysis.cell_typing.run_cell_typing() raises ImportError immediately

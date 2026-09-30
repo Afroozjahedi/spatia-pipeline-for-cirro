@@ -222,6 +222,86 @@ def _resolve_samplesheet_columns(fieldnames: list) -> tuple:
     return sample_col, file_col
 
 
+def _dirname(path: str) -> str:
+    """
+    Like os.path.dirname, but plain string-splitting -- never normalizes
+    consecutive slashes, so it round-trips 's3://bucket/...' correctly
+    (see _common_dir's docstring for why that distinction matters here).
+    """
+    idx = path.rfind("/")
+    return path[:idx] if idx >= 0 else path
+
+
+def _basename(path: str) -> str:
+    """Like os.path.basename, same plain-string-splitting reasoning as _dirname."""
+    idx = path.rfind("/")
+    return path[idx + 1:] if idx >= 0 else path
+
+
+def _parse_s3_uri(uri: str) -> tuple:
+    """Parse 's3://bucket/key/parts...' into (bucket, key)."""
+    if not uri.startswith("s3://"):
+        raise ValueError(f"Not an s3:// URI: {uri!r}")
+    bucket, _, key = uri[len("s3://"):].partition("/")
+    if not bucket or not key:
+        raise ValueError(f"Malformed s3:// URI (missing bucket or key): {uri!r}")
+    return bucket, key
+
+
+def _stage_s3_files(rows: list, file_col: str, stage_dir: Path) -> None:
+    """
+    Download each row's file to local disk if it's an s3:// URI, and
+    rewrite row[file_col] to the local path IN PLACE. Rows whose file is
+    already a local path are left untouched (no-op), so this is safe to
+    call unconditionally.
+
+    ADDED 2026-09-30, after the S3-path-mangling fix (_common_dir) revealed
+    the next real problem: segmentation.py (os.path.isdir/os.walk/
+    tifffile.imread -- grep-confirmed, no boto3/s3fs/fsspec anywhere in
+    that file) was written entirely for a local/HPC filesystem. It cannot
+    read s3:// paths at all -- os.path.isdir("s3://...") is always False
+    regardless of whether the object exists, which is exactly why a
+    syntactically-correct S3 masked_roi_dir still 404'd. Rather than make
+    segmentation.py S3-aware (touches Afrouz's already-validated HPC
+    pipeline, higher risk this close to the Summit deadline), this stages
+    files locally before segmentation.py ever runs, so it keeps seeing
+    exactly the kind of local paths it already knows how to handle.
+
+    Each file is placed under stage_dir/<its own immediate parent folder
+    name>/<filename> -- e.g. .../DII_TMA_B/reg003_X01_Y01_Z06.tif --
+    because segmentation.py derives slide_id from a file's own immediate
+    parent folder name (os.path.basename(os.path.dirname(input_file)),
+    segmentation.py line 420), so preserving that one folder level after
+    download is required for correctness, not just tidiness. Skips the
+    actual download if the local file already exists (re-running against
+    the same staged files, e.g. with -resume, doesn't re-download).
+    """
+    import boto3
+    s3 = None  # created lazily -- only if there's actually an s3:// row
+    to_stage = [r for r in rows if r[file_col].startswith("s3://")]
+    if not to_stage:
+        return
+    print(f"Staging {len(to_stage)} file(s) from S3 to local disk (segmentation.py needs local paths)...")
+    for row in to_stage:
+        uri = row[file_col]
+        bucket, key = _parse_s3_uri(uri)
+        parent_name = _basename(_dirname(key)) or "_root"
+        filename = _basename(key)
+        local_dir = stage_dir / parent_name
+        local_dir.mkdir(parents=True, exist_ok=True)
+        local_path = local_dir / filename
+        if not local_path.exists():
+            if s3 is None:
+                s3 = boto3.client("s3")
+            t0 = time.time()
+            s3.download_file(bucket, key, str(local_path))
+            size_mb = local_path.stat().st_size / (1024 * 1024)
+            print(f"  {uri} -> {local_path} ({size_mb:.1f} MB, {time.time() - t0:.1f}s)")
+        else:
+            print(f"  {local_path} already staged, skipping download")
+        row[file_col] = str(local_path)
+
+
 def _common_dir(paths: list) -> str:
     """
     Return the common ancestor directory of a list of file paths.
@@ -235,10 +315,6 @@ def _common_dir(paths: list) -> str:
     the two slashes after 's3:', so it round-trips correctly for both S3 URIs
     and ordinary POSIX paths.
     """
-    def _dirname(path: str) -> str:
-        idx = path.rfind("/")
-        return path[:idx] if idx >= 0 else path
-
     split = [_dirname(p).split("/") for p in paths]
     common = []
     for parts in zip(*split):
@@ -272,6 +348,11 @@ def _apply_samplesheet(cfg: dict, samplesheet_path: Path) -> dict:
     do not share one parent, this override does not apply cleanly -- run
     without --samplesheet and use the YAML's own image_experiment_group_map
     instead, or extend this function, rather than relying on it silently.
+
+    ADDED 2026-09-30: if a row's file is an s3:// URI (as Cirro's own
+    resolved file listing gives us), it's downloaded to local disk first
+    (see _stage_s3_files) -- segmentation.py can only read local paths.
+    Ordinary local paths pass through untouched.
     """
     if not samplesheet_path.exists():
         print(f"ERROR: samplesheet not found: {samplesheet_path}", file=sys.stderr)
@@ -287,6 +368,8 @@ def _apply_samplesheet(cfg: dict, samplesheet_path: Path) -> dict:
     if not rows:
         print(f"ERROR: {samplesheet_path} has no sample rows.", file=sys.stderr)
         sys.exit(2)
+
+    _stage_s3_files(rows, file_col, samplesheet_path.parent / "_staged_s3_images")
 
     # WIDENED 2026-09-30: this used to require every row's file to share the
     # EXACT SAME immediate parent directory, which broke the moment a

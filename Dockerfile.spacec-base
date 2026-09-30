@@ -61,7 +61,12 @@ RUN echo "$GIT_SHA" > /app/.image_git_sha
 # ---- pipeline-level deps not expected to already be in the spacec image ----
 # (spacec itself is assumed already installed and working in this base image;
 # these are SPATIA's own additions on top of it)
-RUN pip install --no-cache-dir lifelines kneed seaborn pyyaml scanpy
+# boto3 added 2026-09-30: run_pipeline.py's _stage_s3_files now downloads
+# raw images from S3 before segmentation.py runs (segmentation.py itself
+# has no S3 awareness -- see _stage_s3_files' docstring in run_pipeline.py
+# for the full reasoning). Not a transitive dependency of anything else
+# installed here -- confirmed by grep, not assumed.
+RUN pip install --no-cache-dir lifelines kneed seaborn pyyaml scanpy boto3
 
 # ---- SPATIA package itself ----
 COPY pyproject.toml ./
