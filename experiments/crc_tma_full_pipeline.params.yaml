@@ -145,7 +145,7 @@ paths:
   # file is never in a fresh clone, and the path only resolved at all when
   # run_pipeline.py happened to be launched from the right directory. Absolute
   # path to where the panel actually lives on rsrch6.
-  channel_file: "experiments/crc_tma_full/channelNames.txt"  # FIXED 2026-09-30: was an rsrch6-only absolute path, which does not exist inside the Cirro/AWS Batch container (see commit for the real channelNames.txt this now resolves to)
+  channel_file: "/app/experiments/crc_tma_full/channelNames.txt"  # FIXED 2026-09-30b: repo-relative path only resolves when cwd==repo root; Nextflow runs run_pipeline.py from a /tmp scratch task dir, so os.path.exists() on the relative path was always False. Dockerfile COPYs experiments/ into /app/experiments/, so this absolute in-container path resolves regardless of cwd.
 
   # Segmentation writes here; preprocessing reads from here -- same directory,
   # no separate wiring needed. Moved to scratch (not home) to match this
