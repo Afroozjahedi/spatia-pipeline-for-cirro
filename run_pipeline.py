@@ -336,6 +336,50 @@ def _apply_samplesheet(cfg: dict, samplesheet_path: Path) -> dict:
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 
+IMAGE_GIT_SHA_FILE = Path("/app/.image_git_sha")
+
+
+def _check_image_freshness(expected_commit: str) -> None:
+    """
+    Fail fast if this container image predates the git commit Nextflow is
+    actually running -- added 2026-09-30 after two separate real runs
+    silently executed a stale run_pipeline.py baked into an old image
+    (COPY'd into the image at build time, unlike preprocess.py, which
+    Cirro re-downloads fresh every run -- see preprocess.py's own
+    docstring). Each one burned several minutes before failing deep inside
+    segmentation with an error that had nothing to do with the real
+    problem: the image was just out of date. This check turns that into
+    an immediate, unambiguous failure instead.
+
+    expected_commit comes from Nextflow's workflow.commitId (main.nf passes
+    it as --expected-commit); IMAGE_GIT_SHA_FILE is written at image build
+    time from the GIT_SHA build-arg (see Dockerfile.spacec-base and
+    .github/workflows/build-spatia-image.yml). Skipped entirely for a
+    local/manual run with no --expected-commit given.
+    """
+    if not expected_commit:
+        return
+    image_commit = (
+        IMAGE_GIT_SHA_FILE.read_text().strip()
+        if IMAGE_GIT_SHA_FILE.exists() else "unknown"
+    )
+    # Nextflow's commitId and github.sha are both full 40-char SHAs in
+    # practice, but compare with startswith() in both directions so a
+    # short SHA on either side still matches correctly.
+    if image_commit == "unknown" or not (
+        expected_commit.startswith(image_commit) or image_commit.startswith(expected_commit)
+    ):
+        print(
+            "ERROR: stale container image -- this image was built from git "
+            f"commit '{image_commit}', but Nextflow is running commit "
+            f"'{expected_commit}'. Rebuild it: GitHub -> Actions -> "
+            "'Build SPATIA Cirro image' -> Run workflow (on this branch), "
+            "then re-run.",
+            file=sys.stderr,
+        )
+        sys.exit(3)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="SPATIA pipeline orchestrator",
@@ -384,7 +428,20 @@ def main():
         action="store_true",
         help="Print the steps that would run without executing them.",
     )
+    parser.add_argument(
+        "--expected-commit",
+        default=None,
+        help=(
+            "Git commit this run_pipeline.py is expected to match (Nextflow's "
+            "workflow.commitId, passed by main.nf). If it doesn't match the "
+            "commit this container image was actually built from, fail "
+            "immediately instead of running against stale code. Omit for "
+            "local/manual runs."
+        ),
+    )
     args = parser.parse_args()
+
+    _check_image_freshness(args.expected_commit)
 
     # ── Load config ───────────────────────────────────────────────────────
     config_path = Path(args.config)

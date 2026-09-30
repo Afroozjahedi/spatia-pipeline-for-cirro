@@ -40,6 +40,8 @@ jobs:
           context: .
           file: ./Dockerfile.spacec-base
           push: true
+          build-args: |
+            GIT_SHA=${{ github.sha }}
           tags: |
             ghcr.io/afroozjahedi/spatia-pipeline:${{ github.sha }}
             ghcr.io/afroozjahedi/spatia-pipeline:latest

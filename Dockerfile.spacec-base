@@ -48,6 +48,16 @@ FROM ghcr.io/break-through-cancer/spacec:cpu
 
 WORKDIR /app
 
+# Bake in the git commit this image was built from, so run_pipeline.py can
+# refuse to run if Nextflow launches it against a newer commit than what's
+# actually in this image (see run_pipeline.py's _check_image_freshness,
+# added 2026-09-30 after two runs silently executed stale code this way).
+# Set by build-spatia-image.yml as --build-arg GIT_SHA=${{ github.sha }};
+# defaults to "unknown" for a manual `docker build` with no --build-arg,
+# which _check_image_freshness treats as a guaranteed mismatch on purpose.
+ARG GIT_SHA=unknown
+RUN echo "$GIT_SHA" > /app/.image_git_sha
+
 # ---- pipeline-level deps not expected to already be in the spacec image ----
 # (spacec itself is assumed already installed and working in this base image;
 # these are SPATIA's own additions on top of it)

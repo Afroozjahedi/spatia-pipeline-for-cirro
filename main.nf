@@ -66,8 +66,15 @@ process run_spatia_pipeline {
     path "logs/**",     emit: logs
 
     script:
+    // Added 2026-09-30: pass the git commit Nextflow actually checked out
+    // (workflow.commitId) into run_pipeline.py's --expected-commit, so it
+    // can refuse to run if the container image is older than this commit
+    // -- see run_pipeline.py's _check_image_freshness for why (two real
+    // runs silently executed stale baked-in code otherwise). Empty string
+    // for a run not launched from a git repo (workflow.commitId is null),
+    // which skips the check entirely.
     """
-    python /app/run_pipeline.py --config ${config_file} --samplesheet ${samplesheet_file}
+    python /app/run_pipeline.py --config ${config_file} --samplesheet ${samplesheet_file} --expected-commit ${workflow.commitId ?: ''}
     """
 }
 

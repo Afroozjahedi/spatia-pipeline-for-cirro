@@ -29,6 +29,12 @@ FROM continuumio/miniconda3:latest
 
 WORKDIR /app
 
+# Bake in the git commit this image was built from (see Dockerfile.spacec-base
+# for the full rationale -- this file isn't currently built by CI, but kept
+# in sync so it isn't a silent gap if that changes).
+ARG GIT_SHA=unknown
+RUN echo "$GIT_SHA" > /app/.image_git_sha
+
 # ---- system-level deps that setup_local_env.sh installs via conda ----
 # (graphviz/libvips/openslide are native libraries, not pip-installable)
 RUN conda create -y -n spatia python=3.9 graphviz libvips openslide -c conda-forge \
