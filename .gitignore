@@ -40,6 +40,16 @@
 !experiments/
 !experiments/*.yaml
 !experiments/*.csv
+
+# CRC TMA full pipeline's real channel/marker panel (added 2026-09-30).
+# Previously referenced as a repo-relative path ("data/crc_tma_full/
+# channelNames.txt") that was NEVER actually committed -- this whitelist
+# only covered *.yaml/*.csv under experiments/, not *.txt, so the file
+# silently never made it into git and the path was swapped to an rsrch6
+# absolute path as a workaround, which then broke on Cirro (no rsrch6
+# mount there). Committing the real file this time, explicitly.
+!experiments/crc_tma_full/
+!experiments/crc_tma_full/channelNames.txt
 !.github/
 !.github/workflows/
 !.github/workflows/*.yml

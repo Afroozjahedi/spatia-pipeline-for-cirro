@@ -137,7 +137,7 @@ paths:
   # file is never in a fresh clone, and the path only resolved at all when
   # run_pipeline.py happened to be launched from the right directory. Absolute
   # path to where the panel actually lives on rsrch6.
-  channel_file: "/rsrch6/home/trans_mol_path/ajahedi/SPATIA pipeline paper/data/crc_tma_full/channelNames.txt"
+  channel_file: "experiments/crc_tma_full/channelNames.txt"  # FIXED 2026-09-30: was an rsrch6-only absolute path, which does not exist inside the Cirro/AWS Batch container (see commit for the real channelNames.txt this now resolves to)
 
   # Segmentation writes here; preprocessing reads from here -- same directory,
   # no separate wiring needed. Moved to scratch (not home) to match this
