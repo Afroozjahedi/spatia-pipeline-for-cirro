@@ -76,6 +76,18 @@ COPY pyproject.toml ./
 COPY spatia/ ./spatia/
 COPY run_pipeline.py ./
 COPY pool_tissues_for_celltyping.py ./
+# FIXED 2026-10-01: prepare_matched_cells.py was never copied into the image,
+# even though triads.py imports it directly (from prepare_matched_cells import
+# convert_h5ad, convert_tabular, _detect_format) whenever paths.input_dir has
+# no *_matched_with_boundaries.csv files yet and needs to auto-regenerate them.
+# This was never hit in practice before today because input_dir pointed at an
+# absolute /rsrch6/... path that already had hand-built files -- now that
+# input_dir is the relative results/matched_cells (so it actually gets
+# published -- see paths comments in experiments/*.yaml), every run starts
+# with an empty directory, the auto-regen path fires for real for the first
+# time, and it crashed with ModuleNotFoundError. Confirmed directly against a
+# real Cirro run (PW_DATASET=583077ea-..., revision 68c50b287a).
+COPY prepare_matched_cells.py ./
 RUN pip install --no-cache-dir -e . --no-deps
 
 # ---- experiment configs + cell-type definitions ----
