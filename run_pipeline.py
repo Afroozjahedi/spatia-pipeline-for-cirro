@@ -597,11 +597,16 @@ def main():
     # bad input the step itself didn't guard against) from a step that ran
     # to completion but whose OWN output failed its sanity-check validator
     # (e.g. too many Unassigned cells -- a tuning problem, not a crash).
-    # Added 2026-10-01 so the two cases can get different exit codes (see
-    # final summary below) -- Nextflow's publishDir only runs for an exit
-    # status in validExitStatus, and main.nf now allows exit 4 through so a
-    # validation-halted run still publishes whatever it produced, while a
-    # genuine crash (exit 1) still does not, same as before this change.
+    # Added 2026-10-01, PARTIALLY REVERTED same day: the original intent was
+    # to give this distinction its own exit code (4) so main.nf could let
+    # Nextflow still publish a validation-halted run's partial output via a
+    # `validExitStatus` directive -- that directive does not exist in real
+    # Nextflow (confirmed the hard way: it broke main.nf's parsing outright,
+    # "Unknown process directive: validExitStatus", on a real Cirro run).
+    # Reverted to a single exit(1) for any failure below until the correct
+    # Nextflow mechanism (if one exists) for publishing a failed task's
+    # outputs is actually verified -- not guessed at a second time. Kept
+    # the crashed/failed-steps distinction here only for clearer log text.
     crashed = False
 
     for step in steps_to_run:
@@ -667,14 +672,16 @@ def main():
             print(f"  ⏭   SKIPPED    {step}")
 
     if crashed:
-        print(f"\nExiting 1 (crashed) -- whatever was written to {out_dir} before the "
-              f"crash will NOT be published by Nextflow (validExitStatus excludes 1).")
+        print(f"\nExiting 1 (crashed) -- whatever was written to {out_dir} will NOT be "
+              f"published by Nextflow (it only publishes on a clean exit 0).")
         sys.exit(1)
 
     if failed_steps:
-        print(f"\nExiting 4 (ran to completion, but a step's output failed validation) -- "
-              f"{out_dir} WILL still be published by Nextflow (validExitStatus includes 4).")
-        sys.exit(4)
+        print(f"\nExiting 1 (one or more steps failed their own output validation) -- "
+              f"{out_dir} will NOT be published by Nextflow either (same reason as above). "
+              f"Getting a validation-halted run's partial output published to Cirro is a "
+              f"real, still-open follow-up -- not solved by this exit code.")
+        sys.exit(1)
 
     print(f"\nAll steps completed successfully.")
     sys.exit(0)

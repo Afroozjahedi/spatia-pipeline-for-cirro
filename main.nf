@@ -60,28 +60,26 @@ process run_spatia_pipeline {
     // FIXED (2026-10-01): this process's own `results/**` glob is relative to
     // the task's work dir, but every write-target path in the yaml configs
     // (paths.output_dir, paths.segmentation_results_dir,
-    // segmentation.normalized_dir, analysis.survival.image_patient_map) used
-    // to be an ABSOLUTE /rsrch6/... path -- nothing the pipeline wrote ever
-    // landed under this task's work dir, so this glob matched zero files on
-    // every run (success or failure) and nothing was ever published to Cirro.
-    // Those configs now use paths nested under a relative "results/" tree so
-    // this glob actually finds them. Dropped the separate logs/** emit
-    // channel below (run_pipeline.py's own logs already nest under
-    // {output_dir}/logs/, i.e. results/logs/ -- covered by results/** --
-    // and a second top-level-only glob with nothing to match it risked its
-    // own "missing output file(s)" failure).
+    // segmentation.normalized_dir, analysis.survival.image_patient_map,
+    // paths.input_dir) used to be an ABSOLUTE /rsrch6/... path -- nothing
+    // the pipeline wrote ever landed under this task's work dir, so this
+    // glob matched zero files on every run (success or failure) and nothing
+    // was ever published to Cirro. Those configs now use paths nested under
+    // a relative "results/" tree so this glob actually finds them. Dropped
+    // the separate logs/** emit channel below (run_pipeline.py's own logs
+    // already nest under {output_dir}/logs/, i.e. results/logs/ -- covered
+    // by results/** -- and a second top-level-only glob with nothing to
+    // match it risked its own "missing output file(s)" failure).
     //
-    // validExitStatus 0, 4 -- run_pipeline.py now exits 4 (not 1) when every
-    // step ran to completion but one step's own output failed its sanity-
-    // check validator (e.g. too many Unassigned cells) -- as opposed to exit
-    // 1, reserved for an actual unhandled exception/crash. Nextflow only runs
-    // publishDir on a task whose exit status is in validExitStatus, so
-    // without this, a validation-halted run (which may still have produced
-    // 90% of a real result) would publish nothing, same as a hard crash.
-    // Exit 1 (crash) is deliberately left OUT of validExitStatus: a crash's
-    // partial output is often not worth trusting, and this preserves
-    // Nextflow/Cirro's own FAILED status as a true "something broke" signal.
-    validExitStatus 0, 4
+    // REVERTED same day: this process briefly also declared
+    // `validExitStatus 0, 4`, meant to let a validation-halted run (exit 4
+    // from run_pipeline.py) still publish its partial output. That directive
+    // does not exist in real Nextflow -- confirmed the hard way, it broke
+    // this file's parsing outright on a real Cirro run ("Unknown process
+    // directive: validExitStatus"). Reverted; run_pipeline.py exits 1 for
+    // any failure again. A clean exit-0 run publishes fine with the fix
+    // above -- publishing a validation-halted run's partial output is a
+    // real, still-open problem, not solved here.
 
     input:
     path config_file
