@@ -151,9 +151,17 @@ paths:
   # no separate wiring needed. Moved to scratch (not home) to match this
   # project's existing convention for pipeline outputs (see crc_tma.yaml's
   # commented Seadragon path).
-  segmentation_results_dir: "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA_full/segmentation_results"
+  # FIXED (2026-10-01): segmentation_results_dir/output_dir were absolute
+  # /rsrch6/... paths -- nothing the pipeline writes there was ever found by
+  # main.nf's publishDir glob (relative "results/**" against the Nextflow task's
+  # own work dir), so results never made it to Cirro/S3 for any run outcome.
+  # Now relative, nested under one "results/" tree, matching that glob.
+  # input_dir (matched_cells) is left as-is for now -- self-regenerating within
+  # a run same as before, just not yet brought into the results/ tree; flagged
+  # as a separate follow-up, not done here.
+  segmentation_results_dir: "results/segmentation_results"
   input_dir: "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA_full/matched_cells"
-  output_dir: "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA_full/results"
+  output_dir: "results"
 
 tif_conversion:
   enabled: false   # see status note -- likely a no-op for this dataset's pre-extracted cores
@@ -187,7 +195,9 @@ segmentation:
   # by default each copy is deleted right after its image is segmented -- peak
   # extra disk is one file, not a second copy of the dataset.
   keep_normalized: false
-  normalized_dir: "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA_full/_normalized"
+  # FIXED (2026-10-01): same class of fix as output_dir/segmentation_results_dir
+  # above -- absolute path, never published. Nested under results/ now.
+  normalized_dir: "results/_normalized"
   # Verifies plane count against the panel, and checks nuclear periodicity on
   # the pixels once per batch. Leave true.
   channel_check: true
@@ -505,7 +515,9 @@ analysis:
     patient_id_col: "Patient"
     group_col: "Group"
     group_code_map: {"1": "CLR", "2": "DII"}
-    image_patient_map: "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA_full/image_patient_map_full.json"
+    # FIXED (2026-10-01): same class of fix as output_dir above -- absolute path,
+    # never published. Nested under results/ now.
+    image_patient_map: "results/image_patient_map_full.json"
     # Auto-rebuild (added 2026-09-15, spatia/analysis/survival.py) -- rebuilds
     # image_patient_map above from this annotation file + paths.input_dir on
     # every run, so it can never silently drift out of sync with whichever

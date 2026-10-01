@@ -593,6 +593,16 @@ def main():
     pipeline_start = time.time()
     results        = {}
     failed_steps   = []
+    # Distinguishes an unhandled exception (a real crash -- code bug, OOM,
+    # bad input the step itself didn't guard against) from a step that ran
+    # to completion but whose OWN output failed its sanity-check validator
+    # (e.g. too many Unassigned cells -- a tuning problem, not a crash).
+    # Added 2026-10-01 so the two cases can get different exit codes (see
+    # final summary below) -- Nextflow's publishDir only runs for an exit
+    # status in validExitStatus, and main.nf now allows exit 4 through so a
+    # validation-halted run still publishes whatever it produced, while a
+    # genuine crash (exit 1) still does not, same as before this change.
+    crashed = False
 
     for step in steps_to_run:
         print(_banner(f"STEP: {step.upper()}", char="-"))
@@ -607,6 +617,7 @@ def main():
         except Exception as exc:
             elapsed = time.time() - t0
             failed_steps.append(step)
+            crashed = True
             print(f"\n✗  {step} FAILED after {_hms(elapsed)}")
             print(f"   {type(exc).__name__}: {exc}")
             traceback.print_exc()
@@ -655,8 +666,15 @@ def main():
         for step in steps_skipped:
             print(f"  ⏭   SKIPPED    {step}")
 
-    if failed_steps:
+    if crashed:
+        print(f"\nExiting 1 (crashed) -- whatever was written to {out_dir} before the "
+              f"crash will NOT be published by Nextflow (validExitStatus excludes 1).")
         sys.exit(1)
+
+    if failed_steps:
+        print(f"\nExiting 4 (ran to completion, but a step's output failed validation) -- "
+              f"{out_dir} WILL still be published by Nextflow (validExitStatus includes 4).")
+        sys.exit(4)
 
     print(f"\nAll steps completed successfully.")
     sys.exit(0)

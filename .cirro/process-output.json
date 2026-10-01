@@ -1,7 +1,6 @@
 {
-  "_comment": "DRAFT — which outputs Cirro can visualize/browse. Matches main.nf's two emit channels (results/, logs/). Since Q10 chose a single black-box process, Cirro only sees final outputs, not per-step intermediates — this is the direct tradeoff Afrouz accepted when choosing option (a) over the five-staged-process alternative.",
+  "_comment": "Matches main.nf's single emit channel (results/). Previously declared a separate logs/** channel mirroring main.nf's old two-channel setup -- dropped 2026-10-01 along with that channel, since run_pipeline.py's logs already nest under results/logs/ (covered by results/**) and a second top-level-only glob with nothing to match risked its own missing-output failure. Since Q10 chose a single black-box process, Cirro only sees final outputs, not per-step intermediates -- this is the direct tradeoff Afrouz accepted when choosing option (a) over the five-staged-process alternative.",
   "outputs": [
-    { "name": "results", "path": "results/**", "type": "directory" },
-    { "name": "logs",    "path": "logs/**",    "type": "directory" }
+    { "name": "results", "path": "results/**", "type": "directory" }
   ]
 }
