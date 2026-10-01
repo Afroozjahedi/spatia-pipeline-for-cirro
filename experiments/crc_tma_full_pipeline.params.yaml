@@ -160,7 +160,14 @@ paths:
   # a run same as before, just not yet brought into the results/ tree; flagged
   # as a separate follow-up, not done here.
   segmentation_results_dir: "results/segmentation_results"
-  input_dir: "/rsrch6/scratch/trans_mol_path/ajahedi/CRC_TMA_full/matched_cells"
+  # FIXED (2026-10-01b): same class of fix as output_dir/segmentation_results_dir
+  # above -- was an absolute path, so the matched_cells CSVs that triads.py
+  # auto-regenerates into this directory (see triads.py's
+  # _run_matched_cells_prep) never got published to Cirro/S3, even though
+  # triads itself read them back fine within the same run (that part was never
+  # broken -- this is purely about being able to inspect them afterward).
+  # Nested under results/ now so they're retrievable, same as everything else.
+  input_dir: "results/matched_cells"
   output_dir: "results"
 
 tif_conversion:
