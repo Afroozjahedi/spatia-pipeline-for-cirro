@@ -26,6 +26,7 @@ Can also be run standalone to check a previous run:
 from __future__ import annotations
 
 import os
+import glob
 from pathlib import Path
 from typing import List, Tuple
 
@@ -277,6 +278,96 @@ def validate_preprocessing(cfg: dict) -> Tuple[bool, List[ValidationError]]:
     return len(errors) == 0, errors
 
 
+def _validate_cell_typing_one(
+    step: str, mode: str, ct_cfg: dict, analysis_name: str, output_dir: str,
+    label: str = "",
+) -> Tuple[bool, List[ValidationError]]:
+    """
+    Runs the full set of per-run cell_typing checks for ONE analysis_name /
+    output_dir pair. Factored out of validate_cell_typing() (2026-09-30) so
+    cell_typing.input_mode: "per_tissue" can call this once per tissue
+    instead of duplicating the check logic -- see validate_cell_typing()'s
+    input_mode branch below. Behavior for the pooled (default) case is
+    unchanged. `label`, when set, prefixes every error message (used to
+    name which tissue an error belongs to in per_tissue mode).
+    """
+    errors: List[ValidationError] = []
+    data_dir = os.path.join(output_dir, "cell_typing_data")
+    prefix = f"[{label}] " if label else ""
+
+    if mode == "semi_automatic" and ct_cfg.get("cluster_labels_file") is None:
+        # First semi-auto run — pipeline stops intentionally after clustering.
+        # Validate that the clustered h5ad was saved, then stop (this is not an error).
+        clustered_path = os.path.join(data_dir, f"{analysis_name}_clustered.h5ad")
+        ok, msg = _file_exists_and_nonempty(clustered_path)
+        if not ok:
+            errors.append(ValidationError(
+                step,
+                f"{prefix}Semi-auto first run: clustered h5ad not found. "
+                "Check that cell typing ran to completion.",
+                clustered_path,
+            ))
+        else:
+            # Not an error — inform caller via a special message
+            print(
+                f"\n[validation] {prefix}Semi-auto first run complete.\n"
+                f"  Clustered h5ad saved: {clustered_path}\n"
+                f"  Next step: inspect UMAP plots in cell_typing_plots/, "
+                f"fill in cluster_labels_file in your config, then re-run."
+            )
+        return len(errors) == 0, errors
+
+    # Automatic mode or semi-auto second run — expect cell_typed h5ad
+    typed_path = os.path.join(data_dir, f"{analysis_name}_cell_typed.h5ad")
+
+    ok, msg = _file_exists_and_nonempty(typed_path)
+    if not ok:
+        errors.append(ValidationError(step, f"{prefix}{msg}", typed_path))
+        return False, errors
+
+    ok, msg, adata = _open_h5ad(typed_path)
+    if not ok:
+        errors.append(ValidationError(step, f"{prefix}{msg}", typed_path))
+        return False, errors
+
+    if adata.n_obs == 0:
+        errors.append(ValidationError(
+            step, f"{prefix}Cell-typed h5ad has 0 cells.", typed_path
+        ))
+
+    missing = _check_obs_columns(adata, ["cell_type", "experiment_group"], typed_path)
+    if missing:
+        errors.append(ValidationError(
+            step,
+            f"{prefix}Missing expected obs columns: {missing}",
+            typed_path,
+        ))
+
+    if "cell_type" in adata.obs.columns:
+        n_types = adata.obs["cell_type"].nunique()
+        if n_types < 2:
+            errors.append(ValidationError(
+                step,
+                f"{prefix}Only {n_types} distinct cell type(s) assigned — "
+                "check GMM thresholds and cell_type_definitions.yaml.",
+                typed_path,
+            ))
+        unassigned_pct = (
+            (adata.obs["cell_type"] == "Unassigned").sum() / adata.n_obs * 100
+            if "Unassigned" in adata.obs["cell_type"].values
+            else 0
+        )
+        if unassigned_pct > 50:
+            errors.append(ValidationError(
+                step,
+                f"{prefix}{unassigned_pct:.1f}% of cells are Unassigned — "
+                "GMM thresholds may be too strict or marker names may not match.",
+                typed_path,
+            ))
+
+    return len(errors) == 0, errors
+
+
 def validate_cell_typing(cfg: dict) -> Tuple[bool, List[ValidationError]]:
     """
     Checks after run_cell_typing():
@@ -293,8 +384,15 @@ def validate_cell_typing(cfg: dict) -> Tuple[bool, List[ValidationError]]:
 
     Semi-automatic, second run:
     - Same as automatic mode checks
+
+    cell_typing.input_mode: "per_tissue" (added 2026-09-30): repeats the
+    above once per tissue file under
+    combined_processed_data/individual_processed_data/, at that tissue's
+    own cell_typing_per_tissue/<tissue_id>/ output location (see
+    run_cell_typing()'s matching input_mode branch) rather than the single
+    top-level cell_typing_data/ location pooled mode uses. Passes only if
+    every tissue passes.
     """
-    errors: List[ValidationError] = []
     step = "cell_typing"
 
     ct_cfg        = cfg.get("cell_typing", {})
@@ -302,79 +400,43 @@ def validate_cell_typing(cfg: dict) -> Tuple[bool, List[ValidationError]]:
     exp_name      = cfg["experiment"]["name"]
     analysis_name = ct_cfg.get("analysis_name", exp_name)
     output_dir    = cfg["paths"]["output_dir"]
-    data_dir      = os.path.join(output_dir, "cell_typing_data")
 
-    if mode == "semi_automatic" and ct_cfg.get("cluster_labels_file") is None:
-        # First semi-auto run — pipeline stops intentionally after clustering.
-        # Validate that the clustered h5ad was saved, then stop (this is not an error).
-        clustered_path = os.path.join(data_dir, f"{analysis_name}_clustered.h5ad")
-        ok, msg = _file_exists_and_nonempty(clustered_path)
-        if not ok:
-            errors.append(ValidationError(
-                step,
-                "Semi-auto first run: clustered h5ad not found. "
-                "Check that cell typing ran to completion.",
-                clustered_path,
-            ))
-        else:
-            # Not an error — inform caller via a special message
-            print(
-                f"\n[validation] Semi-auto first run complete.\n"
-                f"  Clustered h5ad saved: {clustered_path}\n"
-                f"  Next step: inspect UMAP plots in cell_typing_plots/, "
-                f"fill in cluster_labels_file in your config, then re-run."
-            )
-        return len(errors) == 0, errors
-
-    # Automatic mode or semi-auto second run — expect cell_typed h5ad
-    typed_path = os.path.join(data_dir, f"{analysis_name}_cell_typed.h5ad")
-
-    ok, msg = _file_exists_and_nonempty(typed_path)
-    if not ok:
-        errors.append(ValidationError(step, msg, typed_path))
-        return False, errors
-
-    ok, msg, adata = _open_h5ad(typed_path)
-    if not ok:
-        errors.append(ValidationError(step, msg, typed_path))
-        return False, errors
-
-    if adata.n_obs == 0:
-        errors.append(ValidationError(
-            step, "Cell-typed h5ad has 0 cells.", typed_path
-        ))
-
-    missing = _check_obs_columns(adata, ["cell_type", "experiment_group"], typed_path)
-    if missing:
-        errors.append(ValidationError(
+    input_mode = ct_cfg.get("input_mode", "pooled")
+    if input_mode not in ("pooled", "per_tissue"):
+        return False, [ValidationError(
             step,
-            f"Missing expected obs columns: {missing}",
-            typed_path,
-        ))
+            f"Unknown cell_typing.input_mode: {input_mode!r}. Use 'pooled' or 'per_tissue'.",
+            "",
+        )]
 
-    if "cell_type" in adata.obs.columns:
-        n_types = adata.obs["cell_type"].nunique()
-        if n_types < 2:
-            errors.append(ValidationError(
-                step,
-                f"Only {n_types} distinct cell type(s) assigned — "
-                "check GMM thresholds and cell_type_definitions.yaml.",
-                typed_path,
-            ))
-        unassigned_pct = (
-            (adata.obs["cell_type"] == "Unassigned").sum() / adata.n_obs * 100
-            if "Unassigned" in adata.obs["cell_type"].values
-            else 0
+    if input_mode == "pooled":
+        return _validate_cell_typing_one(step, mode, ct_cfg, analysis_name, output_dir)
+
+    # per_tissue
+    individual_dir = os.path.join(
+        output_dir, "combined_processed_data", "individual_processed_data"
+    )
+    tissue_files = sorted(glob.glob(
+        os.path.join(individual_dir, "*_combined_all_experiment_groups.h5ad")
+    ))
+    if not tissue_files:
+        return False, [ValidationError(
+            step,
+            f"input_mode=per_tissue but no tissue files found in {individual_dir}.",
+            individual_dir,
+        )]
+
+    all_errors: List[ValidationError] = []
+    for f in tissue_files:
+        tissue_id = os.path.basename(f).replace("_combined_all_experiment_groups.h5ad", "")
+        tissue_output_dir = os.path.join(output_dir, "cell_typing_per_tissue", tissue_id)
+        tissue_analysis_name = f"{analysis_name}_{tissue_id}"
+        _, errs = _validate_cell_typing_one(
+            step, mode, ct_cfg, tissue_analysis_name, tissue_output_dir, label=tissue_id,
         )
-        if unassigned_pct > 50:
-            errors.append(ValidationError(
-                step,
-                f"{unassigned_pct:.1f}% of cells are Unassigned — "
-                "GMM thresholds may be too strict or marker names may not match.",
-                typed_path,
-            ))
+        all_errors.extend(errs)
 
-    return len(errors) == 0, errors
+    return len(all_errors) == 0, all_errors
 
 
 def validate_triads(cfg: dict) -> Tuple[bool, List[ValidationError]]:

@@ -75,6 +75,7 @@ RUN pip install --no-cache-dir scanpy
 COPY pyproject.toml ./
 COPY spatia/ ./spatia/
 COPY run_pipeline.py ./
+COPY pool_tissues_for_celltyping.py ./
 RUN pip install --no-cache-dir -e . --no-deps
 
 # ---- experiment configs + cell-type definitions ----

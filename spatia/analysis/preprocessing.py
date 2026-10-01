@@ -824,6 +824,57 @@ def run_preprocessing(cfg: dict) -> dict:
                 print(f"\n⚠️  QuPath QC export failed (non-fatal -- preprocessing output "
                       f"above is complete and unaffected): {e}")
 
+        # Cohort pooling for cell_typing (added 2026-09-30, decided by
+        # Afrouz). cell_typing needs either (a) one cohort-wide h5ad with
+        # GMM thresholds fit jointly across every tissue/core
+        # (cell_typing.input_mode: "pooled", default -- unchanged prior
+        # behavior for every config that doesn't set this), or (b)
+        # thresholds fit separately per tissue (input_mode: "per_tissue" --
+        # cell_typing.py loops over tissues_dir itself in that mode, see
+        # run_cell_typing()). Only "pooled" needs anything done here:
+        # concatenate every tissue's combined h5ad (just written above, in
+        # tissues_dir) into one file via
+        # pool_tissues_for_celltyping.pool_tissues() -- previously a
+        # separate manual script run documented in this experiment's config
+        # comments, now folded into this step so a single end-to-end
+        # run_pipeline.py invocation (e.g. from Cirro) needs nothing run
+        # in between.
+        #
+        # Non-fatal on failure -- same pattern as qupath_export above --
+        # so a pooling problem doesn't take down preprocessing output
+        # that's otherwise complete and correct; cell_typing will raise
+        # its own clear error if it then can't find an input file.
+        ct_cfg_peek = cfg.get("cell_typing", {})
+        cell_typing_input_mode = ct_cfg_peek.get("input_mode", "pooled")
+        if cell_typing_input_mode not in ("pooled", "per_tissue"):
+            print(f"\n⚠️  Unknown cell_typing.input_mode: {cell_typing_input_mode!r} "
+                  "-- expected 'pooled' or 'per_tissue'. Skipping cohort pooling.")
+        elif cell_typing_input_mode == "pooled":
+            pooled_output = ct_cfg_peek.get("input_file") or os.path.join(
+                out_dir, "cohort_pooled.h5ad"
+            )
+            print(f"\ncell_typing.input_mode=pooled -- pooling {tissues_dir} "
+                  f"-> {pooled_output} ...")
+            try:
+                import sys as _sys
+                _repo_root = os.path.dirname(os.path.dirname(os.path.dirname(
+                    os.path.abspath(__file__)
+                )))
+                if _repo_root not in _sys.path:
+                    _sys.path.insert(0, _repo_root)
+                from pool_tissues_for_celltyping import pool_tissues
+                pool_tissues(
+                    tissues_dir, pooled_output,
+                    "*_combined_all_experiment_groups.h5ad", "inner",
+                )
+            except Exception as e:
+                print(f"\n⚠️  Cohort pooling failed (non-fatal -- preprocessing output "
+                      f"above is complete and unaffected; cell_typing will fail with a "
+                      f"clearer error if it can't find {pooled_output}): {e}")
+        else:
+            print(f"\ncell_typing.input_mode=per_tissue -- skipping cohort pooling; "
+                  f"cell_typing will type each tissue in {tissues_dir} separately.")
+
         print(f"\nProcessing complete: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("=" * 80)
 

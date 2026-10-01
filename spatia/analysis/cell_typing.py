@@ -57,6 +57,8 @@ unreliable as a std-multiplier threshold -- see gmm.transform below.
 """
 
 import os
+import glob
+import copy
 import yaml
 import numpy as np
 import pandas as pd
@@ -898,10 +900,65 @@ def run_cell_typing(cfg: dict) -> None:
     ct_cfg   = cfg["cell_typing"]
     mode     = ct_cfg["mode"]           # "automatic" or "semi_automatic"
     exp_name = cfg["experiment"]["name"]
+    output_dir = cfg["paths"]["output_dir"]
+
+    # input_mode (added 2026-09-30, decided by Afrouz): "pooled" (default --
+    # identical prior behavior for every config that doesn't set this) reads
+    # a single cohort-wide input_file, fitting GMM thresholds jointly across
+    # every tissue/core. "per_tissue" instead types each tissue's own
+    # combined h5ad (preprocessing.py's per-tissue output, under
+    # combined_processed_data/individual_processed_data/) separately --
+    # thresholds fit independently per tissue rather than jointly across the
+    # cohort. See pool_tissues_for_celltyping.py's module docstring for the
+    # tradeoff this trades off against.
+    #
+    # Implemented by recursing into this exact function once per tissue,
+    # with input_file/analysis_name/output_dir overridden for that one
+    # tissue (output under cell_typing_per_tissue/<tissue_id>/) -- this
+    # reuses every line of the automatic/semi_automatic logic below
+    # unchanged, rather than duplicating it, so a per-tissue run gets
+    # exactly the same behavior a pooled single-file run would for that
+    # tissue's cells alone. See validate_cell_typing()'s matching input_mode
+    # branch in validation.py for how outputs are checked afterward.
+    input_mode = ct_cfg.get("input_mode", "pooled")
+    if input_mode not in ("pooled", "per_tissue"):
+        raise ValueError(
+            f"Unknown cell_typing.input_mode: {input_mode!r}. Use 'pooled' or 'per_tissue'."
+        )
+
+    if input_mode == "per_tissue":
+        individual_dir = os.path.join(
+            output_dir, "combined_processed_data", "individual_processed_data"
+        )
+        tissue_files = sorted(glob.glob(
+            os.path.join(individual_dir, "*_combined_all_experiment_groups.h5ad")
+        ))
+        if not tissue_files:
+            raise FileNotFoundError(
+                f"cell_typing.input_mode=per_tissue but no tissue files found in "
+                f"{individual_dir} (expected *_combined_all_experiment_groups.h5ad, "
+                "written by preprocessing). Run preprocessing first."
+            )
+        base_analysis_name = ct_cfg.get("analysis_name", exp_name)
+        print(f"[cell_typing] input_mode=per_tissue -- typing {len(tissue_files)} "
+              f"tissue(s) separately from {individual_dir}")
+        for f in tissue_files:
+            tissue_id = os.path.basename(f).replace("_combined_all_experiment_groups.h5ad", "")
+            print(f"\n[cell_typing] ── tissue: {tissue_id} ──")
+            sub_cfg = copy.deepcopy(cfg)
+            sub_cfg["cell_typing"] = dict(sub_cfg["cell_typing"])
+            sub_cfg["cell_typing"]["input_mode"]    = "pooled"  # prevents recursion
+            sub_cfg["cell_typing"]["input_file"]    = f
+            sub_cfg["cell_typing"]["analysis_name"] = f"{base_analysis_name}_{tissue_id}"
+            sub_cfg["paths"] = dict(sub_cfg["paths"])
+            sub_cfg["paths"]["output_dir"] = os.path.join(
+                output_dir, "cell_typing_per_tissue", tissue_id
+            )
+            run_cell_typing(sub_cfg)
+        return
 
     input_file    = ct_cfg["input_file"]
     analysis_name = ct_cfg.get("analysis_name", exp_name)
-    output_dir    = cfg["paths"]["output_dir"]
     plot_dir      = os.path.join(output_dir, "cell_typing_plots")
     data_dir      = os.path.join(output_dir, "cell_typing_data")
     os.makedirs(plot_dir, exist_ok=True)

@@ -72,6 +72,7 @@ RUN pip install --no-cache-dir lifelines kneed seaborn pyyaml scanpy boto3
 COPY pyproject.toml ./
 COPY spatia/ ./spatia/
 COPY run_pipeline.py ./
+COPY pool_tissues_for_celltyping.py ./
 RUN pip install --no-cache-dir -e . --no-deps
 
 # ---- experiment configs + cell-type definitions ----
