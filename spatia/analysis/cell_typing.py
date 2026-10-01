@@ -2167,6 +2167,126 @@ def plot_unassigned_diagnostics(adata, thresholds: dict, column_map: dict, plot_
           f"{data_dir}/unassigned_threshold_recommendations.csv")
 
 
+# ── 10b. Unassigned-cell candidate NEW cell types (marker combinations) ───────
+# Added 2026-10-01. plot_unassigned_diagnostics() above answers "which single
+# marker's threshold looks miscalibrated" (per-marker, marginal). This answers
+# a different question Afrouz asked for directly: "what COMBINATION of
+# markers recurs among Unassigned cells often enough to be its own cell
+# type?" -- i.e. candidates for brand-new cell_type_definitions.yaml entries,
+# not just threshold tweaks to existing ones.
+#
+# Every combination this reports failed EVERY existing rule in
+# cell_type_definitions.yaml -- that's definitionally why those cells are
+# Unassigned (see assign_cell_types_automatic: a cell only stays "Unassigned"
+# if no rule's required/excluded conditions ever matched it). So nothing
+# reported here could already be a cell type you've defined; each row is a
+# population you don't have a rule for yet, OR a run of cells that are
+# genuinely ambiguous/double-negative -- cell_type_definitions/crc_tma.yaml's
+# own header comment already calls out "dirt, undefined, immune cells
+# [generic], adipocytes" as deliberately left undefined for exactly that
+# reason, so not every row here is necessarily fixable by adding a rule.
+#
+# Deliberately does NOT propose a biological name -- "CD2+CD5+ cells" could
+# be several different real cell types depending on this panel and tissue,
+# and getting that right is a domain call, not a pattern-matching one. Names
+# here are placeholders (unassigned_pattern_N) for you to rename once you
+# recognize the biology; the marker list and ready-to-paste yaml block are
+# the actual content.
+
+def suggest_unassigned_cell_type_combinations(adata, thresholds: dict, column_map: dict,
+                                               data_dir: str, top_n: int = 15,
+                                               max_markers: int = 12, min_cells: int = 20):
+    """
+    Finds recurring marker-positivity COMBINATIONS among Unassigned cells
+    (as opposed to plot_unassigned_diagnostics' per-marker threshold
+    suggestions) and writes them as candidate new cell_type_definitions.yaml
+    entries to {data_dir}/unassigned_candidate_cell_types.csv.
+
+    Restricts to the `max_markers` markers whose positivity rate differs
+    most between Unassigned and Known cells -- with a large panel (e.g. 80
+    markers), using the full panel would mean enumerating combinations that
+    mostly never occur; this instead groups the ACTUAL patterns present in
+    the data, limited to the markers most likely doing real biological work
+    here. `min_cells` drops patterns too rare to be worth a new rule (noise/
+    segmentation artifacts, not a real population).
+    """
+    if "cell_type" not in adata.obs.columns:
+        return
+    unassigned_mask = (adata.obs["cell_type"] == "Unassigned").values
+    n_unassigned = int(unassigned_mask.sum())
+    if n_unassigned == 0:
+        return
+
+    pos_cols = [m for m in thresholds if f"{m}_pos" in adata.obs.columns]
+    if not pos_cols:
+        return
+
+    known_mask = ~unassigned_mask
+    obs = adata.obs
+
+    # Same idea as plot_unassigned_diagnostics' positivity comparison above,
+    # reused here just to pick which markers are worth building combinations
+    # from (biggest Unassigned-vs-Known gap = most likely to be doing real
+    # discriminating work, not panel noise).
+    diffs = {
+        m: abs(obs.loc[unassigned_mask, f"{m}_pos"].mean() - obs.loc[known_mask, f"{m}_pos"].mean())
+        for m in pos_cols
+    }
+    informative = sorted(diffs, key=diffs.get, reverse=True)[:max_markers]
+    if not informative:
+        return
+
+    cols = [f"{m}_pos" for m in informative]
+    sub = obs.loc[unassigned_mask, cols].astype(bool).copy()
+    sub.columns = informative
+
+    sig_counts = sub.groupby(informative).size().sort_values(ascending=False)
+    sig_counts = sig_counts[sig_counts >= min_cells]
+    if sig_counts.empty:
+        print(f"  [diagnostics] No marker combination among Unassigned cells met the "
+              f"{min_cells}-cell minimum -- Unassigned looks diffuse/noisy rather than "
+              f"a few missing cell types.")
+        return
+
+    rows = []
+    for rank, (sig, n_cells) in enumerate(sig_counts.head(top_n).items(), start=1):
+        sig = sig if isinstance(sig, tuple) else (sig,)
+        positive = [m for m, v in zip(informative, sig) if v]
+        negative = [m for m, v in zip(informative, sig) if not v]
+        name = f"unassigned_pattern_{rank}" + ("_all_negative" if not positive else
+                                                "_" + "_".join(positive))
+        positive_cols = [m + "_pos" for m in positive]
+        negative_cols = [m + "_pos" for m in negative]
+        snippet_lines = [
+            '  "' + name + '":  # placeholder name -- rename once you recognize the biology',
+            "    required:  [" + ", ".join(positive_cols) + "]" +
+                ("  # all-negative pattern -- see note above before adding a rule with no required markers"
+                 if not positive else ""),
+            "    excluded:  [" + ", ".join(negative_cols) + "]",
+            "    preferred: []",
+        ]
+        yaml_snippet = "\n".join(snippet_lines)
+        rows.append({
+            "rank": rank,
+            "n_cells": int(n_cells),
+            "pct_of_unassigned": round(100 * n_cells / n_unassigned, 2),
+            "pct_of_total": round(100 * n_cells / adata.n_obs, 2),
+            "positive_markers": ", ".join(positive) if positive else "(none -- all-negative)",
+            "negative_markers": ", ".join(negative),
+            "suggested_name_placeholder": name,
+            "suggested_yaml_snippet": yaml_snippet,
+        })
+
+    rec_df = pd.DataFrame(rows)
+    out_path = os.path.join(data_dir, "unassigned_candidate_cell_types.csv")
+    rec_df.to_csv(out_path, index=False)
+
+    top_covered = int(rec_df["n_cells"].sum())
+    print(f"  [diagnostics] Unassigned candidate-combination report: top {len(rec_df)} recurring "
+          f"marker patterns cover {top_covered:,} / {n_unassigned:,} Unassigned cells "
+          f"({100 * top_covered / n_unassigned:.1f}%) -- {out_path}")
+
+
 # ── 11. Report bundle: HTML + PDF + text summary ─────────────────────────────
 # Added 2026-09-10, to mirror the reference notebook's report/ output.
 # Composed from the PNGs this module already wrote to plot_dir (rather than
@@ -2423,6 +2543,11 @@ def generate_cell_typing_diagnostics(adata, thresholds: dict, fit_info: dict, co
         plot_unassigned_diagnostics(adata, thresholds, column_map, plot_dir, data_dir, formats)
     except Exception as e:
         print(f"  WARNING: unassigned-cell diagnostics failed (non-fatal): {e}")
+
+    try:
+        suggest_unassigned_cell_type_combinations(adata, thresholds, column_map, data_dir)
+    except Exception as e:
+        print(f"  WARNING: unassigned candidate-combination report failed (non-fatal): {e}")
 
     try:
         generate_report(adata, thresholds, fit_info, column_map, group_col, data_dir, plot_dir)

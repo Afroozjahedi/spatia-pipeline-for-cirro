@@ -358,12 +358,22 @@ def _validate_cell_typing_one(
             else 0
         )
         if unassigned_pct > 50:
-            errors.append(ValidationError(
-                step,
-                f"{prefix}{unassigned_pct:.1f}% of cells are Unassigned — "
-                "GMM thresholds may be too strict or marker names may not match.",
-                typed_path,
-            ))
+            # Not a hard failure: a high Unassigned fraction can be partly by
+            # design (see cell_type_definitions/*.yaml header comments for
+            # types deliberately left undefined), and halting the whole run
+            # here just to report "run halted" was never useful on its own.
+            # Downgraded from errors.append(...) to a printed warning so the
+            # pipeline proceeds to triads/functional/survival regardless.
+            # generate_cell_typing_diagnostics() already writes
+            # unassigned_threshold_recommendations.csv and (newer)
+            # unassigned_candidate_cell_types.csv with concrete next steps.
+            print(
+                f"\n[validation] {prefix}WARNING: {unassigned_pct:.1f}% of cells are "
+                f"Unassigned -- GMM thresholds may be too strict or marker names may "
+                f"not match. See unassigned_threshold_recommendations.csv and "
+                f"unassigned_candidate_cell_types.csv in cell_typing_data/ for specific "
+                f"suggestions. Not treated as a fatal error -- continuing."
+            )
 
     return len(errors) == 0, errors
 
