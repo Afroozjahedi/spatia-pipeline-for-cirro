@@ -76,18 +76,16 @@ COPY pyproject.toml ./
 COPY spatia/ ./spatia/
 COPY run_pipeline.py ./
 COPY pool_tissues_for_celltyping.py ./
-# FIXED 2026-10-01: prepare_matched_cells.py was never copied into the image,
-# even though triads.py imports it directly (from prepare_matched_cells import
-# convert_h5ad, convert_tabular, _detect_format) whenever paths.input_dir has
-# no *_matched_with_boundaries.csv files yet and needs to auto-regenerate them.
-# This was never hit in practice before today because input_dir pointed at an
-# absolute /rsrch6/... path that already had hand-built files -- now that
-# input_dir is the relative results/matched_cells (so it actually gets
-# published -- see paths comments in experiments/*.yaml), every run starts
-# with an empty directory, the auto-regen path fires for real for the first
-# time, and it crashed with ModuleNotFoundError. Confirmed directly against a
-# real Cirro run (PW_DATASET=583077ea-..., revision 68c50b287a).
-COPY prepare_matched_cells.py ./
+# prepare_matched_cells.py (2026-10-01): briefly added here as a COPY of a
+# separate repo-root script that triads.py imported, after that import was
+# found missing from the image and crashing every real run (triads auto-
+# regenerating matched_cells, ModuleNotFoundError, confirmed on a real Cirro
+# run, PW_DATASET=583077ea-..., revision 68c50b287a). CORRECTED the same day,
+# before an image rebuild ever shipped this COPY line: per Afrouz's explicit,
+# previously-stated instruction that this NOT be a separate file, that
+# script's content is now merged directly into spatia/analysis/triads.py
+# (already COPYed via the spatia/ line above) -- no separate file exists
+# any more, so no COPY line is needed for it at all.
 RUN pip install --no-cache-dir -e . --no-deps
 
 # ---- experiment configs + cell-type definitions ----

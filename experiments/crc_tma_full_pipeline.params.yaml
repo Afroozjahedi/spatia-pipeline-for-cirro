@@ -463,7 +463,7 @@ analysis:
     # hand again. Column names below are traced from preprocessing.py/
     # cell_typing.py's own obs-column-writing code, NOT confirmed against
     # the real h5ad with --inspect -- confidence ~85%, worth a quick
-    # `python prepare_matched_cells.py --inspect --input <this h5ad>` check
+    # `python spatia/analysis/triads.py --inspect --input <this h5ad>  # merged in 2026-10-01, no longer a separate script` check
     # before relying on this block for an actual rebuild.
     matched_cells:
       cell_type_col: "cell_type"

@@ -16,28 +16,27 @@ The config dict shape mirrors config_example.yaml.
 import os
 import re
 import sys
+import json
+import argparse
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.spatial import cKDTree
 from itertools import combinations, permutations
 
-# prepare_matched_cells.py lives at the repo root, not inside the spatia
-# package -- import its conversion functions directly rather than
-# duplicating that logic here (see _run_matched_cells_prep below).
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
-
 
 # ── Matched-cell input auto-prep ──────────────────────────────────────────────
 # Folded directly into this module (2026-09-15) rather than a separate
 # pipeline step -- this IS the module that reads *_matched_with_boundaries.csv
 # files from paths.input_dir, so building them when they're missing belongs
-# here, not one layer removed. Reuses prepare_matched_cells.py's own
-# convert_h5ad/convert_tabular functions (that script stays as-is: a
-# standalone, dataset-agnostic CLI for the --inspect workflow on a brand new
-# dataset, and the single place this conversion logic actually lives).
+# here, not one layer removed. The conversion logic (convert_h5ad/
+# convert_tabular and the --inspect helpers) used to live in a separate
+# repo-root script, prepare_matched_cells.py, imported here via a sys.path
+# hack. CORRECTED 2026-10-01 per Afrouz's explicit, previously-stated
+# instruction that this NOT be a separate file or step: that script's
+# content is now merged directly into this module (see the block right
+# below _default_matched_cells_input_file) -- no external import, this IS
+# the one place the logic lives, including its own --inspect CLI.
 #
 # Why this exists: for datasets that go through the pooled-h5ad cell_typing
 # route (e.g. CRC_TMA_full), nothing ever wrote the matched-cell CSV format
@@ -67,6 +66,377 @@ if _REPO_ROOT not in sys.path:
 # e.g. the pilot crc_tma.yaml with its own hand-built matched_cells/
 # directory) and this is a complete no-op -- behavior is unchanged.
 
+# ---- Merged from prepare_matched_cells.py (2026-10-01), per Afrouz's
+# explicit, previously-stated instruction that this NOT be a separate
+# file or step -- everything below through the __main__ guard at the
+# end of this file is that script's own content, moved here verbatim.
+# Run its CLI directly against this module now:
+#   python spatia/analysis/triads.py --inspect --input <path>
+# ----
+
+REQUIRED_OUTPUT_COLS = ["centroid_x", "centroid_y", "cell_type", "experiment_group"]
+
+CANDIDATE_COLS = {
+    "cell type":        ["cell_type", "Cell_Type", "CellType", "cellType", "cell_type_name", "ClusterName"],
+    "experiment_group": ["experiment_group", "cancer_type", "tissue_type", "Tissue", "groups", "condition"],
+    "sample":           ["sample_id", "SampleID", "image_id", "Sample", "unique_region", "File Name", "Region"],
+    "x coord":          ["centroid_x", "x", "X", "x_coordinate", "X_centroid", "X:X"],
+    "y coord":          ["centroid_y", "y", "Y", "y_coordinate", "Y_centroid", "Y:Y"],
+}
+
+
+# ── Format detection ────────────────────────────────────────────────────────
+
+def _detect_format(path: str) -> str:
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".h5ad", ".h5"):
+        return "h5ad"
+    if ext in (".csv", ".tsv", ".txt"):
+        return "tabular"
+    print(f"ERROR: could not infer format from extension '{ext}'. "
+          f"Expected .csv/.tsv/.txt or .h5ad/.h5 — pass --format explicitly.",
+          file=sys.stderr)
+    sys.exit(1)
+
+
+def _sep_for(path: str, explicit_sep: str = None) -> str:
+    if explicit_sep is not None:
+        return explicit_sep
+    return "\t" if os.path.splitext(path)[1].lower() == ".tsv" else ","
+
+
+# ── Inspect mode ─────────────────────────────────────────────────────────────
+
+def _print_candidate_previews(get_col, columns) -> None:
+    for label, candidates in CANDIDATE_COLS.items():
+        found = [c for c in candidates if c in columns]
+        if not found:
+            print(f"\n[{label}] no candidate column found among {candidates}")
+            print(f"          -> inspect the full column list above and pass the real name explicitly.")
+            continue
+        for col in found:
+            series = get_col(col)
+            print(f"\n[{label}] '{col}'  dtype={series.dtype}")
+            if series.dtype == object or str(series.dtype) == "category":
+                print(series.value_counts().head(30).to_string())
+            else:
+                print(series.describe().to_string())
+
+
+def inspect_tabular(path: str, sep: str) -> None:
+    print(f"[inspect] Reading {path} ...")
+    df = pd.read_csv(path, sep=sep, nrows=200_000)
+    print(f"[inspect] {len(df):,} rows read (may be truncated for inspection) x {len(df.columns)} columns\n")
+    print("-" * 70)
+    print("Columns")
+    print("-" * 70)
+    print(list(df.columns))
+    print("\n" + "-" * 70)
+    print("Candidate column matches + value previews")
+    print("-" * 70)
+    _print_candidate_previews(lambda c: df[c], df.columns)
+    print("\n[inspect] Done. Nothing written. Re-run without --inspect, passing "
+          "--cell-type-col / --x-col / --y-col / --experiment-group-col / "
+          "--sample-col with CONFIRMED names.")
+
+
+def inspect_h5ad(path: str) -> None:
+    try:
+        import anndata as ad
+    except ImportError:
+        print("ERROR: anndata not installed. `pip install anndata --break-system-packages`",
+              file=sys.stderr)
+        sys.exit(1)
+
+    print(f"[inspect] Reading {path} ...")
+    adata = ad.read_h5ad(path)
+    print(f"[inspect] n_obs={adata.n_obs:,}  n_vars={adata.n_vars}\n")
+
+    print("-" * 70)
+    print("var_names (marker panel) —", adata.n_vars, "markers")
+    print("-" * 70)
+    print(list(adata.var_names))
+
+    print("\n" + "-" * 70)
+    print("obs.columns")
+    print("-" * 70)
+    print(list(adata.obs.columns))
+
+    print("\n" + "-" * 70)
+    print("obsm keys (coordinates sometimes live here instead of obs)")
+    print("-" * 70)
+    for k in adata.obsm.keys():
+        try:
+            print(f"  {k}: shape={adata.obsm[k].shape}")
+        except Exception:
+            print(f"  {k}")
+
+    print("\n" + "-" * 70)
+    print("Candidate column matches + value previews")
+    print("-" * 70)
+    _print_candidate_previews(lambda c: adata.obs[c], adata.obs.columns)
+
+    print("\n[inspect] Done. Nothing written. Re-run without --inspect, passing "
+          "--cell-type-col / --x-col / --y-col / --experiment-group-col / "
+          "--sample-col with CONFIRMED names.")
+
+
+# ── Shared relabeling + write logic ──────────────────────────────────────────
+
+def _apply_experiment_group_map(df: pd.DataFrame, group_map: dict) -> None:
+    if not group_map:
+        return
+    df["experiment_group"] = df["experiment_group"].astype(str).map(
+        lambda v: group_map.get(v, v)
+    )
+
+
+def _apply_cell_type_merge_map(df: pd.DataFrame, merge_map: dict) -> None:
+    """
+    merge_map: {regex_pattern: replacement}, applied in order via a full
+    regex substitution over the cell_type column. E.g.
+        {"^CD4\\+ T cells.*": "CD4+ T cells"}
+    merges every "CD4+ T cells (...)" variant into one label. Original
+    values are NOT preserved separately here — if you need the raw label
+    kept, don't rename the source column before calling this, or add your
+    own '_raw_cell_type' copy before running this script.
+    """
+    if not merge_map:
+        return
+    for pattern, replacement in merge_map.items():
+        before = df["cell_type"].astype(str)
+        after = before.str.replace(pattern, replacement, regex=True)
+        n_changed = (before != after).sum()
+        df["cell_type"] = after
+        if n_changed:
+            print(f"[prep] Cell-type merge '{pattern}' -> '{replacement}': {n_changed:,} rows changed")
+
+
+def _validate_required_columns(df: pd.DataFrame) -> None:
+    missing = [c for c in REQUIRED_OUTPUT_COLS if c not in df.columns]
+    if missing:
+        print(f"ERROR: after renaming, these required output columns are still "
+              f"missing: {missing}. Check --cell-type-col/--x-col/--y-col/"
+              f"--experiment-group-col map to real columns (see --inspect output).",
+              file=sys.stderr)
+        sys.exit(1)
+    n_null = df[REQUIRED_OUTPUT_COLS].isnull().any(axis=1).sum()
+    if n_null:
+        print(f"[prep] ⚠️  {n_null:,} row(s) have a null value in one of "
+              f"{REQUIRED_OUTPUT_COLS} — these rows will still be written "
+              f"(triads.py may drop or mishandle them; worth checking the "
+              f"source data if this count is unexpectedly high).")
+
+
+def _write_per_sample_csvs(df: pd.DataFrame, output_dir: str, sample_col: str,
+                            force: set) -> int:
+    os.makedirs(output_dir, exist_ok=True)
+
+    if "cell_id" not in df.columns:
+        df = df.copy()
+        df.insert(0, "cell_id", df.index.astype(str))
+
+    n_written, n_skipped = 0, 0
+    # Group by (experiment_group, sample) — not sample alone. Sample/region
+    # identifiers are sometimes reused across experiment_groups (e.g. two
+    # different physical cores both named "reg005"); grouping on sample
+    # alone would silently merge unrelated tissue into one file.
+    group_cols = ["experiment_group", sample_col] if sample_col != "experiment_group" else ["experiment_group"]
+    for group_key, group in df.groupby(group_cols):
+        if isinstance(group_key, tuple):
+            experiment_group, sample_id = group_key
+        else:
+            experiment_group, sample_id = group_key, group_key
+        if len(group) == 0:
+            continue
+
+        safe_sample = str(sample_id).replace("/", "-").replace(" ", "_")
+        out_name = f"{experiment_group}_{safe_sample}_matched_with_boundaries.csv"
+        out_path = os.path.join(output_dir, out_name)
+
+        already_done = (
+            os.path.exists(out_path) and os.path.getsize(out_path) > 0
+            and out_name not in force and str(sample_id) not in force
+        )
+        if already_done:
+            n_skipped += 1
+            continue
+
+        group.reset_index(drop=True).to_csv(out_path, index=False)
+        n_written += 1
+
+    print(f"\n[prep] Wrote {n_written} file(s), skipped {n_skipped} already-present "
+          f"file(s) -> {output_dir}")
+    sample_files = sorted(os.listdir(output_dir))[:5]
+    print(f"[prep] Sample files: {sample_files}")
+    print("\n[prep] cell_type values written:")
+    print(df["cell_type"].value_counts().to_string())
+    print("\n[prep] experiment_group values written:")
+    print(df["experiment_group"].value_counts().to_string())
+    return n_written
+
+
+# ── Convert: tabular (CSV/TSV) ───────────────────────────────────────────────
+
+def convert_tabular(
+    path: str, sep: str, output_dir: str,
+    cell_type_col: str, x_col: str, y_col: str,
+    experiment_group_col: str, sample_col: str,
+    experiment_group_map: dict, cell_type_merge_map: dict, force: set,
+) -> None:
+    print(f"[prep] Reading {path} ...")
+    df = pd.read_csv(path, sep=sep)
+    print(f"[prep] {len(df):,} rows read")
+
+    required = {
+        "cell_type_col": cell_type_col, "x_col": x_col, "y_col": y_col,
+        "experiment_group_col": experiment_group_col, "sample_col": sample_col,
+    }
+    missing = {k: v for k, v in required.items() if v not in df.columns}
+    if missing:
+        print(f"ERROR: these columns were not found in the input: {missing}", file=sys.stderr)
+        print("Run with --inspect first to see the real column names.", file=sys.stderr)
+        sys.exit(1)
+
+    df = df.rename(columns={
+        x_col: "centroid_x", y_col: "centroid_y",
+        cell_type_col: "cell_type", experiment_group_col: "experiment_group",
+    })
+
+    _apply_experiment_group_map(df, experiment_group_map)
+    _apply_cell_type_merge_map(df, cell_type_merge_map)
+    _validate_required_columns(df)
+    _write_per_sample_csvs(df, output_dir, sample_col, force)
+
+
+# ── Convert: AnnData h5ad ────────────────────────────────────────────────────
+
+def convert_h5ad(
+    path: str, output_dir: str,
+    cell_type_col: str, x_col: str, y_col: str,
+    experiment_group_col: str, sample_col: str,
+    experiment_group_map: dict, cell_type_merge_map: dict, force: set,
+) -> None:
+    try:
+        import anndata as ad
+    except ImportError:
+        print("ERROR: anndata not installed. `pip install anndata --break-system-packages`",
+              file=sys.stderr)
+        sys.exit(1)
+
+    print(f"[prep] Reading {path} ...")
+    adata = ad.read_h5ad(path)
+    print(f"[prep] {adata.n_obs:,} cells x {adata.n_vars} markers")
+
+    # x/y are allowed to come from adata.obs OR fall through to obsm lookup
+    # by the caller before this function runs (kept simple here: obs only,
+    # matching --inspect's obsm listing so the user can pick the right one
+    # and pass it in as a plain obs column if needed, or extend this
+    # function directly if coordinates genuinely only live in obsm).
+    required = {
+        "cell_type_col": cell_type_col, "x_col": x_col, "y_col": y_col,
+        "experiment_group_col": experiment_group_col, "sample_col": sample_col,
+    }
+    missing = {k: v for k, v in required.items() if v not in adata.obs.columns}
+    if missing:
+        print(f"ERROR: these obs columns were not found: {missing}", file=sys.stderr)
+        print("Run with --inspect first to see the real column names (and check "
+              "the obsm listing if coordinates live there instead).", file=sys.stderr)
+        sys.exit(1)
+
+    X = adata.X
+    if hasattr(X, "toarray"):
+        X = X.toarray()
+    marker_df = pd.DataFrame(np.asarray(X), columns=list(adata.var_names), index=adata.obs.index)
+    df = pd.concat([adata.obs.reset_index(drop=True), marker_df.reset_index(drop=True)], axis=1)
+
+    df = df.rename(columns={
+        x_col: "centroid_x", y_col: "centroid_y",
+        cell_type_col: "cell_type", experiment_group_col: "experiment_group",
+    })
+
+    _apply_experiment_group_map(df, experiment_group_map)
+    _apply_cell_type_merge_map(df, cell_type_merge_map)
+    _validate_required_columns(df)
+    _write_per_sample_csvs(df, output_dir, sample_col, force)
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Generic prep: raw per-cell data -> *_matched_with_boundaries.csv for triads.py",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--input", "-i", required=True, help="Path to .csv/.tsv or .h5ad")
+    parser.add_argument("--format", choices=["tabular", "h5ad"], default=None,
+                         help="Override auto-detection from file extension")
+    parser.add_argument("--sep", default=None, help="Delimiter for tabular input (default: ',' unless .tsv)")
+    parser.add_argument("--inspect", action="store_true",
+                         help="Print column structure and candidate matches; write nothing.")
+    parser.add_argument("--output", "-o", default="data/matched_cells",
+                         help="Output directory for per-image CSVs (Convert mode only)")
+    parser.add_argument("--cell-type-col", default=None)
+    parser.add_argument("--x-col", default=None)
+    parser.add_argument("--y-col", default=None)
+    parser.add_argument("--experiment-group-col", default=None)
+    parser.add_argument("--sample-col", default=None)
+    parser.add_argument("--experiment-group-map", default=None,
+                         help='Optional JSON, e.g. \'{"1": "CLR", "2": "DII"}\'')
+    parser.add_argument("--cell-type-merge-map", default=None,
+                         help='Optional JSON of {regex: replacement}, e.g. '
+                              '\'{"^CD4\\\\+ T cells.*": "CD4+ T cells"}\'')
+    parser.add_argument("--force", default="",
+                         help="Comma-separated sample values (or full output filenames) "
+                              "to force-rewrite even if already present on disk")
+    args = parser.parse_args()
+
+    if not os.path.exists(args.input):
+        print(f"ERROR: input file not found: {args.input}", file=sys.stderr)
+        sys.exit(1)
+
+    fmt = args.format or _detect_format(args.input)
+
+    if args.inspect:
+        if fmt == "tabular":
+            inspect_tabular(args.input, _sep_for(args.input, args.sep))
+        else:
+            inspect_h5ad(args.input)
+        return
+
+    required = [args.cell_type_col, args.x_col, args.y_col, args.experiment_group_col, args.sample_col]
+    if any(r is None for r in required):
+        print("ERROR: --cell-type-col/--x-col/--y-col/--experiment-group-col/--sample-col "
+              "are all required for conversion. Run with --inspect first to find the "
+              "real column names — do not guess.", file=sys.stderr)
+        sys.exit(1)
+
+    experiment_group_map = json.loads(args.experiment_group_map) if args.experiment_group_map else {}
+    cell_type_merge_map = json.loads(args.cell_type_merge_map) if args.cell_type_merge_map else {}
+    force = {s.strip() for s in args.force.split(",") if s.strip()}
+
+    if fmt == "tabular":
+        convert_tabular(
+            args.input, _sep_for(args.input, args.sep), args.output,
+            cell_type_col=args.cell_type_col, x_col=args.x_col, y_col=args.y_col,
+            experiment_group_col=args.experiment_group_col, sample_col=args.sample_col,
+            experiment_group_map=experiment_group_map, cell_type_merge_map=cell_type_merge_map,
+            force=force,
+        )
+    else:
+        convert_h5ad(
+            args.input, args.output,
+            cell_type_col=args.cell_type_col, x_col=args.x_col, y_col=args.y_col,
+            experiment_group_col=args.experiment_group_col, sample_col=args.sample_col,
+            experiment_group_map=experiment_group_map, cell_type_merge_map=cell_type_merge_map,
+            force=force,
+        )
+
+
+if __name__ == "__main__":
+    main()
+
+
 def _default_matched_cells_input_file(cfg: dict) -> str:
     """Fall back to cell_typing's own output h5ad if matched_cells.input_file isn't set."""
     output_dir    = cfg["paths"]["output_dir"]
@@ -77,13 +447,11 @@ def _default_matched_cells_input_file(cfg: dict) -> str:
 def _run_matched_cells_prep(cfg: dict, mc_cfg: dict, output_dir: str) -> None:
     """
     Convert a cell-typed h5ad/CSV into the *_matched_with_boundaries.csv
-    files run_triad_analysis reads, via prepare_matched_cells.py's own
-    convert_h5ad/convert_tabular. Idempotent -- already-written per-image
+    files run_triad_analysis reads, via this module's own convert_h5ad/
+    convert_tabular (defined above). Idempotent -- already-written per-image
     files are skipped unless listed in mc_cfg['force'] (same skip logic as
-    the standalone script).
+    this module's own --inspect/convert CLI).
     """
-    from prepare_matched_cells import convert_h5ad, convert_tabular, _detect_format
-
     input_file = mc_cfg.get("input_file") or _default_matched_cells_input_file(cfg)
     required = ["cell_type_col", "x_col", "y_col", "experiment_group_col", "sample_col"]
     missing = [k for k in required if not mc_cfg.get(k)]
@@ -91,7 +459,7 @@ def _run_matched_cells_prep(cfg: dict, mc_cfg: dict, output_dir: str) -> None:
         raise ValueError(
             f"analysis.triad.matched_cells.{missing} must be set -- these are "
             f"dataset-specific column names, not something this step can guess. Run:\n"
-            f"  python prepare_matched_cells.py --inspect --input {input_file}\n"
+            f"  python spatia/analysis/triads.py --inspect --input {input_file}\n"
             f"to find the real column names, then add them under "
             f"analysis.triad.matched_cells: in the config."
         )
