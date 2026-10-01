@@ -414,7 +414,7 @@ cell_typing:
   clustering:
     n_neighbors: 15
     leiden_resolution: 0.5
-  cell_type_definitions_file: "cell_type_definitions/crc_tma.yaml"   # set 2026-09-10 -- resolves
+  cell_type_definitions_file: "/app/cell_type_definitions/crc_tma.yaml"   # path fixed 2026-10-01: was repo-relative, same cwd bug as channel_file (os.path.exists() in cell_typing.py checks it as-is; Nextflow runs from a /tmp scratch dir, not /app, where Dockerfile COPY actually puts this file). set 2026-09-10 -- resolves the missing cell_type_definitions_file crash.
     # Q-FullPipeline-GMMThresholds's open marker-list question along the way: this file's
     # required/excluded marker names (CD8, GzmB, HLA_DR, ...) were checked and match this
     # config's markers.panel short names, not spatia/cell_type_definitions.yaml's default
