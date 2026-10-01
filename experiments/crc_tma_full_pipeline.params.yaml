@@ -494,7 +494,14 @@ analysis:
     # many of the 35 patients have at least one of those 34 images, not the
     # full cohort -- check the run's own "[survival] Patients (subjects)"
     # line before quoting a number anywhere.
-    patient_annotation_file: "/workspace/SPATIA pipeline paper/spatia-pipeline-for-cirro/patient_with_tls_class.csv"
+    # FIXED (2026-10-01): was an absolute /workspace/... path valid only in the
+    # dev environment this file was prepared in -- never resolvable on Cirro.
+    # Same class of bug as channel_file/cell_type_definitions_file: the real CSV
+    # is now committed at experiments/patient_with_tls_class.csv (whitelisted by
+    # .gitignore's experiments/*.csv rule) and baked into the image by the existing
+    # `COPY experiments/ ./experiments/` Dockerfile line -- no Dockerfile change
+    # needed, just this absolute in-container path. Requires an image rebuild.
+    patient_annotation_file: "/app/experiments/patient_with_tls_class.csv"
     patient_id_col: "Patient"
     group_col: "Group"
     group_code_map: {"1": "CLR", "2": "DII"}
@@ -504,7 +511,8 @@ analysis:
     # every run, so it can never silently drift out of sync with whichever
     # images matched_cells actually produced.
     build_image_patient_map:
-      annotation_file: "/workspace/SPATIA pipeline paper/spatia-pipeline-for-cirro/patient_with_tls_class.csv"
+      # Same fix/file as patient_annotation_file above -- see that comment.
+      annotation_file: "/app/experiments/patient_with_tls_class.csv"
       patient_id_col: "Patient"
       spot_col: "TMA spot / region"
     area_per_image_um2: 1168128.0
