@@ -143,11 +143,13 @@ analysis:
     # column) — survival.py no longer auto-derives image->patient from that
     # column (rewritten to be dataset-agnostic; 1:1 image->patient is now the
     # default). Generate this file first:
-    #   python build_image_patient_map.py \
+    #   python spatia/analysis/survival.py \
     #     --annotation-file "<same path as patient_annotation_file above>" \
     #     --patient-id-col Patient --spot-col "TMA spot / region" \
     #     --image-dir data/crc_tma/matched_cells \
     #     --output experiments/crc_tma_image_patient_map.json
+    # (merged into survival.py 2026-10-01 -- build_image_patient_map.py no
+    # longer exists as a separate file)
     # then point this at the resulting file (a JSON path is accepted here,
     # not just an inline dict — see docs/build_image_patient_map.md).
     image_patient_map: "experiments/crc_tma_image_patient_map.json"
