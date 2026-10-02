@@ -1180,6 +1180,26 @@ def run_cell_typing(cfg: dict) -> None:
             print(f"WARNING: cell-typing diagnostic plots failed (non-fatal -- "
                   f"cell_typing itself succeeded): {e}")
 
+        # Optional QuPath cell-typing export -- no-op unless
+        # cell_typing.qupath_export.enabled is set in the config. Same
+        # opt-in pattern as preprocessing.py's own qupath_export block.
+        # Deliberately placed after generate_cell_typing_diagnostics()
+        # above, not inside it -- it reads back
+        # unassigned_candidate_cell_types.csv, which that call just wrote.
+        #
+        # Config:
+        #   cell_typing:
+        #     qupath_export:
+        #       enabled: true
+        qe_cfg = ct_cfg.get("qupath_export") if isinstance(ct_cfg.get("qupath_export"), dict) else None
+        if qe_cfg and qe_cfg.get("enabled", False):
+            print(f"\ncell_typing.qupath_export.enabled -- running QuPath cell-type export...")
+            try:
+                export_qupath_celltypes(adata_cd45, thresholds, output_dir)
+            except Exception as e:
+                print(f"WARNING: QuPath cell-type export failed (non-fatal -- "
+                      f"cell_typing itself succeeded): {e}")
+
 
 # ── Shared output logic ───────────────────────────────────────────────────────
 
@@ -2285,6 +2305,139 @@ def suggest_unassigned_cell_type_combinations(adata, thresholds: dict, column_ma
     print(f"  [diagnostics] Unassigned candidate-combination report: top {len(rec_df)} recurring "
           f"marker patterns cover {top_covered:,} / {n_unassigned:,} Unassigned cells "
           f"({100 * top_covered / n_unassigned:.1f}%) -- {out_path}")
+
+
+def export_qupath_celltypes(adata, thresholds: dict, output_dir: str,
+                             tissue_col: str = "tissue_id") -> None:
+    """
+    Writes one QuPath-importable {tissue_id}_celltypes.tsv per image/core to
+    {output_dir}/celltype_qupath_exports/, so the full cell-typing call --
+    not just triads or preprocessing QC -- can be opened and visually
+    reviewed in QuPath. Added 2026-10-02 at Afrouz's request, specifically
+    to make Unassigned cells inspectable: each cell gets its own
+    `positive_markers` string (every marker this cell is positive for, not
+    just the markers informative() picked), so clicking an Unassigned cell
+    in QuPath shows its actual marker profile directly, without needing a
+    separate lookup. Where this cell's marker-positivity signature (over
+    the same `informative` marker subset) exactly matches one of the top-N
+    rows already written by suggest_unassigned_cell_type_combinations()
+    to {data_dir}/unassigned_candidate_cell_types.csv, this also attaches
+    that row's rank/placeholder name as `candidate_pattern` -- a direct
+    bridge from one cell in QuPath to the candidate-rule table, not a
+    re-derivation of it (same source of truth, read back from disk).
+
+    Non-fatal by design: this is a QC/review export, not pipeline output
+    anything downstream depends on -- see run_cell_typing()'s call site,
+    wrapped the same way preprocessing.py's and triads.py's QuPath exports
+    are.
+
+    Parameters
+    ----------
+    adata : AnnData
+        Final typed adata (adata.obs needs cell_type, centroid_x,
+        centroid_y, tissue_col; cell_id and experiment_group used if
+        present).
+    thresholds : dict
+        Same thresholds dict used throughout cell_typing.py -- keys are
+        marker names, used only to find each marker's `{marker}_pos`
+        boolean column in adata.obs.
+    output_dir : str
+        Pipeline's paths.output_dir (NOT cell_typing_data/ -- this function
+        derives both cell_typing_data/ (to read the candidate-pattern CSV,
+        if present) and celltype_qupath_exports/ (to write TSVs) from it,
+        matching preprocessing.py's qupath_exports/ and triads.py's
+        triad_qupath_exports/, which both live directly under output_dir).
+    """
+    if "cell_type" not in adata.obs.columns:
+        print("  [celltype_qupath_export] skipped -- no cell_type column in adata.obs")
+        return
+    missing = [c for c in ("centroid_x", "centroid_y", tissue_col) if c not in adata.obs.columns]
+    if missing:
+        print(f"  [celltype_qupath_export] skipped -- adata.obs is missing {missing}")
+        return
+
+    data_dir   = os.path.join(output_dir, "cell_typing_data")
+    export_dir = os.path.join(output_dir, "celltype_qupath_exports")
+    os.makedirs(export_dir, exist_ok=True)
+
+    pos_cols = [m for m in thresholds if f"{m}_pos" in adata.obs.columns]
+
+    # -- Per-cell positive-marker list, every cell (not just Unassigned) --
+    # read directly off the real column list, no dependency on any other
+    # function's output.
+    if pos_cols:
+        pos_bool = adata.obs[[f"{m}_pos" for m in pos_cols]].astype(bool)
+        pos_bool.columns = pos_cols
+        positive_markers = pos_bool.apply(
+            lambda row: ", ".join(m for m in pos_cols if row[m]), axis=1
+        )
+    else:
+        positive_markers = pd.Series("", index=adata.obs.index)
+
+    # -- Candidate-pattern lookup for Unassigned cells, read back from the
+    # CSV suggest_unassigned_cell_type_combinations() already wrote (this
+    # function is always called after it in run_cell_typing() -- if that
+    # CSV is missing or malformed for any reason, this degrades gracefully
+    # to blank candidate_pattern values rather than failing the export). --
+    candidate_pattern = pd.Series("", index=adata.obs.index)
+    candidates_csv = os.path.join(data_dir, "unassigned_candidate_cell_types.csv")
+    if pos_cols and os.path.exists(candidates_csv):
+        try:
+            cand_df = pd.read_csv(candidates_csv)
+            informative = sorted(set(
+                m.strip()
+                for cell in cand_df["positive_markers"].tolist() + cand_df["negative_markers"].tolist()
+                for m in str(cell).split(",") if m.strip() and m.strip() != "(none -- all-negative)"
+            ))
+            lookup = {}
+            for _, row in cand_df.iterrows():
+                pos_set = frozenset(
+                    m.strip() for m in str(row["positive_markers"]).split(",")
+                    if m.strip() and m.strip() != "(none -- all-negative)"
+                )
+                lookup[pos_set] = f"#{int(row['rank'])}: {row['suggested_name_placeholder']} "                                    f"({row['pct_of_unassigned']}% of Unassigned)"
+            if informative:
+                unassigned_mask = (adata.obs["cell_type"] == "Unassigned").values
+                sig_bool = adata.obs.loc[unassigned_mask, [f"{m}_pos" for m in informative
+                                                             if f"{m}_pos" in adata.obs.columns]].astype(bool)
+                sig_markers = [m for m in informative if f"{m}_pos" in adata.obs.columns]
+                sig_bool.columns = sig_markers
+                matched = sig_bool.apply(
+                    lambda row: lookup.get(frozenset(m for m in sig_markers if row[m]), ""), axis=1
+                )
+                candidate_pattern.loc[unassigned_mask] = matched
+        except Exception as e:
+            print(f"  [celltype_qupath_export] candidate-pattern lookup skipped (non-fatal): {e}")
+
+    df = pd.DataFrame({
+        "cell_id":          adata.obs["cell_id"].astype(str) if "cell_id" in adata.obs.columns
+                            else adata.obs.index.astype(str),
+        "centroid_x":       adata.obs["centroid_x"].astype(float),
+        "centroid_y":       adata.obs["centroid_y"].astype(float),
+        "cell_type":        adata.obs["cell_type"].astype(str),
+        "tissue_id":        adata.obs[tissue_col].astype(str),
+        "experiment_group": adata.obs["experiment_group"].astype(str) if "experiment_group" in adata.obs.columns else "",
+        "positive_markers": positive_markers,
+        "candidate_pattern": candidate_pattern,
+    })
+    if "area" in adata.obs.columns:
+        df["area"] = adata.obs["area"].astype(float)
+
+    n_total = 0
+    n_unassigned_total = 0
+    n_matched_total = 0
+    for tissue_id, sub in df.groupby("tissue_id"):
+        safe_id = str(tissue_id).replace("/", "_").replace(" ", "_")
+        out_path = os.path.join(export_dir, f"{safe_id}_celltypes.tsv")
+        sub.to_csv(out_path, sep="\t", index=False)
+        n_total += len(sub)
+        n_unassigned_total += int((sub["cell_type"] == "Unassigned").sum())
+        n_matched_total += int((sub["candidate_pattern"] != "").sum())
+
+    n_images = df["tissue_id"].nunique()
+    print(f"  [celltype_qupath_export] {n_total:,} cells exported across {n_images} image(s) "
+          f"({n_unassigned_total:,} Unassigned, {n_matched_total:,} with a top-15 candidate match) "
+          f"-> {export_dir}/")
 
 
 # ── 11. Report bundle: HTML + PDF + text summary ─────────────────────────────

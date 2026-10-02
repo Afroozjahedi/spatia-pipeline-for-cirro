@@ -90,6 +90,7 @@
 !docs/qupath_05-4-1_segmentation_boundaries_visualization.md
 !docs/qupath_05-4-2_celltyping_visualization.md
 !docs/qupath_07-2_triad_visualization.md
+!docs/qupath_05-5_celltyping_visualization.md
 
 # Cirro packaging scaffold (main.nf single-process wrapper, Cirro pipeline
 # manifest, Docker build). Contains known TODOs/placeholders — see each

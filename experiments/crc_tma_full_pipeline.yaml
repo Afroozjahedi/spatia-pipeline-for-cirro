@@ -430,6 +430,18 @@ cell_typing:
     # (which is the LILRB2 mouse panel -- B220/Ly6C/NKP46/SIGLEC F -- wrong species for this
     # CRC dataset entirely, do not point here).
   cluster_labels_file: null
+  # Added 2026-10-02 at Afrouz's request: writes one QuPath-importable
+  # {tissue_id}_celltypes.tsv per image/core to {output_dir}/celltype_qupath_exports/
+  # (spatia/analysis/cell_typing.py's export_qupath_celltypes()). Each cell carries its
+  # own cell_type + full positive-marker list, and Unassigned cells additionally carry
+  # candidate_pattern when their marker signature matches one of the top-15 rows in
+  # cell_typing_data/unassigned_candidate_cell_types.csv -- lets Unassigned cells be
+  # inspected directly in QuPath (tissue context + marker profile + candidate guess)
+  # instead of only as an aggregate table. Set to false to skip (adds runtime: one
+  # pass over adata.obs + a CSV read-back per run). See
+  # pipieline with automatic cell typing/05-5_celltyping_visualization.groovy to render it.
+  qupath_export:
+    enabled: true
 
 analysis:
   triad:
