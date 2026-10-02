@@ -82,8 +82,10 @@
 !docs/spatia_analysis_validation.md
 !docs/generate_preprocessing_summary.md
 
-# QuPath/Groovy scripts themselves stay untracked by design (see header
-# above) — these are docs *about* them, kept in git for reference.
+# QuPath/Groovy scripts for the "automatic cell typing" pipeline are now
+# tracked too (whitelisted below as of 2026-10-02) -- the "semi-automatic
+# cell typing" folder's scripts remain intentionally untracked (see header
+# above). Docs below are about these scripts, kept in git for reference.
 !docs/export_triads_for_qupath.md
 !docs/qupath_00_roi_extract_mask_project.md
 !docs/qupath_00b_auto_tma_dearray.md
@@ -92,6 +94,12 @@
 !docs/qupath_07-2_triad_visualization.md
 !docs/qupath_05-5_celltyping_visualization.md
 !docs/qupath_04-2_preprocessing_visualization.md
+
+# The three Groovy scripts themselves (automatic cell typing pipeline only).
+!pipieline with automatic cell typing/
+!pipieline with automatic cell typing/04-2_preprocessing_visualization.groovy
+!pipieline with automatic cell typing/05-5_celltyping_visualization.groovy
+!pipieline with automatic cell typing/07-2_triad_visualization.groovy
 
 # Cirro packaging scaffold (main.nf single-process wrapper, Cirro pipeline
 # manifest, Docker build). Contains known TODOs/placeholders — see each
