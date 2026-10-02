@@ -45,6 +45,11 @@
 
 nextflow.enable.dsl = 2
 
+params.outdir       = params.outdir ?: null                         // declared explicitly to silence Nextflow's
+                                                                     // "Access to undefined parameter `outdir`" warning
+                                                                     // (harmless -- Cirro always supplies it via
+                                                                     // .cirro/process-input.json's "outdir" mapping --
+                                                                     // but noisy in every Cirro run's log otherwise)
 params.config       = "experiments/crc_tma_full_pipeline.params.yaml"  // pipeline parameters only (no sample metadata)
 params.samplesheet  = "experiments/samplesheet.csv"                    // sample_id,image_path,group -- optional, see run_pipeline.py --help
 params.output_dir   = params.outdir ?: "results"     // FIXED (2026-10-02): Cirro injects the dataset's real
