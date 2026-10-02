@@ -463,8 +463,9 @@ analysis:
       y_col: "y"
       experiment_group_col: "experiment_group"
       sample_col: "tissue_id"
-    # Added 2026-09-23: folds export_triads_for_qupath.py (repo root, still usable
-    # standalone) into run_triad_analysis() itself. Converts every *_triad_pairs.csv
+    # Added 2026-09-23, fully merged into spatia/analysis/triads.py 2026-10-01
+    # (export_triads_for_qupath.py no longer exists as a separate file -- see
+    # triads.py's own comments). Converts every *_triad_pairs.csv
     # this run just wrote into a QuPath-importable *_triads.tsv, ready for
     # 07-2_triad_visualization.groovy. anchor/partner1/partner2 cell-type labels
     # default to this block's own anchor_type/partner_type_1/partner_type_2 above

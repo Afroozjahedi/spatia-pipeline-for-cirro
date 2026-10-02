@@ -490,13 +490,14 @@ def _run_matched_cells_prep(cfg: dict, mc_cfg: dict, output_dir: str) -> None:
     print()
 
 
-# ── QuPath triad export (optional, folded 2026-09-23) ─────────────────────────
-# export_triads_for_qupath.py (repo root) stays as-is: a standalone CLI you can
-# still run by hand against any older output_dir. This wraps its own
-# export_one_image() function directly so a normal run_triad_analysis() call
-# can also produce QuPath-ready TSVs without a second manual invocation --
-# same "fold a manual script into its consuming module" pattern as
-# _run_matched_cells_prep above.
+# ── QuPath triad export (optional, folded 2026-09-23; merged in full 2026-10-01) ──
+# CORRECTED 2026-10-01: export_triads_for_qupath.py was a separate repo-root
+# script, imported here via the same sys.path hack as prepare_matched_cells.py
+# used to be -- and just as unreachable at runtime (never COPYed into the
+# Docker image), so this step crashed with ModuleNotFoundError on the first
+# real run that got far enough to reach it. Its two needed functions are now
+# merged directly into this module, right below (same fix, same reason, as
+# the prepare_matched_cells.py merge above).
 #
 # Config:
 #   analysis:
@@ -513,14 +514,91 @@ def _run_matched_cells_prep(cfg: dict, mc_cfg: dict, output_dir: str) -> None:
 #
 # Omit analysis.triad.qupath_export entirely and this is a complete no-op.
 
+# ---- Merged from export_triads_for_qupath.py (2026-10-01), per Afrouz's
+# standing preference that a helper used by only one pipeline module live
+# in that module, not as a separate file imported via sys.path -- same
+# pattern already applied to prepare_matched_cells.py above. Only the two
+# functions _run_qupath_export actually calls are brought in (the
+# standalone script's own CLI/main() is not reproduced here -- this run's
+# own analysis.triad.qupath_export config block is the supported way to
+# get the same *_triads.tsv output; this module already has one CLI
+# entry point, from the prepare_matched_cells.py merge above).
+# ----
+
+def _load_triad_pairs_csv(csv_path: str) -> pd.DataFrame:
+    """Read one *_triad_pairs.csv. Raises with a clear message on failure
+    rather than silently skipping — this is a deterministic prep step, a
+    malformed input file should stop the run, not produce a partial export."""
+    try:
+        return pd.read_csv(csv_path)
+    except Exception as e:
+        raise RuntimeError(f"Could not read {os.path.basename(csv_path)}: {e}") from e
+
+
+def export_one_image(
+    csv_path: str,
+    output_dir: str,
+    anchor_cell_type: str,
+    partner1_cell_type: str,
+    partner2_cell_type: str,
+) -> int:
+    """Converts one *_triad_pairs.csv into {image_id}_triads.tsv.
+    Returns the number of triads exported (0 if the file has none)."""
+    image_id = os.path.basename(csv_path).replace("_triad_pairs.csv", "")
+    df = _load_triad_pairs_csv(csv_path)
+
+    required_cols = ["anchor_x", "anchor_y", "partner1_x", "partner1_y", "partner2_x", "partner2_y"]
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"{os.path.basename(csv_path)} is missing required columns: {missing}")
+
+    rows = []
+    for i, row in enumerate(df.itertuples(index=False), start=1):
+        r = row._asdict()
+        tid = f"triad_{i:05d}"
+
+        d_ap1  = float(r.get("dist_anchor_p1_um", 0) or 0)
+        d_ap2  = float(r.get("dist_anchor_p2_um", 0) or 0)
+        d_p1p2 = float(r.get("dist_p1_p2_um", 0) or 0)
+        group  = str(r.get("experiment_group", "Unknown"))
+
+        rows.append({
+            "triad_id": tid, "role": "anchor", "cell_type": anchor_cell_type,
+            "centroid_x": float(r["anchor_x"]), "centroid_y": float(r["anchor_y"]),
+            "experiment_group": group, "cell_id": str(r.get("anchor_cell_id", "")),
+            "dist_anchor_p1_um": round(d_ap1, 2), "dist_anchor_p2_um": round(d_ap2, 2),
+            "dist_p1_p2_um": round(d_p1p2, 2),
+        })
+        rows.append({
+            "triad_id": tid, "role": "partner1", "cell_type": partner1_cell_type,
+            "centroid_x": float(r["partner1_x"]), "centroid_y": float(r["partner1_y"]),
+            "experiment_group": group, "cell_id": str(r.get("partner1_cell_id", "")),
+            "dist_anchor_p1_um": round(d_ap1, 2), "dist_anchor_p2_um": "",
+            "dist_p1_p2_um": round(d_p1p2, 2),
+        })
+        rows.append({
+            "triad_id": tid, "role": "partner2", "cell_type": partner2_cell_type,
+            "centroid_x": float(r["partner2_x"]), "centroid_y": float(r["partner2_y"]),
+            "experiment_group": group, "cell_id": str(r.get("partner2_cell_id", "")),
+            "dist_anchor_p1_um": "", "dist_anchor_p2_um": round(d_ap2, 2),
+            "dist_p1_p2_um": round(d_p1p2, 2),
+        })
+
+    out_df = pd.DataFrame(rows, columns=[
+        "triad_id", "role", "cell_type", "centroid_x", "centroid_y",
+        "experiment_group", "cell_id",
+        "dist_anchor_p1_um", "dist_anchor_p2_um", "dist_p1_p2_um",
+    ])
+    out_path = os.path.join(output_dir, f"{image_id}_triads.tsv")
+    out_df.to_csv(out_path, sep="\t", index=False)
+    return len(df)
+
 def _run_qupath_export(t_cfg: dict, qe_cfg: dict, output_dir: str) -> None:
     """
     Convert every *_triad_pairs.csv just written in output_dir into a
     QuPath-importable *_triads.tsv file, ready for
     07-2_triad_visualization.groovy. See module docstring above for config.
     """
-    from export_triads_for_qupath import export_one_image
-
     anchor   = qe_cfg.get("anchor_cell_type")   or t_cfg.get("anchor_type")     or "Dendritic cells"
     partner1 = qe_cfg.get("partner1_cell_type") or t_cfg.get("partner_type_1")  or "CD4 T cells"
     partner2 = qe_cfg.get("partner2_cell_type") or t_cfg.get("partner_type_2")  or "CD8 T cells"
