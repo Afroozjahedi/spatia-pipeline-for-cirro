@@ -1046,12 +1046,35 @@ def run_qupath_export(cfg: dict) -> str:
             df_raw["roi_width"]  = 2 * df_raw["radius"]
             df_raw["roi_height"] = 2 * df_raw["radius"]
 
+            # "DAPI" alias column -- added 2026-10-02 for
+            # 04-2_preprocessing_visualization.groovy (Afrouz's existing,
+            # previously-working QuPath script from the manual notebook
+            # pipeline, now wired into this automated export). That script
+            # does an unguarded headers.indexOf('DAPI') lookup with no
+            # fallback -- real panel files name this column after the
+            # actual resolved marker (e.g. "HOECHST1 (C1)" for the CRC TMA
+            # panel, confirmed against experiments/crc_tma_full/
+            # channelNames.txt; nuclei_channel: "auto" resolves to
+            # panel_names[0], never the literal string "DAPI"). Without
+            # this alias, indexOf('DAPI') would return -1, and Groovy's
+            # negative-index-from-end semantics mean cols[-1] silently
+            # reads the LAST tsv_cols entry (dapi_threshold -- one
+            # per-image scalar, not a per-cell DAPI value) as if it were
+            # every cell's real DAPI measurement -- wrong data, no error,
+            # no warning. Guarded so a panel whose resolved nuclei column
+            # happens to already be named "DAPI" doesn't get a duplicate
+            # column.
+            if nuclei_col != "DAPI":
+                df_raw["DAPI"] = df_raw[nuclei_col]
+
             tsv_cols = [
                 "centroid_x", "centroid_y", "roi_x", "roi_y",
                 "roi_width", "roi_height", "area", nuclei_col,
                 "experiment_group", "image_ID", "tissue_id",
                 "classification", "area_threshold", "dapi_threshold",
             ]
+            if nuclei_col != "DAPI":
+                tsv_cols.append("DAPI")
             safe_id  = image_id.replace("/", "_").replace(" ", "_")
             tsv_path = os.path.join(qupath_dir, f"{safe_id}_qupath_cells.tsv")
             df_raw[tsv_cols].to_csv(tsv_path, sep="\t", index=False)
