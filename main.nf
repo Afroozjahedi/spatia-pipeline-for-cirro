@@ -47,7 +47,16 @@ nextflow.enable.dsl = 2
 
 params.config       = "experiments/crc_tma_full_pipeline.params.yaml"  // pipeline parameters only (no sample metadata)
 params.samplesheet  = "experiments/samplesheet.csv"                    // sample_id,image_path,group -- optional, see run_pipeline.py --help
-params.output_dir   = "results"                     // Nextflow-local publish dir
+params.output_dir   = params.outdir ?: "results"     // FIXED (2026-10-02): Cirro injects the dataset's real
+                                                      // S3 output path as params.outdir via .cirro/process-input.json's
+                                                      // "outdir": "$.dataset.dataPath" mapping (confirmed against a working
+                                                      // sibling Cirro pipeline at this org, btc-oncoanalyser, which uses the
+                                                      // same pattern). Without this, params.output_dir stayed a LOCAL relative
+                                                      // "results" path -- publishDir copied into the ephemeral head-job
+                                                      // container's scratch space, not to Cirro's dataset, so every run that
+                                                      // completed (even a clean exit 0, e.g. CRC_run 28) published nothing.
+                                                      // "results" remains the default for manual/local runs where params.outdir
+                                                      // is never set.
 params.container    = params.container ?: "spatia-pipeline:latest"  // default for manual/local runs -- Cirro overrides this via process-compute.config's params.container (see 2026-09-30 fix: this used to be an unconditional assignment that silently stomped any container Cirro supplied)
 
 process run_spatia_pipeline {
