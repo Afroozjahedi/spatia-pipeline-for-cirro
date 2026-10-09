@@ -89,6 +89,8 @@
 !docs/export_triads_for_qupath.md
 !docs/qupath_00_roi_extract_mask_project.md
 !docs/qupath_00b_auto_tma_dearray.md
+!qupath_scripts/
+!qupath_scripts/00b_auto_tma_dearray.groovy
 !docs/qupath_05-4-1_segmentation_boundaries_visualization.md
 !docs/qupath_05-4-2_celltyping_visualization.md
 !docs/qupath_07-2_triad_visualization.md
