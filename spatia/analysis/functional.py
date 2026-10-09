@@ -4,8 +4,10 @@ spatia.analysis.functional
 Standalone functional marker analysis step.
 
 Reads the per-image outputs already written by the triads step:
-  {output_dir}/{image_id}_cells_with_triad_flags.csv  — cell-level data + triad membership
-  {output_dir}/{image_id}_triad_pairs.csv             — pairwise distances for each triad
+  {output_dir}/triad_data/{image_id}_cells_with_triad_flags.csv  — cell-level data + triad membership
+  {output_dir}/triad_data/{image_id}_triad_pairs.csv             — pairwise distances for each triad
+(falls back to {output_dir}/{image_id}_*.csv directly for older runs predating
+the triad_data/ subfolder, added 2026-10-09)
 
 Recomputes in-triad membership at the functional reporting radius (which can be
 tighter than the search radius used during detection) and then, for each configured
@@ -45,6 +47,16 @@ from scipy.stats import mannwhitneyu
 
 
 # ── Config helpers (mirrors triads.py) ───────────────────────────────────────
+
+def _triad_file(output_dir: str, filename: str) -> str:
+    """Resolves a triads-step output file: prefers output_dir/triad_data/<filename>
+    (where triads.py has written it since 2026-10-09), falling back to
+    output_dir/<filename> directly for runs produced before that change."""
+    new_path = os.path.join(output_dir, "triad_data", filename)
+    if os.path.exists(new_path):
+        return new_path
+    return os.path.join(output_dir, filename)
+
 
 def _get_experiment_group(image_id: str, image_experiment_group_map: dict, experiment_groups: list) -> str:
     if image_id in image_experiment_group_map:
@@ -150,10 +162,12 @@ def run_functional_analysis(cfg: dict) -> None:
 
     # ── Discover per-image cells files ────────────────────────────────────────
     cell_files = sorted(glob.glob(
+        os.path.join(output_dir, "triad_data", "*_cells_with_triad_flags.csv")
+    )) or sorted(glob.glob(
         os.path.join(output_dir, "*_cells_with_triad_flags.csv")
     ))
     if not cell_files:
-        print(f"[functional] ⚠️  No *_cells_with_triad_flags.csv found in {output_dir}")
+        print(f"[functional] ⚠️  No *_cells_with_triad_flags.csv found in {output_dir} or {output_dir}/triad_data")
         print("[functional]    Run the triads step first.")
         return
     print(f"[functional] Found {len(cell_files)} cell files.\n")
@@ -178,7 +192,7 @@ def run_functional_analysis(cfg: dict) -> None:
             df.insert(0, "cell_id", df.index.astype(str))
 
         # Load corresponding triad pairs (may not exist if no triads were found)
-        pairs_path = os.path.join(output_dir, f"{image_id}_triad_pairs.csv")
+        pairs_path = _triad_file(output_dir, f"{image_id}_triad_pairs.csv")
         triad_pairs = pd.DataFrame()
         if os.path.exists(pairs_path):
             try:

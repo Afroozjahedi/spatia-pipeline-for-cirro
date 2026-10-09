@@ -22,13 +22,15 @@ Image -> patient/subject mapping
 
 Reads
 -----
-  {output_dir}/triad_summary.csv                     — from triads.py
-  {output_dir}/{image_id}_cells_with_triad_flags.csv  — from triads.py, only
+  {output_dir}/triad_data/triad_summary.csv                     — from triads.py
+  {output_dir}/triad_data/{image_id}_cells_with_triad_flags.csv — from triads.py, only
       read if analysis.survival.marker_exposures is configured
-  {output_dir}/{image_id}_triad_pairs.csv             — from triads.py, only
+  {output_dir}/triad_data/{image_id}_triad_pairs.csv             — from triads.py, only
       read alongside the above (to recompute in-triad membership at
       report_radius_um the same way functional.py does, so a marker-exposure
       number here means the same thing functional.py's own numbers do)
+  (falls back to {output_dir}/<filename> directly for runs produced before
+  the triad_data/ subfolder, added 2026-10-09)
   cfg["analysis"]["survival"]["patient_annotation_file"] — external
       clinical/outcome data. REQUIRED: outcome data (time-to-event, censor
       status) cannot be derived from imaging alone, this always has to come
@@ -122,6 +124,16 @@ try:
     _HAS_COX = True
 except ImportError:
     _HAS_COX = False
+
+
+def _triad_file(output_dir: str, filename: str) -> str:
+    """Resolves a triads-step output file: prefers output_dir/triad_data/<filename>
+    (where triads.py has written it since 2026-10-09), falling back to
+    output_dir/<filename> directly for runs produced before that change."""
+    new_path = os.path.join(output_dir, "triad_data", filename)
+    if os.path.exists(new_path):
+        return new_path
+    return os.path.join(output_dir, filename)
 
 
 # ── Image -> patient mapping ────────────────────────────────────────────────
@@ -305,7 +317,7 @@ def _compute_in_triad_ids(output_dir: str, image_id: str, report_radius_um: floa
     (read *_triad_pairs.csv, filter to report_radius_um, union all three
     role's cell IDs) so a cell counted as 'in-triad' here matches what
     functional.py would call in-triad for the same image."""
-    pairs_path = os.path.join(output_dir, f"{image_id}_triad_pairs.csv")
+    pairs_path = _triad_file(output_dir, f"{image_id}_triad_pairs.csv")
     if not os.path.exists(pairs_path):
         return set()
     try:
@@ -345,7 +357,7 @@ def _build_patient_marker_exposure(
 
     per_image_rows = []
     for image_id in all_image_ids:
-        cells_path = os.path.join(output_dir, f"{image_id}_cells_with_triad_flags.csv")
+        cells_path = _triad_file(output_dir, f"{image_id}_cells_with_triad_flags.csv")
         if not os.path.exists(cells_path):
             continue
         try:
@@ -670,9 +682,9 @@ def run_survival_analysis(cfg: dict) -> None:
         print("[survival]    Set analysis.survival.patient_annotation_file in YAML.")
         return
 
-    summary_csv = os.path.join(output_dir, "triad_summary.csv")
+    summary_csv = _triad_file(output_dir, "triad_summary.csv")
     if not os.path.exists(summary_csv):
-        print(f"[survival] ⚠️  triad_summary.csv not found in {output_dir}")
+        print(f"[survival] ⚠️  triad_summary.csv not found in {output_dir} or {output_dir}/triad_data")
         print("[survival]    Run the triads step first.")
         return
 
