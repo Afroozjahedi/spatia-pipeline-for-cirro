@@ -64,6 +64,20 @@ params.output_dir   = params.outdir ?: "results"     // FIXED (2026-10-02): Cirr
                                                       // is never set.
 params.container    = params.container ?: "spatia-pipeline:latest"  // default for manual/local runs -- Cirro overrides this via process-compute.config's params.container (see 2026-09-30 fix: this used to be an unconditional assignment that silently stomped any container Cirro supplied)
 
+// Viewer: each core's image, cell outlines and typed cells as a
+// spatial-data-studio checkpoint, published with the static viewer under
+// ${output_dir}/viewer/. The checkpoint writer (backend/cli.py) and the
+// viewer build come from the same spatial-data-studio release, so they agree
+// on the checkpoint format; bump both together by changing sds_version.
+params.sds_version          = "v1.2.0"
+params.sds_source           = "https://github.com/CirroBio/spatial-data-studio/archive/refs/tags/${params.sds_version}.tar.gz"
+params.viewer_dist          = "https://github.com/CirroBio/spatial-data-studio/releases/download/${params.sds_version}/viewer-dist.tar.gz"
+params.viewer_title         = "SPATIA"
+params.viewer_container     = "ghcr.io/astral-sh/uv:python3.11-bookworm"   // squidpy (a cli.py dependency) needs Python 3.11, not the SPATIA image's 3.9
+params.viewer_os_packages   = "libgl1 libglib2.0-0 libgomp1"                 // image-tiling libraries missing from bookworm
+params.lowres_max_image_mb  = 10                                             // image budget for each core's low-res copy
+params.results_dir          = null                                           // viewer_only entry: an existing run's results/ folder
+
 process run_spatia_pipeline {
     tag "${params.config}"
 
@@ -115,8 +129,166 @@ process run_spatia_pipeline {
     """
 }
 
+process build_viewer_checkpoint {
+    tag "${label}"
+
+    container params.viewer_container
+    cpus 2
+    memory { 8.GB * task.attempt }
+    errorStrategy { task.exitStatus == 137 ? 'retry' : 'terminate' }
+    maxRetries 2
+
+    publishDir "${params.output_dir}/viewer", mode: 'copy'
+
+    input:
+    tuple val(label), path(seg_pickle), path(cell_table), path(triad_pairs)   // triad_pairs: [] for a core with no triads
+    path build_script
+    path sds_source
+
+    output:
+    path "checkpoints/${label}/*.sdata.zarr.zip", emit: checkpoints
+
+    script:
+    // cli.py with no recipes only loads the store and saves it as a
+    // checkpoint: names it, sets how it opens (cells coloured by cell_type,
+    // drawn as outlines once zoomed in) and adds the low-res copy.
+    """
+    apt-get update
+    apt-get install -y --no-install-recommends ${params.viewer_os_packages}
+    mkdir sds
+    tar -xzf ${sds_source} -C sds --strip-components=1
+    uv venv --python 3.11
+    uv pip install -r sds/backend/requirements.txt
+
+    .venv/bin/python ${build_script} \\
+        --seg-pickle '${seg_pickle}' \\
+        --cells '${cell_table}' \\
+        ${triad_pairs ? "--triad-pairs '${triad_pairs}'" : ''} \\
+        --output core.zarr
+
+    mkdir -p .sds-work
+    export SDS_WORK_DIR="\$PWD/.sds-work"
+    export SDS_CONTAINER_MEM_MB=${task.memory.toMega()}
+    export MPLBACKEND=Agg
+    .venv/bin/python sds/backend/cli.py \\
+        --parser spatialdata \\
+        --input core.zarr \\
+        --output 'checkpoints/${label}' \\
+        --name results \\
+        --lowres-max-image-mb ${params.lowres_max_image_mb} \\
+        --lowres-name lowres \\
+        --session-name '${label}' \\
+        --display-color-by obs:cell_type \\
+        --display-render-mode points+shapes
+    """
+}
+
+process publish_viewer {
+    container params.viewer_container
+
+    // Published file by file: the checkpoints land in this same folder, and
+    // publishing a directory would replace it rather than merge into it.
+    publishDir "${params.output_dir}/viewer", mode: 'copy',
+               saveAs: { f -> f.toString().tokenize('/').drop(1).join('/') }
+
+    input:
+    path viewer_dist
+    val checkpoints
+
+    output:
+    path 'site/**'
+
+    script:
+    // index.json lists the checkpoints for the viewer's landing page; each
+    // path resolves against index.json's own URL. Sorted so the listing does
+    // not depend on which core finished first.
+    def entries = checkpoints
+        .collect { f -> [label: f.parent.name, file: f.name] }
+        .sort { a, b -> a.label <=> b.label ?: a.file.startsWith('lowres-') <=> b.file.startsWith('lowres-') }
+        .collect { e -> [
+            path : "checkpoints/${e.label}/${e.file}".toString(),
+            label: e.file.startsWith('lowres-') ? "${e.label} (low-res image)".toString() : e.label,
+        ] }
+    def index_json = groovy.json.JsonOutput.prettyPrint(
+        groovy.json.JsonOutput.toJson([title: params.viewer_title, checkpoints: entries]))
+    """
+    mkdir site
+    tar -xzf ${viewer_dist} -C site
+    cat > site/index.json <<'INDEX_JSON'
+${index_json}
+INDEX_JSON
+    """
+}
+
+def stripSuffix(String name, List suffixes) {
+    def suffix = suffixes.find { s -> name.endsWith(s) }
+    return name.substring(0, name.length() - suffix.length())
+}
+
+/*
+ * One viewer checkpoint per core, from the files run_spatia_pipeline wrote.
+ * A core is keyed by its seg pickle (<core>_seg_output.pickle); its cell table
+ * is named <group>_<core>_..., and that <group>_<core> stem is the label the
+ * viewer shows. Its <group>_<core>_triad_pairs.csv, written only when the core
+ * has triads, becomes the triangles drawn over it.
+ */
+workflow SPATIA_VIEWER {
+    take:
+    results     // every file under results/
+
+    main:
+    def seg_pickle_suffix = "_seg_output.pickle"
+    def triad_pairs_suffix = "_triad_pairs.csv"
+    // Most informative first. triads.py writes no flags file for a core with
+    // zero triads, so the matched-cells table stands in for it.
+    def cell_table_suffixes = ["_cells_with_triad_flags.csv", "_matched_with_boundaries.csv"]
+
+    def files = results.flatten()
+    def pickles = files
+        .filter { f -> f.name.endsWith(seg_pickle_suffix) }
+        .map { f -> [stripSuffix(f.name, [seg_pickle_suffix]), f] }
+    def cell_tables = files
+        .filter { f -> cell_table_suffixes.any { s -> f.name.endsWith(s) } }
+    def triad_pairs = files
+        .filter { f -> f.name.endsWith(triad_pairs_suffix) }
+        .map { f -> [stripSuffix(f.name, [triad_pairs_suffix]), f] }
+
+    def cores = pickles
+        .combine(cell_tables)
+        .filter { core, _pickle, table -> stripSuffix(table.name, cell_table_suffixes).endsWith("_${core}") }
+        .groupTuple(by: [0, 1])
+        .map { _core, pickle, tables ->
+            def table = tables.min { t -> cell_table_suffixes.findIndexOf { s -> t.name.endsWith(s) } }
+            [stripSuffix(table.name, cell_table_suffixes), pickle, table]
+        }
+        .join(triad_pairs, remainder: true)
+        // remainder pads with a single null, so an unmatched entry is
+        // [label, null, pairs] (pairs whose core has no pickle: dropped) or
+        // [label, pickle, table, null] (a core with no triads).
+        .filter { entry -> entry[1] instanceof Path }
+        .map { entry -> [entry[0], entry[1], entry[2], entry[3] ?: []] }
+
+    build_viewer_checkpoint(
+        cores,
+        file("${projectDir}/bin/build_spatialdata.py"),
+        file(params.sds_source),
+    )
+    publish_viewer(
+        file(params.viewer_dist),
+        build_viewer_checkpoint.out.checkpoints.flatten().toList(),
+    )
+}
+
 workflow {
     config_ch      = Channel.fromPath(params.config)
     samplesheet_ch = Channel.fromPath(params.samplesheet)
     run_spatia_pipeline(config_ch, samplesheet_ch)
+    SPATIA_VIEWER(run_spatia_pipeline.out.results)
+}
+
+// Builds only the viewer, from an existing run's results/ folder:
+//   nextflow run main.nf -entry viewer_only --results_dir path/to/results
+workflow viewer_only {
+    if( !params.results_dir ) error "viewer_only needs --results_dir (an existing run's results/ folder)"
+    SPATIA_VIEWER(channel.fromPath("${params.results_dir}/**"))
 }
