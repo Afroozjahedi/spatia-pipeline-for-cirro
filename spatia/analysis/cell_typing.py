@@ -107,6 +107,74 @@ def _load_cell_type_definitions(path: str) -> dict:
     return raw.get("cell_type_definitions", raw)
 
 
+def _apply_cell_type_overrides(base_defs: dict, overrides: dict) -> dict:
+    """
+    Merges `overrides` onto `base_defs` one cell-type key at a time: a key
+    present in `overrides` REPLACES that cell type's rules entirely (not a
+    deep merge of individual required/excluded/preferred lists -- a partial
+    rule is ambiguous to merge, a full replacement is not), a key not
+    present in `overrides` is left untouched, and a key in `overrides` that
+    isn't in `base_defs` adds a new cell type. Returns a new dict; neither
+    input is mutated.
+    """
+    merged = dict(base_defs)
+    for cell_type, rules in overrides.items():
+        merged[cell_type] = rules
+    return merged
+
+
+def _resolve_cell_type_definitions(ct_cfg: dict) -> dict:
+    """
+    Resolves the cell_type_definitions dict for automatic mode, added
+    2026-10-12 (at Afrouz's request) so fine-tuning which marker-positivity
+    combos map to which cell type -- the main lever on the Unassigned rate
+    -- no longer requires a GitHub commit + Docker image rebuild for every
+    attempt. cell_type_definitions_file still works exactly as before (and
+    stays the default for the checked-in, shared definitions) -- this adds
+    two config-only escape hatches on top of it, checked in this order:
+
+      1. cell_typing.cell_type_definitions (inline dict in the same pipeline
+         params YAML already uploaded per Cirro run) -- a COMPLETE
+         replacement set, used as-is, cell_type_definitions_file ignored.
+         For trying a standalone alternative ruleset.
+
+      2. cell_typing.cell_type_definitions_overrides (inline dict, same
+         file) -- merged on top of cell_type_definitions_file's checked-in
+         definitions, one cell-type key at a time (see
+         _apply_cell_type_overrides). For tweaking/adding a handful of
+         types without retyping the other ~20.
+
+      3. Neither present -- cell_type_definitions_file alone, unchanged
+         behavior from before this date.
+
+    Either way, no separate file upload or image rebuild is needed: both
+    new keys live in the same YAML that already reaches the container via
+    .cirro/preprocess.py's existing config_file upload/decode step.
+    """
+    inline_defs = ct_cfg.get("cell_type_definitions")
+    if inline_defs:
+        base_defs = inline_defs
+        source_desc = "inline cell_typing.cell_type_definitions (full replacement)"
+    else:
+        defs_file = ct_cfg.get("cell_type_definitions_file")
+        if not defs_file or not os.path.exists(defs_file):
+            raise FileNotFoundError(
+                f"cell_type_definitions_file not found: {defs_file}\n"
+                "Set 'cell_typing.cell_type_definitions_file' in your config, "
+                "or provide 'cell_typing.cell_type_definitions' inline instead."
+            )
+        base_defs = _load_cell_type_definitions(defs_file)
+        source_desc = f"{defs_file}"
+
+    overrides = ct_cfg.get("cell_type_definitions_overrides")
+    if overrides:
+        base_defs = _apply_cell_type_overrides(base_defs, overrides)
+        source_desc += f" + {len(overrides)} override(s) from cell_type_definitions_overrides"
+
+    print(f"  cell_type_definitions resolved from: {source_desc}")
+    return base_defs
+
+
 def _load_cluster_labels(path: str) -> dict:
     """Returns {cluster_id_str: cell_type_label} or None if file missing/incomplete."""
     if not path or not os.path.exists(path):
@@ -1094,13 +1162,7 @@ def run_cell_typing(cfg: dict) -> None:
     # AUTOMATIC MODE
     # ══════════════════════════════════════════════════════════
     if mode == "automatic":
-        defs_file = ct_cfg.get("cell_type_definitions_file")
-        if not defs_file or not os.path.exists(defs_file):
-            raise FileNotFoundError(
-                f"cell_type_definitions_file not found: {defs_file}\n"
-                "Set 'cell_typing.cell_type_definitions_file' in your config."
-            )
-        cell_type_defs = _load_cell_type_definitions(defs_file)
+        cell_type_defs = _resolve_cell_type_definitions(ct_cfg)
         print(f"\n  Assigning cell types from {len(cell_type_defs)} definitions...")
         adata_cd45.obs["cell_type"] = assign_cell_types_automatic(adata_cd45, cell_type_defs)
 
