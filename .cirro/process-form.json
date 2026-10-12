@@ -8,8 +8,20 @@
         "format": "file",
         "title": "SPATIA pipeline params (.yaml)",
         "description": "Pipeline parameters only -- thresholds, which steps run, marker panel, etc. No sample paths or metadata (those come from the dataset's own samplesheet, uploaded via Cirro's native Samples/Upload Samplesheet feature)."
+      },
+      "steps_to_run": {
+        "type": "string",
+        "title": "Steps to run (optional)",
+        "description": "Comma-separated list of steps to run, e.g. 'cell_typing' or 'cell_typing,triads' to skip everything upstream of cell typing. Leave blank to run every step enabled in the config YAML (default, unchanged behavior). Valid names: tif_conversion, roi_masking, segmentation, preprocessing, cell_typing, triads, functional, survival. An invalid name fails the run immediately with a clear error rather than running the wrong thing. If you restrict to a downstream step like cell_typing, make sure the config's input path (e.g. cell_typing.input_file) already points at a completed prior run's output -- skipping a step does not fetch its input for you."
+      },
+      "skip_steps": {
+        "type": "string",
+        "title": "Steps to skip (optional)",
+        "description": "Comma-separated list of steps to skip even though they're enabled in the config YAML, e.g. 'tif_conversion,roi_masking,segmentation' to start from preprocessing. Leave blank to skip nothing beyond what the config already disables (default, unchanged behavior). Same valid names and same input-path caveat as 'Steps to run' above. If both fields are set, 'Steps to run' is narrowed further by 'Steps to skip' (skip wins for any step named in both)."
       }
     },
-    "required": ["config_file"]
+    "required": [
+      "config_file"
+    ]
   }
 }
