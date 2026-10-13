@@ -593,11 +593,13 @@ def export_one_image(
     out_df.to_csv(out_path, sep="\t", index=False)
     return len(df)
 
-def _run_qupath_export(t_cfg: dict, qe_cfg: dict, output_dir: str) -> None:
+def _run_qupath_export(t_cfg: dict, qe_cfg: dict, output_dir: str, triad_data_dir: str) -> None:
     """
-    Convert every *_triad_pairs.csv just written in output_dir into a
+    Convert every *_triad_pairs.csv just written in triad_data_dir into a
     QuPath-importable *_triads.tsv file, ready for
     07-2_triad_visualization.groovy. See module docstring above for config.
+    export_dir (unless overridden by qe_cfg["output_dir"]) stays a sibling of
+    triad_data_dir under output_dir, matching qc_plots_triads/'s layout.
     """
     anchor   = qe_cfg.get("anchor_cell_type")   or t_cfg.get("anchor_type")     or "Dendritic cells"
     partner1 = qe_cfg.get("partner1_cell_type") or t_cfg.get("partner_type_1")  or "CD4 T cells"
@@ -606,11 +608,11 @@ def _run_qupath_export(t_cfg: dict, qe_cfg: dict, output_dir: str) -> None:
     os.makedirs(export_dir, exist_ok=True)
 
     csv_files = sorted(
-        f for f in os.listdir(output_dir)
+        f for f in os.listdir(triad_data_dir)
         if f.endswith("_triad_pairs.csv") and not f.startswith("._")
-    )
+    ) if os.path.isdir(triad_data_dir) else []
     if not csv_files:
-        print(f"[SPATIA] qupath_export -- no *_triad_pairs.csv found in {output_dir}, nothing to export")
+        print(f"[SPATIA] qupath_export -- no *_triad_pairs.csv found in {triad_data_dir}, nothing to export")
         return
 
     print(f"[SPATIA] qupath_export -- converting {len(csv_files)} file(s) to QuPath TSV "
@@ -619,7 +621,7 @@ def _run_qupath_export(t_cfg: dict, qe_cfg: dict, output_dir: str) -> None:
     for csv_file in csv_files:
         image_id = csv_file.replace("_triad_pairs.csv", "")
         try:
-            n = export_one_image(os.path.join(output_dir, csv_file), export_dir,
+            n = export_one_image(os.path.join(triad_data_dir, csv_file), export_dir,
                                   anchor, partner1, partner2)
         except (RuntimeError, ValueError) as e:
             print(f"[SPATIA] qupath_export -- {image_id}: {e} -- skipping.")
@@ -1189,7 +1191,7 @@ def plot_experiment_group_comparison(summary_df, all_triads_combined, output_dir
 
 # ── Per-image result caching ────────────────────────────────────────────────
 
-def _load_cached_triad_results(image_id: str, output_dir: str, radius_um: float, radius_px: float):
+def _load_cached_triad_results(image_id: str, triad_data_dir: str, radius_um: float, radius_px: float):
     """
     Reconstructs the per-combo summary rows run_triad_analysis() would have
     produced for one image, from its already-written {image_id}_triad_pairs.csv
@@ -1202,7 +1204,7 @@ def _load_cached_triad_results(image_id: str, output_dir: str, radius_um: float,
     Returns (image_summary: list[dict], triads_df: pd.DataFrame) — same shape
     as a freshly-computed image would produce.
     """
-    triads_df = pd.read_csv(os.path.join(output_dir, f"{image_id}_triad_pairs.csv"))
+    triads_df = pd.read_csv(os.path.join(triad_data_dir, f"{image_id}_triad_pairs.csv"))
 
     image_summary = []
     group_cols = ["experiment_group", "anchor_type", "partner1_type", "partner2_type", "triad_combo_label"]
@@ -1246,6 +1248,13 @@ def run_triad_analysis(cfg: dict) -> None:
     input_dir     = cfg["paths"]["input_dir"]
     output_dir    = cfg["paths"]["output_dir"]
     qc_plot_dir   = os.path.join(output_dir, "qc_plots_triads")
+    # Per-image triad_pairs/cells_with_triad_flags CSVs, triad_summary.csv,
+    # trajectory_triads_by_distance.png and experiment_group_comparison_*
+    # all land here now (2026-10-09, at Afrouz's request) instead of loose
+    # in output_dir directly -- qc_plots_triads/ and triad_qupath_exports/
+    # already had their own subfolders; this gives the rest of the triads
+    # step's output one too, so output_dir/ itself only holds subfolders.
+    triad_data_dir = os.path.join(output_dir, "triad_data")
 
     t_cfg          = cfg["analysis"]["triad"]
     radius_um      = t_cfg["radius_um"]
@@ -1260,8 +1269,9 @@ def run_triad_analysis(cfg: dict) -> None:
     report_radius_um   = t_cfg.get("report_radius_um", radius_um)
     trajectory_min_um  = t_cfg.get("trajectory_min_um", 0)
 
-    os.makedirs(output_dir,   exist_ok=True)
-    os.makedirs(qc_plot_dir,  exist_ok=True)
+    os.makedirs(output_dir,     exist_ok=True)
+    os.makedirs(qc_plot_dir,    exist_ok=True)
+    os.makedirs(triad_data_dir, exist_ok=True)
 
     print(f"[SPATIA] Experiment : {exp_name}")
     print(f"[SPATIA] Experiment groups : {experiment_groups}")
@@ -1329,12 +1339,12 @@ def run_triad_analysis(cfg: dict) -> None:
         # image to force it to be reprocessed. Images with zero triads never
         # had these files written in the first place (see the "no triads
         # found" branch below), so they're always reprocessed, not cached.
-        pairs_path = os.path.join(output_dir, f"{image_id}_triad_pairs.csv")
-        flags_path = os.path.join(output_dir, f"{image_id}_cells_with_triad_flags.csv")
+        pairs_path = os.path.join(triad_data_dir, f"{image_id}_triad_pairs.csv")
+        flags_path = os.path.join(triad_data_dir, f"{image_id}_cells_with_triad_flags.csv")
         if os.path.exists(pairs_path) and os.path.exists(flags_path):
             print(f"  ⏭️  Already processed — loading cached results")
             cached_summary, cached_triads_df = _load_cached_triad_results(
-                image_id, output_dir, radius_um, radius_px
+                image_id, triad_data_dir, radius_um, radius_px
             )
             if cached_summary:
                 all_triad_dfs.append(cached_triads_df)
@@ -1417,7 +1427,7 @@ def run_triad_analysis(cfg: dict) -> None:
         if image_triad_dfs:
             all_triads_df = pd.concat(image_triad_dfs, ignore_index=True)
             all_triad_dfs.append(all_triads_df)
-            all_triads_df.to_csv(os.path.join(output_dir, f"{image_id}_triad_pairs.csv"), index=False)
+            all_triads_df.to_csv(os.path.join(triad_data_dir, f"{image_id}_triad_pairs.csv"), index=False)
 
             # Flag cells
             triad_ids    = set(all_triads_df["anchor_cell_id"].astype(str)) | set(all_triads_df["partner1_cell_id"].astype(str)) | set(all_triads_df["partner2_cell_id"].astype(str))
@@ -1425,7 +1435,7 @@ def run_triad_analysis(cfg: dict) -> None:
             df["is_triad_partner1"] = df["cell_id"].astype(str).isin(set(all_triads_df["partner1_cell_id"].astype(str)))
             df["is_triad_partner2"] = df["cell_id"].astype(str).isin(set(all_triads_df["partner2_cell_id"].astype(str)))
             df["in_any_triad"]      = df["cell_id"].astype(str).isin(triad_ids)
-            df.to_csv(os.path.join(output_dir, f"{image_id}_cells_with_triad_flags.csv"), index=False)
+            df.to_csv(os.path.join(triad_data_dir, f"{image_id}_cells_with_triad_flags.csv"), index=False)
 
             # QC plot for top combo — right panel filtered to report_radius_um (e.g. 15 µm)
             top_combo    = max(image_summary, key=lambda x: x["n_triads"])
@@ -1448,7 +1458,7 @@ def run_triad_analysis(cfg: dict) -> None:
         return
 
     summary_df = pd.DataFrame(all_summary_rows)
-    summary_df.to_csv(os.path.join(output_dir, "triad_summary.csv"), index=False)
+    summary_df.to_csv(os.path.join(triad_data_dir, "triad_summary.csv"), index=False)
 
     all_triads_combined = pd.concat(all_triad_dfs, ignore_index=True) if all_triad_dfs else pd.DataFrame()
 
@@ -1458,7 +1468,7 @@ def run_triad_analysis(cfg: dict) -> None:
     print("=" * 65)
     print(top20.to_string(index=False))
 
-    plot_experiment_group_comparison(summary_df, all_triads_combined, output_dir, radius_um, group_areas, experiment_groups,
+    plot_experiment_group_comparison(summary_df, all_triads_combined, triad_data_dir, radius_um, group_areas, experiment_groups,
                               report_radius_um=report_radius_um,
                               trajectory_min_um=trajectory_min_um)
 
@@ -1467,6 +1477,6 @@ def run_triad_analysis(cfg: dict) -> None:
     # is set.
     qe_cfg = t_cfg.get("qupath_export")
     if qe_cfg and qe_cfg.get("enabled", False):
-        _run_qupath_export(t_cfg, qe_cfg, output_dir)
+        _run_qupath_export(t_cfg, qe_cfg, output_dir, triad_data_dir)
 
     print(f"\n[SPATIA] All outputs saved to: {output_dir}")

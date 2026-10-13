@@ -81,24 +81,95 @@ def write_to_s3(data: bytes, s3_uri: str) -> None:
     boto3.client("s3").put_object(Bucket=path.bucket, Key=path.key, Body=data)
 
 
+def _folder_filename_key(path: str) -> str:
+    """
+    Last two path components ("folder/filename.tif"), used as a
+    match key that survives differing S3 prefixes (ds.files' full S3 URI
+    vs. an uploaded samplesheet's dataset-relative path) while still
+    disambiguating files that share a bare filename across different
+    SOURCE DATASETS.
+
+    ADDED 2026-10-12, multi-dataset combined runs: when this pipeline runs
+    against several selected source datasets at once (Afrouz's CRC
+    TMA_A / TMA_B / DII_TMA_A / DII_TMA_B layout), ds.files is the union of
+    every selected dataset's raw files. Two different TMAs can each have a
+    core that happens to be named the same thing (e.g. both TMA_A and
+    TMA_B contain a file literally called reg034_X01_Y01_Z09.tif) -- these
+    are different physical tissue cores, not duplicates. Matching on bare
+    "sample" alone (the old behavior) can't tell them apart: a left-merge
+    would hand ONE metadata row's group to BOTH physical files, silently
+    mislabeling the wrong one -- and, worse, re-creating the exact
+    image_id collision that run_pipeline.py's per-dataset samplesheets
+    were built to avoid (see samplesheets/ and the 8 cross-dataset
+    collisions Afrouz identified and corrected 2026-10-12). Matching on
+    folder+filename instead is safe because each uploaded per-dataset
+    samplesheet's "file" column already encodes which folder it came from
+    (e.g. "TMA_A/reg034_X01_Y01_Z09.tif"), and ds.files' own S3 path ends
+    the same way.
+    """
+    parts = str(path).rstrip("/").split("/")
+    return "/".join(parts[-2:]) if len(parts) >= 2 else (parts[-1] if parts else "")
+
+
 def build_samplesheet(ds: PreprocessDataset) -> pd.DataFrame:
     """
     Merge Cirro's auto-resolved file listing (ds.files) with the
-    sample-level metadata from the uploaded samplesheet (ds.samplesheet),
-    on "sample". ds.files' "file" column is authoritative for the actual
-    S3 path -- if ds.samplesheet also has a "file" column (left over from
-    the original upload), it's dropped rather than merged, to avoid a
-    file_x/file_y collision and to avoid overriding Cirro's own resolved
-    path with whatever was typed into the upload.
+    sample-level metadata from the uploaded samplesheet(s) (ds.samplesheet),
+    matched by folder+filename (see _folder_filename_key) rather than bare
+    "sample" -- required for correctness once this pipeline runs against
+    multiple source datasets that can share bare sample names (see that
+    function's docstring). ds.files' own "file" column (the authoritative
+    S3 path) is what ends up in the output; the uploaded samplesheet's own
+    "file" column is used only to build the match key, then dropped.
+
+    Rows with no metadata match are EXCLUDED from the returned samplesheet
+    (not kept with group=NaN) -- run_pipeline.py's _apply_samplesheet()
+    builds image_experiment_group_map from every row in this output, so an
+    unmatched row would otherwise propagate as a literal missing/NaN group
+    instead of being left out of the run.
     """
-    meta = ds.samplesheet.drop(columns=[c for c in ("file",) if c in ds.samplesheet.columns])
-    merged = pd.merge(ds.files, meta, on="sample", how="left", validate="many_to_one")
-    missing_group = merged["group"].isna().sum() if "group" in merged.columns else 0
-    if missing_group:
-        ds.logger.info(
-            f"WARNING: {missing_group} of {len(merged)} samples have no metadata match "
-            "in the uploaded samplesheet (check the 'sample' values line up exactly)."
+    if "file" not in ds.samplesheet.columns:
+        raise ValueError(
+            "build_samplesheet() requires the uploaded samplesheet to include "
+            "a 'file' column (dataset-relative path, e.g. 'TMA_A/reg034_X01_Y01_Z09.tif') "
+            "-- it's needed to disambiguate files that share a bare sample name "
+            "across different source datasets when this pipeline runs against "
+            "multiple selected datasets at once."
         )
+
+    meta = ds.samplesheet.copy()
+    meta["_match_key"] = meta["file"].map(_folder_filename_key)
+    # Drop "file" (superseded by ds.files' own authoritative S3 path) AND
+    # "sample" (ds.files' "sample" column is kept as authoritative too --
+    # without dropping this, pandas would suffix both sides' "sample"
+    # column into sample_x/sample_y instead of leaving a clean "sample"
+    # column, which would break run_pipeline.py's _resolve_samplesheet_columns()).
+    meta = meta.drop(columns=[c for c in ("file", "sample") if c in meta.columns])
+
+    files = ds.files.copy()
+    files["_match_key"] = files["file"].map(_folder_filename_key)
+
+    merged = pd.merge(files, meta, on="_match_key", how="left", validate="many_to_one")
+    merged = merged.drop(columns=["_match_key"])
+
+    n_total = len(merged)
+    if "group" in merged.columns:
+        unmatched = merged["group"].isna()
+    else:
+        unmatched = pd.Series([False] * n_total, index=merged.index)
+    n_unmatched = int(unmatched.sum())
+    if n_unmatched:
+        ds.logger.info(
+            f"WARNING: {n_unmatched} of {n_total} files (matched by folder/filename) have no "
+            "row in any uploaded samplesheet -- EXCLUDING them from this run rather than "
+            "processing them with an unknown group. If this count looks too high, check that "
+            "EVERY selected dataset has its own uploaded samplesheet with a 'file' column in "
+            "the 'folder/filename.tif' form."
+        )
+        for _, r in merged[unmatched].iterrows():
+            ds.logger.info(f"  excluded (no samplesheet match): {r.get('file', '?')}")
+        merged = merged[~unmatched].reset_index(drop=True)
+
     return merged
 
 

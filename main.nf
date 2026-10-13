@@ -64,6 +64,22 @@ params.output_dir   = params.outdir ?: "results"     // FIXED (2026-10-02): Cirr
                                                       // is never set.
 params.container    = params.container ?: "spatia-pipeline:latest"  // default for manual/local runs -- Cirro overrides this via process-compute.config's params.container (see 2026-09-30 fix: this used to be an unconditional assignment that silently stomped any container Cirro supplied)
 
+// steps_to_run / skip_steps -- added 2026-10-12 at Afrouz's request, so Cirro
+// users can skip expensive upstream steps (segmentation, preprocessing) when
+// iterating on cell_typing/triads/functional/survival parameters, instead of
+// re-running the whole 30-45min pipeline every time. run_pipeline.py has
+// supported --steps/--skip since before this date -- this just forwards
+// Cirro's new "Steps to run" / "Steps to skip" form fields (comma-separated,
+// .cirro/process-form.json) to those existing flags. Both default to empty,
+// which reproduces the exact command this process ran before this change --
+// no behavior change for anyone who leaves the new fields blank.
+// NOTE (unverified, flag for Afrouz to confirm on first real test): skipping
+// an upstream step does not fetch that step's input for you -- whoever runs
+// with a restricted --steps/--skip is responsible for cfg's input path (e.g.
+// cell_typing.input_file) already pointing at a completed prior run's output.
+params.steps_to_run = params.steps_to_run ?: ''
+params.skip_steps   = params.skip_steps   ?: ''
+
 // Viewer: each core's image, cell outlines and typed cells as a
 // spatial-data-studio checkpoint, published with the static viewer under
 // ${output_dir}/viewer/. The checkpoint writer (backend/cli.py) and the
@@ -124,8 +140,10 @@ process run_spatia_pipeline {
     // runs silently executed stale baked-in code otherwise). Empty string
     // for a run not launched from a git repo (workflow.commitId is null),
     // which skips the check entirely.
+    def steps_arg = params.steps_to_run?.trim() ? "--steps " + params.steps_to_run.trim().replaceAll(/\s*,\s*/, ' ') : ''
+    def skip_arg   = params.skip_steps?.trim()   ? "--skip "  + params.skip_steps.trim().replaceAll(/\s*,\s*/, ' ')  : ''
     """
-    python /app/run_pipeline.py --config ${config_file} --samplesheet ${samplesheet_file} --expected-commit ${workflow.commitId ?: ''}
+    python /app/run_pipeline.py --config ${config_file} --samplesheet ${samplesheet_file} --expected-commit ${workflow.commitId ?: ''} ${steps_arg} ${skip_arg}
     """
 }
 

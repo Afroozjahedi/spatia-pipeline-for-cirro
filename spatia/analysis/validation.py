@@ -449,6 +449,16 @@ def validate_cell_typing(cfg: dict) -> Tuple[bool, List[ValidationError]]:
     return len(all_errors) == 0, all_errors
 
 
+def _triad_file(output_dir: str, filename: str) -> str:
+    """Resolves a triads-step output file: prefers output_dir/triad_data/<filename>
+    (where triads.py has written it since 2026-10-09), falling back to
+    output_dir/<filename> directly for runs produced before that change."""
+    new_path = os.path.join(output_dir, "triad_data", filename)
+    if os.path.exists(new_path):
+        return new_path
+    return os.path.join(output_dir, filename)
+
+
 def validate_triads(cfg: dict) -> Tuple[bool, List[ValidationError]]:
     """
     Checks after run_triad_analysis():
@@ -456,11 +466,16 @@ def validate_triads(cfg: dict) -> Tuple[bool, List[ValidationError]]:
     - experiment_group_comparison_counts.csv exists
     - At least one *_triad_pairs.csv exists (at least one image had triads)
     - triad_summary.csv has expected columns
+
+    Looks in output_dir/triad_data/ first (where triads.py has written these
+    since 2026-10-09), falling back to output_dir/ directly for older runs.
     """
     errors: List[ValidationError] = []
     step = "triads"
 
     output_dir = cfg["paths"]["output_dir"]
+    triad_data_dir = os.path.join(output_dir, "triad_data")
+    triad_lookup_dir = triad_data_dir if os.path.isdir(triad_data_dir) else output_dir
 
     # Required summary files
     required_files = [
@@ -468,13 +483,13 @@ def validate_triads(cfg: dict) -> Tuple[bool, List[ValidationError]]:
         "experiment_group_comparison_counts.csv",
     ]
     for fname in required_files:
-        path = os.path.join(output_dir, fname)
+        path = _triad_file(output_dir, fname)
         ok, msg = _file_exists_and_nonempty(path)
         if not ok:
             errors.append(ValidationError(step, msg, path))
 
     # Check triad_summary columns
-    summary_path = os.path.join(output_dir, "triad_summary.csv")
+    summary_path = _triad_file(output_dir, "triad_summary.csv")
     if os.path.exists(summary_path) and os.path.getsize(summary_path) > 0:
         try:
             import pandas as pd
@@ -500,16 +515,16 @@ def validate_triads(cfg: dict) -> Tuple[bool, List[ValidationError]]:
 
     # At least one per-image triad pairs file
     pair_files = [
-        f for f in os.listdir(output_dir)
+        f for f in os.listdir(triad_lookup_dir)
         if f.endswith("_triad_pairs.csv")
-    ] if os.path.isdir(output_dir) else []
+    ] if os.path.isdir(triad_lookup_dir) else []
 
     if not pair_files:
         errors.append(ValidationError(
             step,
             "No *_triad_pairs.csv files found — no triads were detected in any image. "
             "Check anchor_type / partner_type names match your cell_typed h5ad.",
-            output_dir,
+            triad_lookup_dir,
         ))
 
     return len(errors) == 0, errors
