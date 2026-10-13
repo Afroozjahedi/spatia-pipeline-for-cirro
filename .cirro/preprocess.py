@@ -40,20 +40,22 @@ Two jobs, both run by Cirro before Nextflow launches:
    (docs.cirro.bio/pipelines/preprocess-script/).
 
    ds.files carries Cirro's own resolved, authoritative S3 path per sample
-   (columns: sample, file, sampleIndex, ...) -- no more guessing raw-image
-   paths either. ds.samplesheet carries the metadata uploaded via Cirro's
-   native "Upload Samplesheet" feature (columns: sample, group, ...,
-   possibly also a redundant "file" column from the original upload, which
-   we drop in favor of ds.files' resolved path). We merge the two on
-   "sample", write the result to this dataset's own config/ folder, and
-   hand Nextflow the final path via ds.add_param() -- so process-input.json
-   no longer needs a "samplesheet" key at all.
+   (columns: sample, file, dataset, sampleIndex, ...) -- no more guessing
+   raw-image paths either. ds.samplesheet carries the metadata uploaded via
+   Cirro's native "Upload Samplesheet" feature.
 
-   Confidence this fixes it: ~90% (based on reading the actual installed
-   SDK source, not on inference from error text). The ~10% uncertainty is
-   whether ds.samplesheet is reliably populated for this account's Cirro
-   the way the SDK docs describe -- the next run will confirm or refute
-   that directly.
+   CONFIRMED 2026-10-13, by directly inspecting a real combined 4-dataset
+   run's config/samplesheet.csv: ds.samplesheet NEVER carries a "file"
+   column, even when the uploaded CSV had one -- it only ever has the
+   sample-level columns Cirro itself assigns (sample, group, ...). An
+   earlier version of build_samplesheet() hard-required "file" in
+   ds.samplesheet and matched on folder+filename; that assumption was
+   wrong for every multi-dataset run, not just a one-off, so it's been
+   replaced with a plain "sample" match against ds.files (see that
+   function's docstring for the current approach and its safety check).
+   We merge the two on "sample", write the result to this dataset's own
+   config/ folder, and hand Nextflow the final path via ds.add_param() --
+   so process-input.json no longer needs a "samplesheet" key at all.
 """
 import base64
 
@@ -81,76 +83,64 @@ def write_to_s3(data: bytes, s3_uri: str) -> None:
     boto3.client("s3").put_object(Bucket=path.bucket, Key=path.key, Body=data)
 
 
-def _folder_filename_key(path: str) -> str:
-    """
-    Last two path components ("folder/filename.tif"), used as a
-    match key that survives differing S3 prefixes (ds.files' full S3 URI
-    vs. an uploaded samplesheet's dataset-relative path) while still
-    disambiguating files that share a bare filename across different
-    SOURCE DATASETS.
-
-    ADDED 2026-10-12, multi-dataset combined runs: when this pipeline runs
-    against several selected source datasets at once (Afrouz's CRC
-    TMA_A / TMA_B / DII_TMA_A / DII_TMA_B layout), ds.files is the union of
-    every selected dataset's raw files. Two different TMAs can each have a
-    core that happens to be named the same thing (e.g. both TMA_A and
-    TMA_B contain a file literally called reg034_X01_Y01_Z09.tif) -- these
-    are different physical tissue cores, not duplicates. Matching on bare
-    "sample" alone (the old behavior) can't tell them apart: a left-merge
-    would hand ONE metadata row's group to BOTH physical files, silently
-    mislabeling the wrong one -- and, worse, re-creating the exact
-    image_id collision that run_pipeline.py's per-dataset samplesheets
-    were built to avoid (see samplesheets/ and the 8 cross-dataset
-    collisions Afrouz identified and corrected 2026-10-12). Matching on
-    folder+filename instead is safe because each uploaded per-dataset
-    samplesheet's "file" column already encodes which folder it came from
-    (e.g. "TMA_A/reg034_X01_Y01_Z09.tif"), and ds.files' own S3 path ends
-    the same way.
-    """
-    parts = str(path).rstrip("/").split("/")
-    return "/".join(parts[-2:]) if len(parts) >= 2 else (parts[-1] if parts else "")
-
-
 def build_samplesheet(ds: PreprocessDataset) -> pd.DataFrame:
     """
     Merge Cirro's auto-resolved file listing (ds.files) with the
     sample-level metadata from the uploaded samplesheet(s) (ds.samplesheet),
-    matched by folder+filename (see _folder_filename_key) rather than bare
-    "sample" -- required for correctness once this pipeline runs against
-    multiple source datasets that can share bare sample names (see that
-    function's docstring). ds.files' own "file" column (the authoritative
-    S3 path) is what ends up in the output; the uploaded samplesheet's own
-    "file" column is used only to build the match key, then dropped.
+    matched on "sample".
 
-    Rows with no metadata match are EXCLUDED from the returned samplesheet
-    (not kept with group=NaN) -- run_pipeline.py's _apply_samplesheet()
-    builds image_experiment_group_map from every row in this output, so an
-    unmatched row would otherwise propagate as a literal missing/NaN group
-    instead of being left out of the run.
+    REVISED 2026-10-13: the previous version matched on folder+filename and
+    hard-required ds.samplesheet to carry a "file" column. Confirmed by
+    direct inspection of a real combined 4-dataset run (cc786886, 2026-10-13)
+    that ds.samplesheet NEVER carries "file" -- it only ever has the
+    sample-level columns Cirro itself assigns (sample, group, ...).
+    File-path info lives in ds.files instead, which already has it
+    natively, per physical file, alongside a "dataset" column. The old
+    guard assumed a mechanism ds.samplesheet doesn't have, so it was wrong
+    for every multi-dataset run, not just this one.
+
+    Matching is on "sample" alone now, which is safe as long as ds.files'
+    "sample" values are unique. That held for the 2026-10-13 run: each of
+    the 8 known cross-dataset filename collisions (same bare sample name
+    physically present in two TMAs) appeared exactly once in ds.files,
+    apparently because Cirro's combined "files" listing only surfaces
+    files that have matching assigned sample metadata in their OWN
+    dataset's uploaded samplesheet -- which excludes the stray duplicate
+    once its row was removed from the wrong per-dataset samplesheet
+    (2026-10-12 fix). If a future dataset combination ever has a genuine
+    duplicate "sample" in ds.files, this raises explicitly below instead
+    of silently mis-assigning one metadata row's group to the wrong
+    physical file.
     """
-    if "file" not in ds.samplesheet.columns:
+    files = ds.files.copy()
+    dup_files_samples = (
+        files["sample"][files["sample"].duplicated(keep=False)].unique().tolist()
+    )
+    if dup_files_samples:
         raise ValueError(
-            "build_samplesheet() requires the uploaded samplesheet to include "
-            "a 'file' column (dataset-relative path, e.g. 'TMA_A/reg034_X01_Y01_Z09.tif') "
-            "-- it's needed to disambiguate files that share a bare sample name "
-            "across different source datasets when this pipeline runs against "
-            "multiple selected datasets at once."
+            "build_samplesheet() found duplicate 'sample' values in ds.files, "
+            "which makes matching sample metadata to files ambiguous: "
+            f"{dup_files_samples}. This usually means two selected datasets both "
+            "contain a physical file with the same bare sample name -- remove or "
+            "rename the stray duplicate in Cirro before re-running."
         )
 
     meta = ds.samplesheet.copy()
-    meta["_match_key"] = meta["file"].map(_folder_filename_key)
-    # Drop "file" (superseded by ds.files' own authoritative S3 path) AND
-    # "sample" (ds.files' "sample" column is kept as authoritative too --
-    # without dropping this, pandas would suffix both sides' "sample"
-    # column into sample_x/sample_y instead of leaving a clean "sample"
-    # column, which would break run_pipeline.py's _resolve_samplesheet_columns()).
-    meta = meta.drop(columns=[c for c in ("file", "sample") if c in meta.columns])
+    dup_meta_samples = (
+        meta["sample"][meta["sample"].duplicated(keep=False)].unique().tolist()
+    )
+    if dup_meta_samples:
+        raise ValueError(
+            "build_samplesheet() found duplicate 'sample' values in the uploaded "
+            f"samplesheet metadata (ds.samplesheet): {dup_meta_samples}. Each "
+            "sample name must be unique across every selected dataset's uploaded "
+            "samplesheet."
+        )
+    # Drop any "file" column the uploaded samplesheet happens to carry --
+    # ds.files' own "file" (the authoritative S3 path) is what's kept.
+    meta = meta.drop(columns=[c for c in ("file",) if c in meta.columns])
 
-    files = ds.files.copy()
-    files["_match_key"] = files["file"].map(_folder_filename_key)
-
-    merged = pd.merge(files, meta, on="_match_key", how="left", validate="many_to_one")
-    merged = merged.drop(columns=["_match_key"])
+    merged = pd.merge(files, meta, on="sample", how="left", validate="one_to_one")
 
     n_total = len(merged)
     if "group" in merged.columns:
@@ -160,11 +150,11 @@ def build_samplesheet(ds: PreprocessDataset) -> pd.DataFrame:
     n_unmatched = int(unmatched.sum())
     if n_unmatched:
         ds.logger.info(
-            f"WARNING: {n_unmatched} of {n_total} files (matched by folder/filename) have no "
+            f"WARNING: {n_unmatched} of {n_total} files (matched by 'sample') have no "
             "row in any uploaded samplesheet -- EXCLUDING them from this run rather than "
-            "processing them with an unknown group. If this count looks too high, check that "
-            "EVERY selected dataset has its own uploaded samplesheet with a 'file' column in "
-            "the 'folder/filename.tif' form."
+            "processing them with an unknown group. If this count looks too high, check "
+            "that EVERY selected dataset has its own uploaded samplesheet covering its "
+            "samples."
         )
         for _, r in merged[unmatched].iterrows():
             ds.logger.info(f"  excluded (no samplesheet match): {r.get('file', '?')}")
