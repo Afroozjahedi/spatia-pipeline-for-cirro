@@ -381,6 +381,21 @@ def run_preprocessing(cfg: dict) -> dict:
         print(f"\nFound {len(slide_folders)} slide folder(s)")
 
         # ── Main processing loop ──────────────────────────────────────────
+        # NOTE (2026-10-14): overlay_mapping accumulates every slide folder's
+        # *_seg_output.pickle as the run progresses (not scoped per slide
+        # folder, unlike run_qupath_export()'s equivalent loop below). Each
+        # pickle is small (~500KB), so this is not itself the dominant memory
+        # cost of a large combined run -- but it's still an unbounded
+        # accumulation with no reason to hold onto a slide folder's overlays
+        # once that folder's images are done. The visualisation loop further
+        # down now pops each image's overlay as soon as it's used, which
+        # bounds memory during that pass; it does not change the fact that by
+        # the time that pass starts, every slide folder scanned so far has
+        # already been loaded into this dict. If a future OOM is traced back
+        # here specifically, scope this loading per slide_folder instead
+        # (see run_qupath_export() for the pattern), but confirm against real
+        # memory profiling first -- the 525KB pickle size doesn't support
+        # this being the whole story for the 130-image combined run.
         all_processed_tissues: Dict[str, list] = {}
         overlay_mapping: Dict[str, dict]        = {}
         processing_stats: List[dict]            = []
@@ -687,61 +702,69 @@ def run_preprocessing(cfg: dict) -> dict:
 
         for tissue_id, tissue_list in all_processed_tissues.items():
             for tinfo in tissue_list:
-                image_id  = tinfo["image_id"]
-                experiment_group = tinfo["experiment_group"]
-                df_tissue = tinfo["data"]
-                safe_id   = tissue_id.replace("/", "_").replace(" ", "_")
+                image_id = tinfo["image_id"]
+                try:
+                    experiment_group = tinfo["experiment_group"]
+                    df_tissue = tinfo["data"]
+                    safe_id   = tissue_id.replace("/", "_").replace(" ", "_")
 
-                viz_path = os.path.join(viz_dir, f"{safe_id}_{experiment_group}_all_markers.png")
-                if os.path.exists(viz_path):
-                    print(f"  ⏭️  Viz already exists: {safe_id}_{experiment_group}")
-                    continue
+                    viz_path = os.path.join(viz_dir, f"{safe_id}_{experiment_group}_all_markers.png")
+                    if os.path.exists(viz_path):
+                        print(f"  ⏭️  Viz already exists: {safe_id}_{experiment_group}")
+                        continue
 
-                if image_id not in overlay_mapping:
-                    print(f"  ⚠️  No overlay data for {image_id} — skipping viz")
-                    continue
+                    if image_id not in overlay_mapping:
+                        print(f"  ⚠️  No overlay data for {image_id} — skipping viz")
+                        continue
 
-                overlay = overlay_mapping[image_id]
-                if "img" not in overlay:
-                    print(f"  ⚠️  No 'img' key in overlay for {image_id} — skipping viz")
-                    continue
+                    overlay = overlay_mapping[image_id]
+                    if "img" not in overlay:
+                        print(f"  ⚠️  No 'img' key in overlay for {image_id} — skipping viz")
+                        continue
 
-                METADATA = {
-                    "label", "area", "x", "y", "slide_folder", "image_ID", "experiment_group",
-                    "eccentricity", "perimeter", "convex_area",
-                    "axis_major_length", "axis_minor_length",
-                    tinfo.get("nuclei_col", "DAPI"),
-                }
-                all_markers = [c for c in df_tissue.columns if c not in METADATA]
-                if not all_markers:
-                    continue
+                    METADATA = {
+                        "label", "area", "x", "y", "slide_folder", "image_ID", "experiment_group",
+                        "eccentricity", "perimeter", "convex_area",
+                        "axis_major_length", "axis_minor_length",
+                        tinfo.get("nuclei_col", "DAPI"),
+                    }
+                    all_markers = [c for c in df_tissue.columns if c not in METADATA]
+                    if not all_markers:
+                        continue
 
-                n_cols = 5
-                n_rows = int(np.ceil(len(all_markers) / n_cols))
-                fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 4, n_rows * 4))
-                fig.suptitle(f"{tissue_id} – {experiment_group} – All Markers", fontsize=16)
-                axes_flat = np.array(axes).flatten()
+                    n_cols = 5
+                    n_rows = int(np.ceil(len(all_markers) / n_cols))
+                    fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 4, n_rows * 4))
+                    fig.suptitle(f"{tissue_id} – {experiment_group} – All Markers", fontsize=16)
+                    axes_flat = np.array(axes).flatten()
 
-                for i, marker in enumerate(all_markers):
-                    ax = axes_flat[i]
-                    ax.imshow(overlay["img"], cmap="gray")
-                    sc = ax.scatter(
-                        df_tissue["x"], df_tissue["y"],
-                        c=df_tissue[marker], s=2, cmap="viridis", alpha=0.7,
-                        vmin=df_tissue[marker].quantile(0.01),
-                        vmax=df_tissue[marker].quantile(0.99),
-                    )
-                    plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
-                    ax.set_title(marker, fontsize=10)
-                    ax.axis("off")
+                    for i, marker in enumerate(all_markers):
+                        ax = axes_flat[i]
+                        ax.imshow(overlay["img"], cmap="gray")
+                        sc = ax.scatter(
+                            df_tissue["x"], df_tissue["y"],
+                            c=df_tissue[marker], s=2, cmap="viridis", alpha=0.7,
+                            vmin=df_tissue[marker].quantile(0.01),
+                            vmax=df_tissue[marker].quantile(0.99),
+                        )
+                        plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+                        ax.set_title(marker, fontsize=10)
+                        ax.axis("off")
 
-                for j in range(i + 1, len(axes_flat)):
-                    axes_flat[j].axis("off")
+                    for j in range(i + 1, len(axes_flat)):
+                        axes_flat[j].axis("off")
 
-                plt.tight_layout()
-                plt.savefig(viz_path, dpi=150, bbox_inches="tight")
-                plt.close()
-                print(f"  ✓ Saved viz: {viz_path}")
+                    plt.tight_layout()
+                    plt.savefig(viz_path, dpi=150, bbox_inches="tight")
+                    plt.close()
+                    print(f"  ✓ Saved viz: {viz_path}")
+                finally:
+                    # Release this image's overlay as soon as its
+                    # visualization is done (or skipped) rather than
+                    # holding it for the rest of the run -- see the
+                    # loading-phase note above this function.
+                    overlay_mapping.pop(image_id, None)
+                    overlay_mapping.pop(image_id + "_", None)
 
         # ── Save processing statistics ──────────────────────────────────────
         stats_df   = pd.DataFrame(processing_stats)
