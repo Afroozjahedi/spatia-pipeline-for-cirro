@@ -1,5 +1,7 @@
 # QuPath: exporting ROI masks
 
+![Type](https://img.shields.io/badge/type-Groovy_%2F_QuPath-29B6C9) ![Run](https://img.shields.io/badge/run-manual-6B7280)
+
 **Where this fits:** a manual QuPath step, before ROI masking. Run this on annotations already drawn or detected in an open QuPath project — either by hand, or via the automatic TMA core-detection script below.
 
 ## What it does
@@ -13,5 +15,8 @@ Open your QuPath project, paste the script into QuPath's Script Editor, and clic
 ## Things to know
 
 - This has to be run by a person clicking through QuPath dialogs each time — there's no way to run it automatically or unattended.
-- The area numbers this produces (used later for triad density) haven't yet been confirmed against a real QuPath run — worth a quick sanity check of the numbers and image names the first time you use this for a real density calculation.
+
+> [!WARNING]
+> The area numbers this produces (used later for triad density) haven't yet been confirmed against a real QuPath run — worth a quick sanity check of the numbers and image names the first time you use this for a real density calculation.
+
 - If you change the resolution setting away from full resolution, double-check with whoever runs ROI masking that coordinates still line up — at full resolution this isn't an issue.

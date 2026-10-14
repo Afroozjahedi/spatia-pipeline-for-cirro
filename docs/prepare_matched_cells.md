@@ -1,5 +1,8 @@
 # Preparing a new dataset for triad detection
 
+![Type](https://img.shields.io/badge/type-python_helper-29B6C9)
+![Scope](https://img.shields.io/badge/scope-general_purpose%2C_any_dataset-4CAF50)
+
 ## What this is for
 
 Triad detection needs your per-cell data in one specific format (one CSV per experiment-group/sample, with specific column names). This script converts your raw per-cell data (a CSV/TSV, or an `.h5ad` file) into that format for any new dataset — you don't need a dataset-specific script, just your real column names.
@@ -42,6 +45,10 @@ One CSV per experiment-group/sample combination, ready to point triad detection'
 
 ## Things to know
 
-- If any required column ends up with missing values after conversion, you'll get a warning rather than a hard failure — a large number of missing values there is usually a sign the wrong column was picked, worth checking before trusting your triad counts.
+> [!WARNING]
+> If any required column ends up with missing values after conversion, you'll get a warning rather than a hard failure — a large number of missing values there is usually a sign the wrong column was picked, worth checking before trusting your triad counts.
+
 - If you use `--cell-type-merge-map`, the original (pre-merge) label isn't kept anywhere separately — if you'll want to audit which original labels got merged together later, keep a copy of your source data with the original column intact before running this.
-- This hasn't yet been used on a dataset where cell coordinates live somewhere other than the standard table format some `.h5ad` files store coordinates separately from the main table. `--inspect` will show you if that's the case for your data; flag it if so, since it needs a small adjustment to handle correctly.
+
+> [!CAUTION]
+> This hasn't yet been used on a dataset where cell coordinates live somewhere other than the standard table format some `.h5ad` files store coordinates separately from the main table. `--inspect` will show you if that's the case for your data; flag it if so, since it needs a small adjustment to handle correctly.

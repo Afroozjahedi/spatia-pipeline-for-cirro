@@ -1,5 +1,7 @@
 # Building an image-to-patient map (TMA cohorts)
 
+![Type](https://img.shields.io/badge/type-python_helper-29B6C9) ![Used by](https://img.shields.io/badge/used_by-survival-F2A900)
+
 ## What this is for
 
 If your cohort has multiple images per patient (e.g. several TMA cores from the same patient), survival analysis needs to know which images belong to which patient. This script builds that mapping automatically from your annotation file, instead of typing out potentially 100+ entries by hand.
@@ -40,4 +42,6 @@ A JSON file mapping each image to a patient, plus a report of anything that didn
 ## Things to know
 
 - This only matches on the core/region number, not the whole image filename — if your filenames also encode something else your spot list doesn't capture (e.g. the same region number reused across different slides), double-check the output JSON the first time you use this on a new dataset shape.
-- Always look at the match report before trusting the output — a real mismatch (unmatched images, or a region claimed by two patients) usually means something in the annotation file needs fixing, not something wrong with the script.
+
+> [!TIP]
+> Always look at the match report before trusting the output — a real mismatch (unmatched images, or a region claimed by two patients) usually means something in the annotation file needs fixing, not something wrong with the script.

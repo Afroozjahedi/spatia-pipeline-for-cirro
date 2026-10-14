@@ -1,6 +1,15 @@
 # ROI masking
 
+![Step](https://img.shields.io/badge/step-1_of_8-6B7280) ![Default](https://img.shields.io/badge/default-off-6B7280)
+
 **Pipeline position:** Step 1 (off by default). Format conversion → **ROI masking** → segmentation → preprocessing → ...
+
+```mermaid
+flowchart LR
+    classDef io fill:#29B6C9,stroke:#15151F,color:#ffffff
+    classDef step fill:#6B7280,stroke:#15151F,color:#ffffff
+    A["converted .tif + QuPath masks"]:::io --> B["roi_masking"]:::step --> C["cropped ROI images"]:::io
+```
 
 ## What this step does
 
@@ -21,5 +30,8 @@ Crops out the regions of interest (ROIs) you defined in QuPath — either manual
 ## Things to know
 
 - If a single channel fails to read while cropping a ROI, that channel is left blank (all zeros) in the output rather than failing the whole ROI — a warning prints when this happens, so watch the run's console output rather than assuming a blank channel later on means "no real signal."
-- Very large whole-slide images are allowed through without a file-size safety check (this is necessary, since real whole-slide images are legitimately huge) — a corrupted or unexpectedly oversized file may use a lot of memory before anything else catches the problem, rather than failing right away.
+
+> [!WARNING]
+> Very large whole-slide images are allowed through without a file-size safety check (this is necessary, since real whole-slide images are legitimately huge) — a corrupted or unexpectedly oversized file may use a lot of memory before anything else catches the problem, rather than failing right away.
+
 - If your filenames don't clearly match your `experiment.groups` prefixes, ROI matching can behave unexpectedly — worth a quick visual check of the first run's output against your filename conventions if any slide IDs look off.

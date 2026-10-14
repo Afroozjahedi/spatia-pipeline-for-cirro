@@ -1,6 +1,15 @@
 # Triad detection
 
+![Step](https://img.shields.io/badge/step-5_of_8-F2A900) ![Default](https://img.shields.io/badge/default-config--gated-F2A900) ![Novel](https://img.shields.io/badge/★-pipeline's_namesake-8C6FFF)
+
 **Pipeline position:** Step 5 — after cell typing, before functional/survival analysis. The pipeline's core scientific output.
+
+```mermaid
+flowchart LR
+    classDef io fill:#29B6C9,stroke:#15151F,color:#ffffff
+    classDef step fill:#8C6FFF,stroke:#15151F,color:#ffffff
+    A["cell-typed .h5ad"]:::io --> B["triads ★"]:::step --> C["triad tables + QC overlays"]:::io
+```
 
 ## What this step does
 
@@ -27,6 +36,8 @@ Finds "triads" — an anchor cell type with both of two partner cell types simul
 
 ## Things to know
 
-- If you don't set all three of anchor/partner1/partner2, the pipeline searches every 3-way combination of cell types it sees in your data — this can be slow with more than a handful of cell types, and it prints a warning when this fallback kicks in. Worth setting the three types explicitly once you know what you're looking for.
+> [!WARNING]
+> If you don't set all three of anchor/partner1/partner2, the pipeline searches every 3-way combination of cell types it sees in your data — this can be slow with more than a handful of cell types, and it prints a warning when this fallback kicks in. Worth setting the three types explicitly once you know what you're looking for.
+
 - Already-processed images are automatically skipped on a re-run (adding one new image to a large cohort doesn't reprocess everything) — but if you edit an image's underlying cell data after it's already been processed, delete that image's two output files yourself to force it to be redone; there's no automatic way to detect the input changed.
 - If per-image area comes from `roi_labels_dir` and some images don't have a matching ROI file, their area is imputed from the group average (or dropped from the total if there's no group average either) — the run log prints exactly which method was used for every image, so you can trace where your density numbers came from.

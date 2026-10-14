@@ -1,5 +1,7 @@
 # Image format support (CODEX / OME-TIFF / QPTIFF)
 
+![Type](https://img.shields.io/badge/type-automatic_%2F_not_a_step-0969DA) ![Used by](https://img.shields.io/badge/used_by-segmentation-6B7280)
+
 Before segmentation runs, the pipeline needs to know how channels are laid out in your raw image files and match each one to a real marker name. This is handled automatically for the formats below — it's not a pipeline step you run yourself, just something segmentation relies on.
 
 ## Supported formats
@@ -15,9 +17,12 @@ A panel file (`channelnames.txt`) listing your marker names in stack order is re
 
 ## The nuclear-stain consistency check
 
-For CODEX-style data, the pipeline double-checks that the channel order it assumed is actually correct: the nuclear-stain channel from every imaging cycle should correlate with the others, since they're all re-imaging the same nuclei. If this check fails, the run stops rather than continuing on a possibly-scrambled channel order. This is the main safety net against a channel mixup that would otherwise be very hard to notice after the fact — don't turn it off (`channel_check: false`) on a new dataset unless you've independently confirmed the channel order some other way first.
+> [!CAUTION]
+> For CODEX-style data, the pipeline double-checks that the channel order it assumed is actually correct: the nuclear-stain channel from every imaging cycle should correlate with the others, since they're all re-imaging the same nuclei. If this check fails, the run stops rather than continuing on a possibly-scrambled channel order. This is the main safety net against a channel mixup that would otherwise be very hard to notice after the fact — **don't turn it off (`channel_check: false`) on a new dataset unless you've independently confirmed the channel order some other way first.**
 
 ## Things to know
 
 - OME-TIFF and QPTIFF support exist so the pipeline isn't limited to one platform for the methods paper's sake — no dataset in either format has actually gone through segmentation yet. If a real file in either format comes in, budget some time to validate it the way CODEX was validated, before trusting the output.
-- If a file's channel names can't be read from a format that normally carries them (a corrupted or unusual OME-TIFF/QPTIFF), the pipeline refuses to guess and stops with an error rather than silently applying your panel positionally. That's intentional — not something to work around.
+
+> [!IMPORTANT]
+> If a file's channel names can't be read from a format that normally carries them (a corrupted or unusual OME-TIFF/QPTIFF), the pipeline refuses to guess and stops with an error rather than silently applying your panel positionally. That's intentional — not something to work around.

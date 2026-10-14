@@ -1,6 +1,15 @@
 # Format conversion (raw scanner TIFFs → standard TIFF)
 
+![Step](https://img.shields.io/badge/step-0_of_8-6B7280) ![Default](https://img.shields.io/badge/default-off-6B7280)
+
 **Pipeline position:** Step 0 (first step, off by default). `raw QPTIFF/OME-TIFF` → **format conversion** → ROI masking → segmentation → ...
+
+```mermaid
+flowchart LR
+    classDef io fill:#29B6C9,stroke:#15151F,color:#ffffff
+    classDef step fill:#6B7280,stroke:#15151F,color:#ffffff
+    A["raw QPTIFF / OME-TIFF"]:::io --> B["tif_conversion"]:::step --> C[".tif + metadata JSON"]:::io
+```
 
 ## What this step does
 
@@ -21,4 +30,6 @@ Converts vendor-specific TIFF formats (QPTIFF, OME-TIFF) straight off the slide 
 ## Things to know
 
 - If your raw files are plain QPTIFF without embedded channel-name metadata, the metadata JSON may not include channel names for those files — the next step (ROI masking) already has a fallback for this, so it's handled, but don't be surprised if some of these JSONs look sparse.
-- A file that fails to convert (corrupted, unreadable) is skipped and reported rather than stopping the whole batch — but the step only flags the case where *nothing at all* converted, not "most files failed." Worth a quick check that your output folder has roughly as many files as you expected.
+
+> [!WARNING]
+> A file that fails to convert (corrupted, unreadable) is skipped and reported rather than stopping the whole batch — but the step only flags the case where *nothing at all* converted, not "most files failed." Worth a quick check that your output folder has roughly as many files as you expected.

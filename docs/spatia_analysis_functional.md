@@ -1,6 +1,15 @@
 # Functional marker analysis
 
+![Step](https://img.shields.io/badge/step-6a_of_8-F2A900) ![Default](https://img.shields.io/badge/default-config--gated-F2A900)
+
 **Pipeline position:** Step 6a (optional) — runs after triad detection.
+
+```mermaid
+flowchart LR
+    classDef io fill:#29B6C9,stroke:#15151F,color:#ffffff
+    classDef step fill:#F2A900,stroke:#15151F,color:#15151F
+    A["triad tables"]:::io --> B["functional"]:::step --> C["violin plots + summary CSV"]:::io
+```
 
 ## What this step does
 
@@ -24,5 +33,8 @@ For each cell type in your triads (anchor, partner 1, partner 2), compares marke
 ## Things to know
 
 - Marker columns need to actually be present in your per-cell data — that depends on marker intensities having been kept during an earlier data-prep step. If a configured marker is missing, this step reports which one and skips just that comparison rather than failing the whole run — worth checking the summary CSV's row count matches what you expect if some markers were misconfigured.
-- The multiple-testing correction is applied across every comparison in the whole run at once, not separately per marker or per cell type — adding more markers to your config makes it statistically harder for any single marker to come out significant. Worth keeping in mind when deciding how many markers to include at once.
+
+> [!WARNING]
+> The multiple-testing correction is applied across every comparison in the whole run at once, not separately per marker or per cell type — adding more markers to your config makes it statistically harder for any single marker to come out significant. Worth keeping in mind when deciding how many markers to include at once.
+
 - Unlike triad detection, this step doesn't skip re-processing on a re-run — it always re-pools and re-tests everything, since its output is a single statistic across the whole cohort rather than something computable image-by-image. That's intentional, and it's fast either way.

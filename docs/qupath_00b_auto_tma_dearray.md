@@ -1,8 +1,11 @@
 # QuPath: automatic TMA core detection
 
+![Type](https://img.shields.io/badge/type-Groovy_%2F_QuPath-29B6C9) ![Run](https://img.shields.io/badge/run-manual-6B7280) ![Status](https://img.shields.io/badge/status-not_yet_run_on_real_data-D32F2F)
+
 **Where this fits:** a manual QuPath step, before ROI masking — an automatic alternative to drawing TMA core annotations by hand. Run this first, then run the ROI-mask-export script above on its output. TMA cohorts only, not for whole-slide images.
 
-**Status: not yet run against a real slide.** This script is written and ready to try, but hasn't been validated on an actual scan yet — treat its first real run as a test, and visually check the detected core grid against the slide before trusting it.
+> [!CAUTION]
+> **Status: not yet run against a real slide.** This script is written and ready to try, but hasn't been validated on an actual scan yet — treat its first real run as a test, and visually check the detected core grid against the slide before trusting it.
 
 ## What it does
 
@@ -18,5 +21,7 @@ From the command line (QuPath supports running scripts without opening the GUI) 
 
 ## Things to know
 
-- Find the right input file first. Some of the per-core files already saved from earlier work on this project look like they were exported *after* automatic dearraying already happened, not the original whole-array scan this script needs — worth locating (or re-exporting) the actual pre-dearray scan before the first real test.
+> [!WARNING]
+> Find the right input file first. Some of the per-core files already saved from earlier work on this project look like they were exported *after* automatic dearraying already happened, not the original whole-array scan this script needs — worth locating (or re-exporting) the actual pre-dearray scan before the first real test.
+
 - Since this hasn't been run yet, plan to visually spot-check the detected grid against the real slide the first time you use it, rather than trusting the output blindly.

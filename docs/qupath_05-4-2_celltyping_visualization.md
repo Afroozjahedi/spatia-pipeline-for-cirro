@@ -1,5 +1,7 @@
 # QuPath: cell-type visualization (dot plot)
 
+![Type](https://img.shields.io/badge/type-Groovy_%2F_QuPath-29B6C9) ![Run](https://img.shields.io/badge/run-manual%2C_optional-6B7280)
+
 **Where this fits:** a manual, optional QuPath step for visually reviewing cell types after cell typing has run, directly inside your QuPath project. This is the original QuPath script the pipeline's Python visualization tool is based on.
 
 ## What it does
@@ -12,5 +14,7 @@ Open the relevant QuPath project, edit the file path at the top of the script to
 
 ## Things to know
 
-- The cell-type colors built into this script were chosen for the older LILRB2 mouse study and don't match this CRC study's cell types — running it as-is on CRC data renders every cell type in a generic default color rather than the intended palette, with no warning that this happened. Use the Python visualization tool instead for the CRC dataset, or update this script with CRC's own cell-type names first.
+> [!CAUTION]
+> The cell-type colors built into this script were chosen for the older LILRB2 mouse study and don't match this CRC study's cell types — running it as-is on CRC data renders every cell type in a generic default color rather than the intended palette, **with no warning that this happened**. Use the Python visualization tool instead for the CRC dataset, or update this script with CRC's own cell-type names first.
+
 - You need to edit the file path at the top of the script before every run.

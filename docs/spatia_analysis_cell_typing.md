@@ -1,6 +1,15 @@
 # Cell typing
 
+![Step](https://img.shields.io/badge/step-4_of_8-4CAF50) ![Default](https://img.shields.io/badge/default-always_on-4CAF50) ![Novel](https://img.shields.io/badge/★-SPATIA_novel-E62E6B)
+
 **Pipeline position:** Step 4 — after preprocessing, before triad/functional/survival analysis.
+
+```mermaid
+flowchart LR
+    classDef io fill:#29B6C9,stroke:#15151F,color:#ffffff
+    classDef step fill:#E62E6B,stroke:#15151F,color:#ffffff
+    A["filtered, normalized .h5ad"]:::io --> B["cell_typing ★"]:::step --> C["cell-typed .h5ad + diagnostics"]:::io
+```
 
 ## What this step does
 
@@ -16,7 +25,8 @@ For each marker, the pipeline looks at the distribution of intensities across al
 - **`std_multiplier`** (the long-standing default) — draws one cutoff line above the negative population; anything past it counts as positive. Simple and fast, but it only looks at the negative population's own spread.
 - **`posterior`** — for each cell, asks "how likely is this cell to belong to the positive population, given both populations' shapes?" and uses `confidence_level` (default 0.8, i.e. 80% likely) as the bar. This is the more statistically complete option, especially when the positive population is more spread out than the negative one.
 
-**Something to flag before this feeds the paper:** the CRC pipeline's current validated accuracy number (24.5% overall / 26.8% by core category, from comparing automatic calls against expert-labeled cells) was measured using `std_multiplier` mode. `crc_tma_full_pipeline.yaml` now uses `posterior` mode for the real production run — that combination hasn't been re-checked against the expert labels yet. If the manuscript states "posterior thresholding" as the method, it's worth re-running the accuracy comparison under posterior mode first so the reported number actually matches what was run.
+> [!IMPORTANT]
+> **Something to flag before this feeds the paper:** the CRC pipeline's current validated accuracy number (24.5% overall / 26.8% by core category, from comparing automatic calls against expert-labeled cells) was measured using `std_multiplier` mode. `crc_tma_full_pipeline.yaml` now uses `posterior` mode for the real production run — that combination hasn't been re-checked against the expert labels yet. If the manuscript states "posterior thresholding" as the method, it's worth re-running the accuracy comparison under posterior mode first so the reported number actually matches what was run.
 
 ## Markers with a lot of cells stuck at one value ("zero-inflated" markers)
 
@@ -45,7 +55,8 @@ If you want an automatic version of this (the pipeline detects zero-inflated mar
 - `cell_typing.cell_type_definitions_file` — required for automatic mode; the rules mapping marker combinations to cell types
 - `cell_typing.cluster_labels_file` — semi-automatic mode; leave as `null` for the first run, fill in and re-run to finish
 
-**Worth double-checking:** automatic mode and semi-automatic mode have historically used different strictness settings for the CD45 gate (semi-automatic tighter, automatic more permissive). Both are explicit config values now — just confirm each of your configs sets what you actually intend, since the two modes aren't directly comparable unless this matches.
+> [!WARNING]
+> **Worth double-checking:** automatic mode and semi-automatic mode have historically used different strictness settings for the CD45 gate (semi-automatic tighter, automatic more permissive). Both are explicit config values now — just confirm each of your configs sets what you actually intend, since the two modes aren't directly comparable unless this matches.
 
 ## What you'll get
 

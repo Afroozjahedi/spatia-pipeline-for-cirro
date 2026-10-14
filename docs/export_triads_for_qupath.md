@@ -1,5 +1,7 @@
 # Exporting triads for QuPath visualization
 
+![Type](https://img.shields.io/badge/type-python_helper-29B6C9) ![Status](https://img.shields.io/badge/auto_export-available_since_2026--09--23-4CAF50)
+
 ## What this is for
 
 Converts triad detection's output into a format QuPath can import, so you can visually check detected triads against the actual tissue image.

@@ -1,6 +1,15 @@
 # Preprocessing
 
+![Step](https://img.shields.io/badge/step-3_of_8-4CAF50) ![Default](https://img.shields.io/badge/default-always_on-4CAF50)
+
 **Pipeline position:** Step 3 — after segmentation, before cell typing (always runs).
+
+```mermaid
+flowchart LR
+    classDef io fill:#29B6C9,stroke:#15151F,color:#ffffff
+    classDef step fill:#4CAF50,stroke:#15151F,color:#ffffff
+    A["per-cell CSV"]:::io --> B["preprocessing"]:::step --> C["filtered, normalized .h5ad"]:::io
+```
 
 ## What this step does
 
@@ -26,6 +35,8 @@ Cleans up the raw per-cell measurements coming out of segmentation before anythi
 
 ## Things to know
 
-- If `nuclei_channel` or `last_marker` don't clearly match a column in your data, the run tells you which column it picked instead — worth reading that message carefully the first time you run a new panel, since a wrong guess here silently shifts which columns are treated as markers vs. metadata.
+> [!IMPORTANT]
+> If `nuclei_channel` or `last_marker` don't clearly match a column in your data, the run tells you which column it picked instead — worth reading that message carefully the first time you run a new panel, since a wrong guess here silently shifts which columns are treated as markers vs. metadata.
+
 - A single image failing to process (a bad file, an unexpected format) is logged and skipped rather than stopping the whole batch — check the run's error summary if your final cell count looks lower than expected.
 - The QC summary report is generated in a way that can never fail the actual preprocessing run — if the report itself looks wrong or incomplete, that's independent of whether your processed data is fine.

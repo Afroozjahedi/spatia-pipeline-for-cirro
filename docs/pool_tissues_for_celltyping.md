@@ -1,10 +1,14 @@
 # Pooling multiple tissues before cell typing
 
+![Type](https://img.shields.io/badge/type-python_helper-29B6C9)
+![Affects](https://img.shields.io/badge/affects-cell_typing_accuracy-F2A900)
+
 ## What this is for
 
 If your cohort has more than one tissue (different timepoints, patients, or TMA blocks), preprocessing keeps each tissue's cells separate — it doesn't produce one combined file across your whole cohort. Cell typing, though, works on a single file. This script combines every tissue's processed data into one file, so cell-type thresholds are calibrated jointly across your whole cohort instead of separately per tissue.
 
-**Whether joint typing is the right choice for your cohort is a real decision, not just a technical step.** Pooling assumes your tissues are comparable enough in staining/imaging that one shared threshold per marker makes sense. If some tissues have real batch effects, pooling could blur that rather than fix it — per-tissue typing, or a batch-correction step, might be more appropriate instead. This script just removes the "there's no way to do it" blocker; it doesn't make that call for you.
+> [!IMPORTANT]
+> **Whether joint typing is the right choice for your cohort is a real decision, not just a technical step.** Pooling assumes your tissues are comparable enough in staining/imaging that one shared threshold per marker makes sense. If some tissues have real batch effects, pooling could blur that rather than fix it — per-tissue typing, or a batch-correction step, might be more appropriate instead. This script just removes the "there's no way to do it" blocker; it doesn't make that call for you.
 
 ## Usage
 

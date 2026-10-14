@@ -1,6 +1,15 @@
 # Cell segmentation
 
+![Step](https://img.shields.io/badge/step-2_of_8-6B7280) ![Default](https://img.shields.io/badge/default-off-6B7280)
+
 **Pipeline position:** Step 2 — after ROI masking, before preprocessing.
+
+```mermaid
+flowchart LR
+    classDef io fill:#29B6C9,stroke:#15151F,color:#ffffff
+    classDef step fill:#6B7280,stroke:#15151F,color:#ffffff
+    A["masked ROI images"]:::io --> B["segmentation"]:::step --> C["per-cell CSV + overlays"]:::io
+```
 
 ## What this step does
 
@@ -27,6 +36,8 @@ Finds individual cell boundaries in your masked ROI images and produces one row 
 
 ## Things to know
 
-- If an image's channels aren't in the order your `channel_file` expects, that image is skipped rather than segmented with the wrong labels, and the run summary lists every image this happened to. This is usually a sign that file came from a different scan batch, panel revision, or export than the rest — worth checking those specific files rather than assuming the check is wrong.
+> [!IMPORTANT]
+> If an image's channels aren't in the order your `channel_file` expects, that image is skipped rather than segmented with the wrong labels, and the run summary lists every image this happened to. This is usually a sign that file came from a different scan batch, panel revision, or export than the rest — worth checking those specific files rather than assuming the check is wrong.
+
 - A one-off failure on a single image (a corrupted file, an out-of-memory error) is logged and the run continues rather than stopping the whole batch — check the run summary's failed-file list afterward. If too many images end up missing, the next pipeline step will flag it when it can't find enough segmentation results to continue.
 - If you've changed `resize_factor` away from `1` and a channel's average intensity looks like it's missing from the output CSV entirely (not even a blank value, just absent), that combination is worth a closer look — it's a known edge case rather than a random glitch.

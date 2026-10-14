@@ -1,6 +1,9 @@
 # Cell-type overlay visualization
 
-**Status (updated 2026-09-23): superseded — do not wire this module in.** The automatic, per-run version of what this module does now lives directly in `cell_typing.py` (`plot_spatial_celltype_overlay()`, folded in 2026-09-12), and already runs for every cell-typing step with no config needed — see [Cell typing](spatia_analysis_cell_typing.md). It also improves on this module for CRC specifically: an auto-generated 40-color palette instead of a fixed color map, since CRC's 23+ cell types don't fit this module's original LILRB2-study palette. This file (`spatia/analysis/visualization.py`) is kept only as a standalone reference/manual tool — it is not imported anywhere in the pipeline and is not the code path that produces your automatic overlays.
+![Status](https://img.shields.io/badge/status-superseded-D32F2F) ![Type](https://img.shields.io/badge/type-standalone_tool-6B7280)
+
+> [!CAUTION]
+> **Status (updated 2026-09-23): superseded — do not wire this module in.** The automatic, per-run version of what this module does now lives directly in `cell_typing.py` (`plot_spatial_celltype_overlay()`, folded in 2026-09-12), and already runs for every cell-typing step with no config needed — see [Cell typing](spatia_analysis_cell_typing.md). It also improves on this module for CRC specifically: an auto-generated 40-color palette instead of a fixed color map, since CRC's 23+ cell types don't fit this module's original LILRB2-study palette. This file (`spatia/analysis/visualization.py`) is kept only as a standalone reference/manual tool — it is not imported anywhere in the pipeline and is not the code path that produces your automatic overlays.
 
 ## What this does
 

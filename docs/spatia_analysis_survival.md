@@ -1,6 +1,15 @@
 # Survival analysis
 
+![Step](https://img.shields.io/badge/step-6b_of_8-F2A900) ![Default](https://img.shields.io/badge/default-config--gated-F2A900)
+
 **Pipeline position:** Step 6b (optional) — runs after triads (and after functional, if you're using marker exposures).
+
+```mermaid
+flowchart LR
+    classDef io fill:#29B6C9,stroke:#15151F,color:#ffffff
+    classDef step fill:#F2A900,stroke:#15151F,color:#15151F
+    A["triad density + clinical annotation"]:::io --> B["survival"]:::step --> C["KM plots + Cox results"]:::io
+```
 
 ## What this step does
 
@@ -33,6 +42,10 @@ By default each image is treated as one patient, which is fine for a cohort with
 
 ## Things to know
 
-- Unlike triad detection, this step always uses one flat tissue-area number per image rather than each image's own measured area — for a cohort where image size varies a lot, this can bias density-based results for patients whose images are unusually small or large.
+> [!WARNING]
+> Unlike triad detection, this step always uses one flat tissue-area number per image rather than each image's own measured area — for a cohort where image size varies a lot, this can bias density-based results for patients whose images are unusually small or large.
+
 - Cox regression only runs if you set `covariates`, and it skips itself (printing why) rather than fitting on too little data, if you don't have enough patients relative to the number of covariates requested.
-- If you configure several marker exposures alongside multiple outcomes, keep in mind the number of statistical tests grows with each one, and this step doesn't currently correct for that the way the functional-marker step does — worth thinking about how many you run at once for the paper.
+
+> [!WARNING]
+> If you configure several marker exposures alongside multiple outcomes, keep in mind the number of statistical tests grows with each one, and this step doesn't currently correct for that the way the functional-marker step does — worth thinking about how many you run at once for the paper.
