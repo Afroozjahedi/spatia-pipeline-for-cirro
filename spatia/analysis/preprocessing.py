@@ -1133,6 +1133,11 @@ def run_qupath_export(cfg: dict) -> str:
             plt.tight_layout()
             plt.savefig(os.path.join(qcviz_dir, f"{safe_id}_QC_spatial.png"), dpi=120, bbox_inches="tight")
             plt.close()
+            # Release this image overlay now that its QC plot is done --
+            # this loop loads every slide overlay upfront (see the loading
+            # block above) and never frees it otherwise, which is the same
+            # leak pattern fixed in run_preprocessing() (see commit ff24adf).
+            overlay_mapping.pop(image_id, None)
 
             # Panel 2: bar chart
             fig, ax = plt.subplots(figsize=(8, 5))
