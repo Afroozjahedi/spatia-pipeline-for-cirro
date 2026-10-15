@@ -560,6 +560,26 @@ def run_cell_segmentation(
             print(f"Stack trace: {sys.exc_info()}")
             segmentation_errors.append({"file": input_file, "error": str(e)})
         finally:
+            # sp.tl.cell_segmentation() itself (spacec's Mesmer wrapper, not
+            # our code -- see /miniforge/lib/python3.10/site-packages/spacec/
+            # tools/_segmentation.py) opens a `fig, ax = plt.subplots(1, 2,
+            # figsize=(15, 15))` internally on every call and never closes
+            # it -- confirmed 2026-10-15 from a combined-TMA run's log, which
+            # hit matplotlib's "More than 20 figures have been opened ...
+            # may consume too much memory" RuntimeWarning partway through
+            # segmentation, well before the run's later OOM kill during
+            # preprocessing. generate_overlays() below already plt.close()s
+            # the ONE figure *we* open before calling spacec's show_masks(),
+            # but nothing here ever closed what cell_segmentation() itself
+            # leaves open -- one extra ~15x15in figure retained per image,
+            # every image, so a 130-image combined run leaks roughly double
+            # what either 65-image TMA run alone does. We can't close it
+            # from inside spacec's own code (third-party, pip-installed, not
+            # vendored in this repo), so close everything pyplot is holding
+            # right after each image's call returns, success or failure --
+            # safe because nothing in this loop body relies on a figure
+            # surviving past this point.
+            plt.close("all")
             # Peak extra disk stays at one normalized file, not a second copy
             # of the dataset. Kept only if explicitly asked for.
             if normalized_path and not keep_normalized and os.path.exists(normalized_path):
