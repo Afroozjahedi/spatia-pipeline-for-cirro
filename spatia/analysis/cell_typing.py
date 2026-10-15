@@ -1395,6 +1395,51 @@ def _yeojohnson_forward_local(x: np.ndarray, lmbda: float) -> np.ndarray:
     return out
 
 
+def _transform_derivative_local(x_raw: np.ndarray, transform: str, arcsinh_cofactor: float,
+                                 lmbda: Optional[float] = None) -> np.ndarray:
+    """
+    |d(transform)/d(x_raw)| at each raw-scale point -- the Jacobian needed
+    to draw plot_marker_distributions()'s Panel 3 GMM component curves
+    correctly on the RAW axis. The GMM is fit in transformed space (see
+    _fit_gmm), so a component's density there, call it p_t(x_t), only
+    becomes a valid raw-scale density after the standard change-of-variables
+    correction: p_raw(x_raw) = p_t(f(x_raw)) * |f'(x_raw)|, where f is the
+    forward transform (_yeojohnson_forward_local / arcsinh / log1p).
+    Skipping this factor is exactly what the pre-2026-09-11 single-panel
+    version did (see plot_marker_distributions docstring) -- visually
+    plausible but not a real density, and more wrong wherever the
+    transform compresses or stretches that part of the raw axis.
+
+    Closed forms (continuous in lmbda, so yeojohnson's derivative needs
+    no lambda==0 / lambda==2 special-casing the way its forward transform
+    does -- only that transform's own denominator blows up there, not
+    this derivative):
+        none     : 1
+        arcsinh  : (1/c) / sqrt((x/c)^2 + 1)   [c = arcsinh_cofactor]
+        log1p    : 1 / (1 + x)                  [x > -1, per _transform_values own restriction]
+        yeojohnson, x >= 0 : (x + 1)^(lmbda - 1)
+        yeojohnson, x <  0 : (1 - x)^(1 - lmbda)
+    """
+    x = np.asarray(x_raw, dtype=float)
+    if transform == "none":
+        return np.ones_like(x)
+    elif transform == "arcsinh":
+        z = x / arcsinh_cofactor
+        return (1.0 / arcsinh_cofactor) / np.sqrt(z ** 2 + 1.0)
+    elif transform == "log1p":
+        return np.abs(1.0 / (1.0 + x))
+    elif transform == "yeojohnson":
+        if lmbda is None:
+            raise ValueError("yeojohnson derivative requires lmbda")
+        out_d = np.empty_like(x)
+        pos_d = x >= 0
+        out_d[pos_d] = (x[pos_d] + 1.0) ** (lmbda - 1.0)
+        out_d[~pos_d] = (1.0 - x[~pos_d]) ** (1.0 - lmbda)
+        return np.abs(out_d)
+    else:
+        raise ValueError(f"transform '{transform}' not supported for local derivative")
+
+
 def _get_column(adata, marker: str, column_map: dict):
     real_col = column_map.get(marker, marker)
     if real_col not in adata.var_names:
@@ -1431,7 +1476,13 @@ def plot_marker_distributions(adata, thresholds: dict, fit_info: dict, column_ma
       3. Positive vs. negative split -- the raw-expression histogram
          colored by this marker's actual `{marker}_pos` call, so the plot
          shows what the threshold decision actually did to the real cell
-         population, not just where the line sits.
+         population, not just where the line sits. Also overlays both GMM
+         component curves (plus their mixture), Jacobian-corrected back
+         onto this raw axis from the transformed space they were actually
+         fit in -- see _transform_derivative_local(). Added 2026-10-15 so
+         this panel shows not just where cells landed relative to the
+         threshold, but how well the two-Gaussian model fits the real
+         raw-scale population shape.
 
     Panel 2's curves REUSE fit_info[marker]["gmm"] -- the exact fit that
     produced the real threshold, not a fresh re-fit -- and respect this
@@ -1484,6 +1535,7 @@ def plot_marker_distributions(adata, thresholds: dict, fit_info: dict, column_ma
             x_raw = np.linspace(lo, hi, 500)
 
             fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(19, 5.5))
+            comp_names = {low_idx: "negative", high_idx: "positive"}
 
             # ── Panel 1: raw expression ──────────────────────────────
             ax1.hist(clean, bins=60, alpha=0.7, density=True, color="#8c8c8c",
@@ -1549,9 +1601,36 @@ def plot_marker_distributions(adata, thresholds: dict, fit_info: dict, column_ma
                          label=[f"negative (n={int((~pos_bool).sum()):,})",
                                 f"positive (n={int(pos_bool.sum()):,})"],
                          edgecolor="white", linewidth=0.2)
-                ax3.legend(fontsize="small", frameon=False)
             else:
                 ax3.hist(clean, bins=60, color="#8c8c8c", edgecolor="white", linewidth=0.3)
+
+            # GMM component curves on this RAW axis, Jacobian-corrected back
+            # from the transformed space they were actually fit in -- see
+            # _transform_derivative_local(). Scaled from a density to a
+            # cell-count curve (* N * bin_width) so they sit on the same
+            # y-axis as the density=False histogram above.
+            if marker_transform == "arcsinh":
+                x_t3 = np.arcsinh(x_raw / arcsinh_cofactor)
+            elif marker_transform == "log1p":
+                x_t3 = np.log1p(x_raw)
+            elif marker_transform == "yeojohnson":
+                x_t3 = _yeojohnson_forward_local(x_raw, tparams.get("lambda", 1.0))
+            else:
+                x_t3 = x_raw
+            jac = _transform_derivative_local(x_raw, marker_transform, arcsinh_cofactor,
+                                               tparams.get("lambda"))
+            bin_width = (hi - lo) / 60.0
+            mixture_counts = np.zeros_like(x_raw)
+            for i in (low_idx, high_idx):
+                comp_density_t = weights[i] * norm.pdf(x_t3, means_t[i], stds_t[i])
+                comp_counts = comp_density_t * jac * len(clean) * bin_width
+                mixture_counts += comp_counts
+                ax3.plot(x_raw, comp_counts, linewidth=2,
+                         color=(NEG_COLOR if i == low_idx else POS_COLOR),
+                         label=f"{comp_names[i]} GMM fit")
+            ax3.plot(x_raw, mixture_counts, "k--", linewidth=1.3, label="GMM mixture")
+            ax3.legend(fontsize="small", frameon=False)
+
             ax3.axvline(threshold, color="#C44E52", linestyle="--", linewidth=1.8)
             ax3.set_title("Positive / negative split (raw scale)", fontsize=11)
             ax3.set_xlabel("Expression level (raw)")
