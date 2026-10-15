@@ -115,3 +115,8 @@
 !.cirro/*.json
 !.cirro/*.config
 !.cirro/*.py
+
+# Packages each core's outputs as a SpatialData store for the viewer
+# (run by main.nf's build_viewer_checkpoint, in the spatial-data-studio env).
+!bin/
+!bin/build_spatialdata.py
