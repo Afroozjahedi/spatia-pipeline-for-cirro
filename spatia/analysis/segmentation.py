@@ -774,12 +774,25 @@ def generate_overlays(
                     rand_seed=rand_seed,
                 )
                 plt.savefig(save_path, dpi=150, bbox_inches="tight")
-                plt.close()
+                # show_masks() ITSELF opens extra figure(s) internally
+                # (spacec/plotting/_segmentation.py -- confirmed 2026-10-16
+                # from a combined-TMA run log hitting matplotlib's "More than
+                # 20 figures" warning right at show_masks()'s own
+                # `fig, axs = plt.subplots(n, 2, ...)` call, then again
+                # moments later at the plt.figure() line above, once this
+                # loop's own accumulation had also crossed 20). A bare
+                # plt.close() here only closes the ONE figure we created on
+                # the line above, not whatever show_masks() left open -- the
+                # same leak shape as run_cell_segmentation()'s finally block
+                # above, just one function down and still unfixed until now.
+                # 130 calls (once per image) before preprocessing even
+                # starts, so close everything, every call.
+                plt.close("all")
                 saved.append(save_path)
                 print(f"  Overlay saved to: {save_path}")
             except Exception as e:
                 print(f"  Error generating overlay: {e}")
-                plt.close()
+                plt.close("all")
                 continue
 
     return saved
