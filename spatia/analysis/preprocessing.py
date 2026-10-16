@@ -435,6 +435,18 @@ def run_preprocessing(cfg: dict) -> dict:
                 print(f"  No mesmer_result.csv found — skipping")
                 continue
 
+            # Images (tissue_id, tinfo) added to all_processed_tissues while
+            # processing THIS slide_folder. all_processed_tissues itself has
+            # to stay global (a tissue_id's experiment_groups can legitimately
+            # span multiple slide folders -- e.g. TMA_A and DII_TMA_A are the
+            # same physical tissues under different panels -- so it can't be
+            # flushed per folder without breaking the combined-experiment-group
+            # file). overlay_mapping has no such cross-folder dependency: each
+            # visualization only ever uses one image's own overlay, so it is
+            # run per folder below instead of in one final pass over every
+            # folder's images -- see the loading-phase note above this loop.
+            this_folder_tinfo: List[Tuple[str, dict]] = []
+
             # Load overlay pickle files for visualisation
             for pf in [f for f in os.listdir(slide_dir) if f.endswith("_seg_output.pickle")]:
                 try:
@@ -527,14 +539,16 @@ def run_preprocessing(cfg: dict) -> dict:
                             df_clean = df_clean.drop(columns=stale_blank_cols)
                         col_num = _get_last_marker_col(df_clean, resolved_last_marker, nuclei_col)
 
-                        all_processed_tissues.setdefault(tissue_id, []).append({
+                        _tinfo = {
                             "data":      df_clean,
                             "experiment_group": experiment_group,
                             "image_id":  image_id,
                             "col_num":   col_num,
                             "nuclei_col": nuclei_col,
                             "skipped":   True,
-                        })
+                        }
+                        all_processed_tissues.setdefault(tissue_id, []).append(_tinfo)
+                        this_folder_tinfo.append((tissue_id, _tinfo))
                         n_already_done += 1
                         continue
 
@@ -626,14 +640,16 @@ def run_preprocessing(cfg: dict) -> dict:
                     })
                     processing_stats.append(tissue_stats)
 
-                    all_processed_tissues.setdefault(tissue_id, []).append({
+                    _tinfo = {
                         "data":      df_clean,
                         "experiment_group": experiment_group,
                         "image_id":  image_id,
                         "col_num":   col_num,
                         "nuclei_col": nuclei_col,
                         "skipped":   False,
-                    })
+                    }
+                    all_processed_tissues.setdefault(tissue_id, []).append(_tinfo)
+                    this_folder_tinfo.append((tissue_id, _tinfo))
                     print(f"  ✓ Processed {image_id}")
 
                 except Exception as exc:
@@ -647,70 +663,8 @@ def run_preprocessing(cfg: dict) -> dict:
                     })
                     import traceback; traceback.print_exc()
 
-        # ── Save per-experiment_group + combined files ─────────────────────
-        print(f"\n{'=' * 80}\nSAVING PROCESSED TISSUES\n{'=' * 80}")
-
-        for tissue_id, tissue_list in all_processed_tissues.items():
-            print(f"\n--- {tissue_id} ---")
-            any_new = any(not t.get("skipped", False) for t in tissue_list)
-
-            # Per-experiment_group
-            for tinfo in tissue_list:
-                if tinfo.get("skipped"):
-                    print(f"  ⏭️  {tinfo['experiment_group']} already on disk")
-                    continue
-                cond     = tinfo["experiment_group"]
-                df_cond  = tinfo["data"]
-                col_num  = tinfo["col_num"]
-
-                csv_out = os.path.join(tissues_dir, f"{tissue_id}_{cond}.csv")
-                df_cond.to_csv(csv_out, index=False)
-
-                h5ad_out = os.path.join(tissues_dir, f"{tissue_id}_{cond}.h5ad")
-                adata = sp.hf.make_anndata(df_nn=df_cond, col_sum=col_num, nonFuncAb_list=[])
-                adata.write_h5ad(h5ad_out)
-                print(f"  ✓ Saved {cond}: {df_cond.shape[0]} cells")
-
-            # Combined — scan disk for all experiment_group CSVs (handles partial runs)
-            combined_csv = os.path.join(tissues_dir, f"{tissue_id}_combined_all_experiment_groups.csv")
-            combined_exists = os.path.exists(combined_csv)
-            unique_experiment_groups = list({t["experiment_group"] for t in tissue_list})
-
-            if combined_exists and not any_new and len(unique_experiment_groups) == 1:
-                print(f"  ⏭️  Combined already exists, no new data")
-                continue
-
-            disk_dfs = []
-            for cond in experiment_groups + ["Unknown"]:
-                cond_csv = os.path.join(tissues_dir, f"{tissue_id}_{cond}.csv")
-                if os.path.exists(cond_csv):
-                    df_c = pd.read_csv(cond_csv)
-                    df_c["experiment_group"] = cond   # ensure correct label
-                    disk_dfs.append(df_c)
-                    print(f"  + {cond}: {len(df_c)} cells")
-
-            if not disk_dfs:
-                print(f"  ⚠️  No experiment_group files found on disk — skipping combined")
-                continue
-
-            combined_df = pd.concat(disk_dfs, ignore_index=True)
-            combined_df.to_csv(combined_csv, index=False)
-
-            col_num = tissue_list[0]["col_num"]
-            adata_combined = sp.hf.make_anndata(
-                df_nn=combined_df, col_sum=col_num, nonFuncAb_list=[]
-            )
-            adata_combined_path = os.path.join(
-                tissues_dir, f"{tissue_id}_combined_all_experiment_groups.h5ad"
-            )
-            adata_combined.write_h5ad(adata_combined_path)
-            print(f"  ✓ Combined: {len(combined_df)} cells → {adata_combined_path}")
-
-        # ── Marker visualisations ───────────────────────────────────────────
-        print(f"\n{'=' * 80}\nGENERATING VISUALISATIONS\n{'=' * 80}")
-
-        for tissue_id, tissue_list in all_processed_tissues.items():
-            for tinfo in tissue_list:
+            print(f"  Generating marker visualisations for {slide_folder}...")
+            for tissue_id, tinfo in this_folder_tinfo:
                 image_id = tinfo["image_id"]
                 try:
                     experiment_group = tinfo["experiment_group"]
@@ -774,6 +728,65 @@ def run_preprocessing(cfg: dict) -> dict:
                     # loading-phase note above this function.
                     overlay_mapping.pop(image_id, None)
                     overlay_mapping.pop(image_id + "_", None)
+
+        # ── Save per-experiment_group + combined files ─────────────────────
+        print(f"\n{'=' * 80}\nSAVING PROCESSED TISSUES\n{'=' * 80}")
+
+        for tissue_id, tissue_list in all_processed_tissues.items():
+            print(f"\n--- {tissue_id} ---")
+            any_new = any(not t.get("skipped", False) for t in tissue_list)
+
+            # Per-experiment_group
+            for tinfo in tissue_list:
+                if tinfo.get("skipped"):
+                    print(f"  ⏭️  {tinfo['experiment_group']} already on disk")
+                    continue
+                cond     = tinfo["experiment_group"]
+                df_cond  = tinfo["data"]
+                col_num  = tinfo["col_num"]
+
+                csv_out = os.path.join(tissues_dir, f"{tissue_id}_{cond}.csv")
+                df_cond.to_csv(csv_out, index=False)
+
+                h5ad_out = os.path.join(tissues_dir, f"{tissue_id}_{cond}.h5ad")
+                adata = sp.hf.make_anndata(df_nn=df_cond, col_sum=col_num, nonFuncAb_list=[])
+                adata.write_h5ad(h5ad_out)
+                print(f"  ✓ Saved {cond}: {df_cond.shape[0]} cells")
+
+            # Combined — scan disk for all experiment_group CSVs (handles partial runs)
+            combined_csv = os.path.join(tissues_dir, f"{tissue_id}_combined_all_experiment_groups.csv")
+            combined_exists = os.path.exists(combined_csv)
+            unique_experiment_groups = list({t["experiment_group"] for t in tissue_list})
+
+            if combined_exists and not any_new and len(unique_experiment_groups) == 1:
+                print(f"  ⏭️  Combined already exists, no new data")
+                continue
+
+            disk_dfs = []
+            for cond in experiment_groups + ["Unknown"]:
+                cond_csv = os.path.join(tissues_dir, f"{tissue_id}_{cond}.csv")
+                if os.path.exists(cond_csv):
+                    df_c = pd.read_csv(cond_csv)
+                    df_c["experiment_group"] = cond   # ensure correct label
+                    disk_dfs.append(df_c)
+                    print(f"  + {cond}: {len(df_c)} cells")
+
+            if not disk_dfs:
+                print(f"  ⚠️  No experiment_group files found on disk — skipping combined")
+                continue
+
+            combined_df = pd.concat(disk_dfs, ignore_index=True)
+            combined_df.to_csv(combined_csv, index=False)
+
+            col_num = tissue_list[0]["col_num"]
+            adata_combined = sp.hf.make_anndata(
+                df_nn=combined_df, col_sum=col_num, nonFuncAb_list=[]
+            )
+            adata_combined_path = os.path.join(
+                tissues_dir, f"{tissue_id}_combined_all_experiment_groups.h5ad"
+            )
+            adata_combined.write_h5ad(adata_combined_path)
+            print(f"  ✓ Combined: {len(combined_df)} cells → {adata_combined_path}")
 
         # ── Save processing statistics ──────────────────────────────────────
         stats_df   = pd.DataFrame(processing_stats)
