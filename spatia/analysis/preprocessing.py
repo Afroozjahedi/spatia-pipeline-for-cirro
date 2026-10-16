@@ -599,6 +599,15 @@ def run_preprocessing(cfg: dict) -> dict:
                         z_count_thres=z_count_cut,
                         z_sum_thres=z_sum_cut,
                     )
+                    # sp.pp.remove_noise() draws its own 3-panel QC figure
+                    # internally (spacec/preprocessing/_general.py:127:
+                    # fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 5)))
+                    # and never closes it. Called once per image (130x in a
+                    # combined run) during preprocessing, this is the third
+                    # confirmed matplotlib-figure leak from spacec -- see the
+                    # same pattern already fixed in segmentation.py for
+                    # cell_segmentation() and generate_overlays().
+                    plt.close("all")
                     n_after_noise  = df_clean.shape[0]
                     n_removed_noise = df_norm.shape[0] - n_after_noise
                     print(f"  After noise removal: {n_after_noise} cells  "
