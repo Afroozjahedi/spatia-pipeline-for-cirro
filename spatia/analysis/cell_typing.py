@@ -528,7 +528,8 @@ def compute_marker_thresholds(adata, markers: list, std_multipliers: dict,
                                confidence_level: float = 0.8,
                                confidence_overrides: Optional[dict] = None,
                                column_map: Optional[dict] = None,
-                               transform_overrides: Optional[dict] = None) -> Tuple[dict, dict]:
+                               transform_overrides: Optional[dict] = None,
+                               threshold_mode_overrides: Optional[dict] = None) -> Tuple[dict, dict]:
     """
     Fits a GMM per marker and returns (thresholds, fit_info).
 
@@ -577,6 +578,18 @@ def compute_marker_thresholds(adata, markers: list, std_multipliers: dict,
         column_map.get(m, m). A config with no column_map (the previous,
         still-default behavior) resolves every marker to itself, identical
         to before this parameter existed.
+
+    threshold_mode_overrides: {marker: "std_multiplier"|"posterior"}, optional.
+        Added 2026-10-20 at Afrouz's request (CD163/CD68 specifically needed
+        posterior thresholding while the rest of the panel stays on this
+        config's global threshold_mode) -- mirrors transform_overrides'
+        pattern exactly: a marker listed here uses ITS OWN mode regardless
+        of the global `threshold_mode` argument; a marker not listed falls
+        back to `threshold_mode`, identical to prior behavior for any
+        config that doesn't set this. add_positivity_columns() already
+        reads threshold_mode per-marker from fit_info (not from a single
+        global value), so no change was needed there -- only this
+        function's own if/else needed to stop hardcoding the global mode.
     """
     confidence_overrides = confidence_overrides or {}
     column_map = column_map or {}
@@ -602,23 +615,25 @@ def compute_marker_thresholds(adata, markers: list, std_multipliers: dict,
 
         mult = std_multipliers.get(m, default_std)
         conf = confidence_overrides.get(m, confidence_level)
+        marker_mode = (threshold_mode_overrides or {}).get(m, threshold_mode)
         override_note = "  [override]" if m in transform_overrides else ""
+        mode_override_note = "  [mode override]" if m in (threshold_mode_overrides or {}) else ""
 
-        if threshold_mode == "posterior":
+        if marker_mode == "posterior":
             t = _gmm_posterior_effective_threshold(fit, conf, marker_transform, arcsinh_cofactor)
             lam_note = f"  lambda={fit['transform_params']['lambda']:.3f}" if "lambda" in fit["transform_params"] else ""
             print(f"    {m:<20} mode=posterior  confidence={conf:.2f}  transform={marker_transform}"
-                  f"  effective_threshold={t:.4f}{lam_note}{override_note}")
+                  f"  effective_threshold={t:.4f}{lam_note}{override_note}{mode_override_note}")
         else:
             t = _gmm_threshold_from_fit(fit, mult, marker_transform, arcsinh_cofactor)
             lam_note = f"  lambda={fit['transform_params']['lambda']:.3f}" if "lambda" in fit["transform_params"] else ""
             print(f"    {m:<20} mode=std_multiplier  std_mult={mult:.1f}  transform={marker_transform}"
-                  f"  threshold={t:.4f}{lam_note}{override_note}")
+                  f"  threshold={t:.4f}{lam_note}{override_note}{mode_override_note}")
 
         thresholds[m] = t
         fit_info[m] = {
             **fit,
-            "threshold_mode": threshold_mode,
+            "threshold_mode": marker_mode,
             "confidence_level": conf,
             "transform": marker_transform,
         }
@@ -1076,6 +1091,11 @@ def run_cell_typing(cfg: dict) -> None:
     # default -- e.g. zero-inflated markers get "arcsinh" while the rest
     # of the panel stays "none". See compute_marker_thresholds docstring.
     transform_overrides = gmm_cfg.get("per_marker_transform_overrides", {})
+    # Per-marker threshold_mode overrides (added 2026-10-20, Afrouz): a
+    # marker can be called with "posterior" even while the config's global
+    # gmm.threshold_mode stays "std_multiplier" (or vice versa) -- same
+    # override pattern as transform_overrides/confidence_overrides above.
+    threshold_mode_overrides = gmm_cfg.get("per_marker_threshold_mode_overrides", {})
 
     # Merge per-marker overrides with default
     std_multipliers = {m: default_std for m in panel}
@@ -1138,6 +1158,7 @@ def run_cell_typing(cfg: dict) -> None:
         confidence_overrides=confidence_overrides,
         column_map=column_map,
         transform_overrides=transform_overrides,
+        threshold_mode_overrides=threshold_mode_overrides,
     )
     threshold_report = pd.DataFrame({
         "threshold": thresholds,

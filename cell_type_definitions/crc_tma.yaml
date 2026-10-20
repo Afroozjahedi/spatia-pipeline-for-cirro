@@ -15,9 +15,21 @@
 # Ordering within a cell type: more specific first.
 #
 # Expert types not defined here (will be "Unassigned"):
-#   dirt, undefined, immune cells, immune cells / vasculature,
-#   tumor cells / immune cells, adipocytes
-#   — these are ambiguous or lack distinguishing markers.
+#   adipocytes
+#   — no marker in this panel (no Perilipin/FABP4/PPARG/LEP) can
+#     distinguish adipocytes from any other CD45-negative cell.
+#
+# Expert types added 2026-10-20 (Afrouz) as a final catch-all block at the
+# END of this file: immune cells, tumor cells / immune cells, immune cells
+# / vasculature, vasculature / smooth muscle, and a merged "mixed lineage"
+# stand-in for dirt/undefined (see that block's own comment for why dirt
+# and undefined were merged rather than kept separate). Deliberately LAST
+# in file/iteration order so they can only claim cells that scored 0 on
+# every rule above (i.e. cells that would otherwise be "Unassigned") --
+# a tie only resolves to whichever rule is evaluated first (see
+# assign_cell_types_automatic() in cell_typing.py), so putting them last
+# means they never steal a cell from an already-tuned, validated rule
+# above, even when both would score the same.
 # ============================================================
 
 cell_type_definitions:
@@ -167,3 +179,84 @@ cell_type_definitions:
     required:  [GFAP_pos]
     excluded:  [CD45_pos, CK_pos]
     preferred: [Synaptophysin_pos, ChromoA_pos]
+
+
+  # ══════════════════════════════════════════════════════════
+  # CATCH-ALL / AMBIGUOUS CATEGORIES — added 2026-10-20 (Afrouz)
+  # ══════════════════════════════════════════════════════════
+  # Deliberately placed LAST: in assign_cell_types_automatic(), a tie
+  # (equal score) resolves to whichever rule was evaluated first, so
+  # every rule below only ever claims a cell that scored 0 everywhere
+  # above -- these can only shrink "Unassigned", never override an
+  # already-tuned, validated call higher up this file.
+
+  # Tumor cells co-positive for CD45 -- Schürch's own "tumor cells /
+  # immune cells" doublet label (segmentation spillover between an
+  # epithelial cell and an adjacent immune cell, most likely).
+  "tumor cells / immune cells":
+    required:     [CD45_pos]
+    required_any: [CDX2_pos, CK_pos]
+    preferred:    []
+
+  # Immune cells co-positive for an endothelial marker -- Schürch's own
+  # "immune cells / vasculature" doublet label (e.g. a leukocyte caught
+  # mid-transmigration through a vessel wall, or segmentation spillover).
+  "immune cells / vasculature":
+    required:     [CD45_pos]
+    required_any: [CD31_pos, Podoplanin_pos]
+    preferred:    []
+
+  # Smooth muscle co-positive for an endothelial marker. NOT one of the
+  # 6 "Expert types" this file's header previously listed as undefined --
+  # added on your literal request ("vasculaturized smooth muscle"). May
+  # genuinely be perivascular smooth muscle / pericytes (aSMA+ cells
+  # wrapping small vessels are real biology), not necessarily a
+  # segmentation artifact like the two doublets above -- flagging this
+  # distinction since I'm not fully certain which reading you meant.
+  "vasculature / smooth muscle":
+    required:     [aSMA_pos]
+    required_any: [CD31_pos, Podoplanin_pos]
+    preferred:    []
+
+  # Generic "distinct lineages shouldn't co-occur" catch-all -- the
+  # closest marker-based proxy for Schürch's "dirt" and "undefined"
+  # labels. IMPORTANT caveat: dirt (imaging/segmentation debris) and
+  # undefined (expert-ambiguous QC calls) are NOT actually distinguishable
+  # from each other by marker positivity -- neither is a real lineage with
+  # a defining marker, which is exactly why they were left out before.
+  # Rather than inventing an arbitrary rule to split them into two
+  # look-alike categories, this merges both into ONE explicit "mixed
+  # lineage" label driven by combinations that genuinely shouldn't
+  # co-occur in a real cell (tumor+smooth-muscle, tumor+vasculature,
+  # immune+smooth-muscle, immune+stroma) and are not already one of the
+  # 3 named doublets above. Confidence this is the right proxy: ~70% --
+  # it will catch some real debris/ambiguous cells, but won't reproduce
+  # Schürch's exact dirt/undefined boundaries (those were drawn by human
+  # QC judgment on raw imagery, not marker logic). Worth checking this
+  # category's size against the 7,357/6,524-cell dirt/undefined counts
+  # before trusting it as a like-for-like replacement.
+  "mixed lineage (dirt/undefined)":
+    - required:     [aSMA_pos]
+      required_any: [CDX2_pos, CK_pos]
+      preferred:    []
+    - required:     [CDX2_pos]
+      required_any: [CD31_pos, Podoplanin_pos]
+      preferred:    []
+    - required:     [CK_pos]
+      required_any: [CD31_pos, Podoplanin_pos]
+      preferred:    []
+    - required:     [aSMA_pos, CD45_pos]
+      preferred:    []
+    - required:     [Vimentin_pos, CD45_pos]
+      preferred:    []
+
+  # Generic CD45+ catch-all -- MUST stay the very last entry in this
+  # file. Catches any CD45+ cell that didn't match a specific immune
+  # subtype above (macrophages/monocytes/T cells/NK/B/plasma/DCs/
+  # granulocytes) or any doublet/mixed-lineage rule above. If this were
+  # moved earlier, it would steal cells from CD163+ macrophages,
+  # granulocytes, and lymphatics -- those also score 1 (no preferred
+  # bonus) and only keep their specific label today because they're
+  # evaluated first.
+  "immune cells":
+    required: [CD45_pos]

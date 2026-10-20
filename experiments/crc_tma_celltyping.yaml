@@ -204,6 +204,14 @@ cell_typing:
       CollagenIV: "arcsinh"
       Synaptophysin: "arcsinh"
       CD45: "arcsinh"
+      # Added 2026-10-20 at Afrouz's request -- CD163/CD68 (macrophage
+      # markers) weren't in marker_shape_diagnosis.py's original
+      # zero_frac >= 0.30 list above, so this wasn't data-driven the way
+      # the other 14 were. Worth re-running that diagnosis on CD163/CD68
+      # specifically to confirm the same zero-inflation story applies
+      # before trusting a new accuracy number off this change.
+      CD163: "arcsinh"
+      CD68: "arcsinh"
 
     # threshold_mode (2026-08-19): "std_multiplier" (default, unchanged
     # from all prior runs -- mean_low + std_multiplier * std_low) or
@@ -217,6 +225,17 @@ cell_typing:
     threshold_mode: "std_multiplier"
     confidence_level: 0.8
     per_marker_confidence_overrides: {}
+    # per_marker_threshold_mode_overrides (added 2026-10-20, Afrouz):
+    # CD163/CD68 use posterior-probability thresholding (paired with the
+    # arcsinh override just above) while every other marker stays on this
+    # config's validated "std_multiplier" default. Needed a small code
+    # change in compute_marker_thresholds() (spatia/analysis/cell_typing.py)
+    # since threshold_mode was previously applied globally with no
+    # per-marker escape hatch -- add_positivity_columns() already read
+    # threshold_mode per-marker from fit_info, so that half was free.
+    per_marker_threshold_mode_overrides:
+      CD163: "posterior"
+      CD68: "posterior"
 
   clustering:
     n_neighbors: 15
