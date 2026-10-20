@@ -949,24 +949,39 @@ def plot_triad_qc(df, triad_df, image_id, combo_label, save_path, radius_um,
         panel_radius = radius_um
 
     fig, axes = plt.subplots(1, 2, figsize=(20, 9))
-    cell_types = sorted(df["cell_type"].unique())
+    names = combo_label.split("__")
+    anchor_lbl   = names[0] if len(names) > 0 else "Anchor"
+    partner1_lbl = names[1] if len(names) > 1 else "Partner 1"
+    partner2_lbl = names[2] if len(names) > 2 else "Partner 2"
+    key_colors = {anchor_lbl: ANCHOR_COLOR, partner1_lbl: PARTNER1_COLOR, partner2_lbl: PARTNER2_COLOR}
 
-    # ── Left panel: all cells coloured by type ────────────────────────────────
-    for i, ct in enumerate(cell_types):
+    # ── Left panel: gray tissue silhouette, with the 3 key cell types
+    #    highlighted on top ───────────────────────────────────────────────
+    # Previously every cell type was cycled through COLOR_PALETTE
+    # (s=6-10, alpha=0.45-0.75) -- with 10+ types competing for attention at
+    # tiny/faint sizes, neither the tissue shape nor the biologically
+    # relevant types read clearly. Now: all cells are drawn first as one
+    # visible gray silhouette, and only anchor/partner1/partner2 are drawn
+    # boldly on top (Afrouz, 2026-10-20: "cell types are so small and fade
+    # colors... we need a gray background to see the tissue").
+    other = df[~df["cell_type"].isin(key_colors.keys())]
+    axes[0].scatter(
+        other["centroid_x"], other["centroid_y"],
+        s=5, alpha=0.35, linewidths=0, color="#9a9a9a", zorder=1,
+        label=f"Other cells ({len(other):,})",
+    )
+    for ct, color in key_colors.items():
         sub = df[df["cell_type"] == ct]
-        is_key = ct in (combo_label.split("__")[0], combo_label.split("__")[1], combo_label.split("__")[2])
         axes[0].scatter(
             sub["centroid_x"], sub["centroid_y"],
-            s=10 if is_key else 6,
-            alpha=0.75 if is_key else 0.45,
-            linewidths=0,
-            color=COLOR_PALETTE[i % len(COLOR_PALETTE)],
+            s=22, alpha=0.9, linewidths=0.3, edgecolors="black",
+            color=color, zorder=3,
             label=f"{ct} ({len(sub):,})",
         )
     if not triad_df_report.empty:
         axes[0].scatter(
             triad_df_report["anchor_x"], triad_df_report["anchor_y"],
-            s=60, color=ANCHOR_COLOR, edgecolors="black", linewidths=0.5,
+            s=70, color=ANCHOR_COLOR, edgecolors="black", linewidths=0.6,
             zorder=6, marker="*",
             label=f"Triad anchors @ {panel_radius} µm ({len(triad_df_report):,})",
         )
@@ -975,16 +990,13 @@ def plot_triad_qc(df, triad_df, image_id, combo_label, save_path, radius_um,
     axes[0].invert_yaxis()
     axes[0].set_xlabel("X (px)", fontsize=10)
     axes[0].set_ylabel("Y (px)", fontsize=10)
-    axes[0].legend(fontsize=7, markerscale=2, ncol=2, framealpha=0.9,
+    axes[0].legend(fontsize=8, markerscale=2, ncol=1, framealpha=0.9,
                    loc="upper right", borderpad=0.5)
     axes[0].spines["top"].set_visible(False)
     axes[0].spines["right"].set_visible(False)
 
     # ── Right panel: triad cells only ────────────────────────────────────────
-    names = combo_label.split("__")
-    anchor_lbl   = names[0] if len(names) > 0 else "Anchor"
-    partner1_lbl = names[1] if len(names) > 1 else "Partner 1"
-    partner2_lbl = names[2] if len(names) > 2 else "Partner 2"
+    # (names/anchor_lbl/partner1_lbl/partner2_lbl already derived above)
 
     # Background: all cells dimmed (always rendered so axes scale correctly)
     triad_ids = set()
@@ -996,7 +1008,7 @@ def plot_triad_qc(df, triad_df, image_id, combo_label, save_path, radius_um,
         )
     bg = df[~df["cell_id"].astype(str).isin(triad_ids)]
     axes[1].scatter(bg["centroid_x"], bg["centroid_y"],
-                    s=4, alpha=0.15, color="lightgray", linewidths=0, zorder=1)
+                    s=6, alpha=0.25, color="#b5b5b5", linewidths=0, zorder=1)
 
     if not triad_df_report.empty:
         # Connecting lines
@@ -1146,10 +1158,26 @@ def plot_experiment_group_comparison(summary_df, all_triads_combined, output_dir
     if atc.empty:
         return
 
+    # Use the real cell-type names already carried per-row by find_triads()
+    # (anchor_type/partner1_type/partner2_type) instead of generic
+    # "Anchor"/"Partner1"/"Partner2" labels -- requested by Afrouz,
+    # 2026-10-20 ("add the name of cell types in the bar plots mean
+    # pairwise distance plot"). Falls back to the generic role name only
+    # if that column is missing or entirely empty (shouldn't happen on a
+    # normal run, but keeps this non-fatal).
+    def _role_name(col, fallback):
+        if col in atc.columns and not atc[col].dropna().empty:
+            return str(atc[col].mode().iat[0])
+        return fallback
+
+    anchor_name   = _role_name("anchor_type", "Anchor")
+    partner1_name = _role_name("partner1_type", "Partner1")
+    partner2_name = _role_name("partner2_type", "Partner2")
+
     dist_pairs = {
-        "Anchor – Partner1": "dist_anchor_p1_um",
-        "Anchor – Partner2": "dist_anchor_p2_um",
-        "Partner1 – Partner2": "dist_p1_p2_um",
+        f"{anchor_name} – {partner1_name}": "dist_anchor_p1_um",
+        f"{anchor_name} – {partner2_name}": "dist_anchor_p2_um",
+        f"{partner1_name} – {partner2_name}": "dist_p1_p2_um",
     }
     pair_labels, dist_cols = list(dist_pairs.keys()), list(dist_pairs.values())
     xd = np.arange(len(pair_labels))

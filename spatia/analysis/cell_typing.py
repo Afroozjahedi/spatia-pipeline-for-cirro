@@ -63,6 +63,7 @@ import yaml
 import numpy as np
 import pandas as pd
 import matplotlib
+import matplotlib.colors as mcolors
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -1832,6 +1833,37 @@ def plot_stacked_by_group(adata, group_col: str, plot_dir: str, data_dir: str,
 
 # ── 6. UMAP: cell type / group / core ───────────────────────────────────────
 
+def _qualitative_palette(categories, unassigned_gray=(0.82, 0.82, 0.82, 1.0)):
+    """
+    Builds a high-contrast hex color list for a set of categorical labels,
+    reusing the same tab20+tab20b(+tab20c) cycling approach already used by
+    plot_spatial_celltype_overlay() below, so cell-type colors read
+    consistently across plot types. "Unassigned" (if present) is pinned to
+    a light neutral grey and sorted last, so it never competes visually
+    with a real call. Added 2026-10-20 (Afrouz: UMAP colors "very faded",
+    "categories not very distinct") -- scanpy's default categorical
+    palette (tab20 only, 20 colors) was being asked to distinguish 23+
+    cell types, so categories past #20 silently repeated colors.
+
+    Returns (hex_colors, ordered_categories) -- both the same length and
+    aligned 1:1. Callers should re-cast the obs column to a Categorical
+    with categories=ordered_categories before plotting, so scanpy assigns
+    colors in that exact order (otherwise scanpy sorts alphabetically and
+    the palette/category pairing drifts).
+    """
+    cats = [c for c in categories if c != "Unassigned"]
+    has_unassigned = "Unassigned" in categories
+    base = ([plt.cm.tab20(i) for i in range(20)]
+            + [plt.cm.tab20b(i) for i in range(20)]
+            + [plt.cm.tab20c(i) for i in range(20)])
+    hex_colors = [mcolors.to_hex(base[i % len(base)]) for i in range(len(cats))]
+    ordered = list(cats)
+    if has_unassigned:
+        ordered.append("Unassigned")
+        hex_colors.append(mcolors.to_hex(unassigned_gray))
+    return hex_colors, ordered
+
+
 def compute_and_plot_umaps(adata, plot_dir: str, data_dir: str, group_col: str, tissue_col: str,
                             random_state: int = 42, formats=("png", "pdf")):
     """
@@ -1898,9 +1930,23 @@ def compute_and_plot_umaps(adata, plot_dir: str, data_dir: str, group_col: str, 
     for color_key, title, fname in colorings:
         try:
             fig, ax = plt.subplots(figsize=(9, 8))
-            legend_loc = "right margin" if adata.obs[color_key].nunique() <= 30 else None
+            n_cats = adata.obs[color_key].nunique()
+            legend_loc = "right margin" if n_cats <= 30 else None
+
+            # Bigger, more distinguishable dots + an explicit high-contrast
+            # palette -- scanpy's auto point size (~120000/n_obs) goes
+            # sub-pixel at hundreds of thousands of cells, and its default
+            # categorical palette (tab20, 20 colors) runs out before this
+            # dataset's 23+ cell types, which together were making these
+            # UMAPs look faded/indistinct (Afrouz, 2026-10-20).
+            point_size = float(np.clip(120000.0 / max(adata.n_obs, 1) * 5, 14.0, 45.0))
+            cats = [str(c) for c in adata.obs[color_key].astype(str).unique()]
+            palette, ordered_cats = _qualitative_palette(cats)
+            adata.obs[color_key] = pd.Categorical(adata.obs[color_key].astype(str), categories=ordered_cats)
+
             sc.pl.umap(adata, color=color_key, ax=ax, show=False, title=title,
-                       legend_loc=legend_loc, legend_fontsize=7)
+                       legend_loc=legend_loc, legend_fontsize=7,
+                       size=point_size, alpha=0.85, palette=palette)
             _savefig(fig, os.path.join(plot_dir, fname), formats)
             plt.close(fig)
         except Exception as e:
