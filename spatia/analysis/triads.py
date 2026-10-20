@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.spatial import cKDTree
+from scipy import stats as scipy_stats
 from itertools import combinations, permutations
 
 
@@ -828,7 +829,11 @@ def _resolve_per_image_group_areas(
             g = image_id_to_group[iid]
             resolved_group_areas[g] = resolved_group_areas.get(g, 0.0) + area
 
-    return resolved_group_areas
+    # per_image_area is also returned (added 2026-10-20, for the per-image
+    # triad-density significance test in compute_triad_group_significance)
+    # -- previously computed here and then thrown away once folded into the
+    # group total.
+    return resolved_group_areas, per_image_area
 
 
 # ── Core detection ────────────────────────────────────────────────────────────
@@ -1105,8 +1110,96 @@ def plot_trajectory(all_triads_combined, output_dir, radius_um, experiment_group
     plt.close(fig)
 
 
+def compute_triad_group_significance(summary_df: pd.DataFrame, experiment_groups: list,
+                                      alpha: float = 0.05) -> pd.DataFrame:
+    """
+    Tests whether triad number (n_triads) and triad density (triads_per_mm2)
+    differ significantly between experiment_groups. Added 2026-10-20 at
+    Afrouz's request ("is experiments group triad number and density
+    statistically different?").
+
+    Unit of replication: ONE ROW PER IMAGE (per combo_label) in summary_df
+    -- i.e. images/cores are the independent samples being compared, NOT
+    individual triads. Testing across individual triads instead would
+    pseudoreplicate (treating e.g. 500 triads from one mouse as 500
+    independent observations) and produce artificially tiny p-values that
+    don't reflect real statistical confidence. This requires summary_df to
+    carry an "area_um2" column (per-image tissue area) -- see
+    run_triad_analysis(), which now builds that from either measured
+    QuPath ROI areas or an even split of the configured group constant.
+
+    Test choice: nonparametric by default. Triad counts per image are
+    rarely normally distributed, especially with the handful of
+    images/cores per group typical in a TMA/mouse cohort, so a
+    t-test/ANOVA's normality assumption is a real risk here. Mann-Whitney U
+    (exactly 2 groups) or Kruskal-Wallis (3+ groups) make no distributional
+    assumption beyond independence of the images. CAVEAT this function does
+    NOT hide: with only a handful of images per group, this has limited
+    statistical power -- a non-significant result means "not detectable at
+    this N", not "no real difference". n_per_group is included in the
+    output specifically so that caveat stays visible alongside the p-value
+    rather than needing to be re-derived.
+
+    Returns one row per (combo_label, metric) -- metrics tested are
+    "n_triads" and "triads_per_mm2". A combo with fewer than 2 groups
+    having at least 1 image is still included, with test="insufficient_data"
+    and p_value=NaN, so a thin combo is visibly flagged rather than just
+    missing from the output.
+    """
+    rows = []
+    sub = summary_df[summary_df["experiment_group"].isin(experiment_groups)].copy()
+    if sub.empty:
+        return pd.DataFrame(rows)
+
+    for combo_label, combo_df in sub.groupby("combo_label"):
+        for metric in ("n_triads", "triads_per_mm2"):
+            if metric not in combo_df.columns:
+                continue
+            values_by_group = {
+                g: combo_df.loc[combo_df["experiment_group"] == g, metric].dropna().values
+                for g in experiment_groups
+                if g in combo_df["experiment_group"].unique()
+            }
+            testable = {g: v for g, v in values_by_group.items() if len(v) >= 1}
+            n_per_group = {g: int(len(v)) for g, v in values_by_group.items()}
+            medians = {g: (float(np.median(v)) if len(v) else None) for g, v in values_by_group.items()}
+
+            if len(testable) < 2:
+                rows.append({
+                    "combo_label": combo_label, "metric": metric,
+                    "groups_compared": list(testable.keys()), "n_per_group": n_per_group,
+                    "medians": medians, "test": "insufficient_data",
+                    "statistic": np.nan, "p_value": np.nan, "significant_at_0.05": False,
+                })
+                continue
+
+            vals = list(testable.values())
+            try:
+                if len(testable) == 2:
+                    stat, p = scipy_stats.mannwhitneyu(vals[0], vals[1], alternative="two-sided")
+                    test_name = "mannwhitneyu"
+                else:
+                    stat, p = scipy_stats.kruskal(*vals)
+                    test_name = "kruskal"
+            except ValueError as e:
+                # e.g. identical values in every group (zero variance) --
+                # scipy raises rather than returning p=1.0, so surface the
+                # reason instead of crashing the whole analysis over it.
+                stat, p, test_name = np.nan, np.nan, f"{'mannwhitneyu' if len(testable) == 2 else 'kruskal'}_failed: {e}"
+
+            rows.append({
+                "combo_label": combo_label, "metric": metric,
+                "groups_compared": list(testable.keys()), "n_per_group": n_per_group,
+                "medians": medians, "test": test_name,
+                "statistic": stat, "p_value": p,
+                "significant_at_0.05": bool(p < alpha) if pd.notna(p) else False,
+            })
+
+    return pd.DataFrame(rows)
+
+
 def plot_experiment_group_comparison(summary_df, all_triads_combined, output_dir, radius_um, experiment_group_areas, experiment_groups,
-                              report_radius_um=None, trajectory_min_um=0):
+                              report_radius_um=None, trajectory_min_um=0, significance_df=None):
     colors = {c: col for c, col in zip(experiment_groups, ["steelblue", "tomato", "seagreen", "darkorange"])}
     summary_df = summary_df[summary_df["experiment_group"].isin(experiment_groups)].copy()
     if summary_df.empty:
@@ -1132,6 +1225,33 @@ def plot_experiment_group_comparison(summary_df, all_triads_combined, output_dir
                     ax.text(bar.get_x() + bar.get_width() / 2, h * 1.02,
                             f"{int(h):,}" if ax == axes1[0] else f"{h:.2f}",
                             ha="center", va="bottom", fontsize=10, fontweight="bold")
+
+    # Significance annotation (added 2026-10-20, Afrouz: "is experiments
+    # group triad number and density statistically different?"). p_values
+    # come from compute_triad_group_significance(), which tests on the real
+    # per-image replication unit -- NOT these group-summed bars, which exist
+    # only for display. "*" marks p<0.05 (the usual convention); the exact
+    # p-value is always printed too, since the asterisk alone hides how
+    # close/far it was and how thin the N behind it is.
+    if significance_df is not None and not significance_df.empty:
+        for metric, ax in zip(("n_triads", "triads_per_mm2"), axes1):
+            sig_sub = significance_df[significance_df["metric"] == metric]
+            for ci, combo in enumerate(combos):
+                row = sig_sub[sig_sub["combo_label"] == combo]
+                if row.empty or pd.isna(row.iloc[0]["p_value"]):
+                    continue
+                p = row.iloc[0]["p_value"]
+                tallest = grp.loc[grp["combo_label"] == combo,
+                                   "n_triads" if metric == "n_triads" else "triads_per_mm2"].max()
+                if pd.isna(tallest) or tallest <= 0:
+                    continue
+                marker = "*" if p < 0.05 else "ns"
+                ax.text(x[ci] + width * (len(experiment_groups) - 1) / 2, tallest * 1.12,
+                        f"{marker}\np={p:.3f}", ha="center", va="bottom", fontsize=8,
+                        fontweight="bold" if p < 0.05 else "normal")
+        for ax in axes1:
+            top = ax.get_ylim()[1]
+            ax.set_ylim(0, top * 1.22)
 
     for ax, ylabel, title in zip(
         axes1,
@@ -1340,13 +1460,36 @@ def run_triad_analysis(cfg: dict) -> None:
     roi_labels_dir         = cfg["imaging"].get("roi_labels_dir")
     area_annotation_class  = cfg["imaging"].get("area_annotation_class")
     image_id_map           = cfg["imaging"].get("image_id_map", {})
+    # per_image_area_um2 (added 2026-10-20): built here regardless of which
+    # area source is used, so compute_triad_group_significance() can always
+    # compute a per-image triad density -- previously only the group-level
+    # total survived past this block, which is fine for the existing
+    # group-summed bar chart but not enough for a per-image (i.e.
+    # per-replicate) statistical test.
+    per_image_area_um2 = {}
     if roi_labels_dir:
         print(f"[SPATIA] imaging.roi_labels_dir set — resolving per-image tissue area from QuPath ROI extraction ({roi_labels_dir})")
-        group_areas = _resolve_per_image_group_areas(
+        group_areas, per_image_area_um2 = _resolve_per_image_group_areas(
             image_ids, image_id_to_group, roi_labels_dir, mpp,
             area_annotation_class, image_id_map, group_areas,
         )
         print()
+    else:
+        # No per-image measurement available -- same tier-2 fallback
+        # _resolve_per_image_group_areas already uses: spread each group's
+        # constant area evenly across the images actually present in that
+        # group this run.
+        group_image_counts = {}
+        for iid in image_ids:
+            g = image_id_to_group[iid]
+            group_image_counts[g] = group_image_counts.get(g, 0) + 1
+        for iid in image_ids:
+            g = image_id_to_group[iid]
+            const = group_areas.get(g)
+            if const is not None and group_image_counts.get(g, 0) > 0:
+                per_image_area_um2[iid] = const / group_image_counts[g]
+            else:
+                per_image_area_um2[iid] = float("nan")
 
     all_summary_rows = []
     all_triad_dfs    = []
@@ -1486,6 +1629,12 @@ def run_triad_analysis(cfg: dict) -> None:
         return
 
     summary_df = pd.DataFrame(all_summary_rows)
+    # area_um2 / triads_per_mm2 per IMAGE (added 2026-10-20) -- distinct
+    # from plot_experiment_group_comparison's own group-summed triads_per_mm2
+    # (computed separately, for display only). This per-image version is
+    # what compute_triad_group_significance() needs as its replication unit.
+    summary_df["area_um2"]       = summary_df["image_id"].map(per_image_area_um2)
+    summary_df["triads_per_mm2"] = summary_df["n_triads"] / (summary_df["area_um2"] / 1e6)
     summary_df.to_csv(os.path.join(triad_data_dir, "triad_summary.csv"), index=False)
 
     all_triads_combined = pd.concat(all_triad_dfs, ignore_index=True) if all_triad_dfs else pd.DataFrame()
@@ -1496,9 +1645,21 @@ def run_triad_analysis(cfg: dict) -> None:
     print("=" * 65)
     print(top20.to_string(index=False))
 
+    # Is triad number / density statistically different between
+    # experiment_groups? (Afrouz, 2026-10-20). See
+    # compute_triad_group_significance()'s docstring for the test choice
+    # and the small-N power caveat.
+    significance_df = compute_triad_group_significance(summary_df, experiment_groups)
+    if not significance_df.empty:
+        sig_path = os.path.join(triad_data_dir, "triad_group_significance.csv")
+        significance_df.to_csv(sig_path, index=False)
+        print(f"\n[SPATIA] Group significance (n_triads, triads_per_mm2) written to {sig_path}")
+        print(significance_df.to_string(index=False))
+
     plot_experiment_group_comparison(summary_df, all_triads_combined, triad_data_dir, radius_um, group_areas, experiment_groups,
                               report_radius_um=report_radius_um,
-                              trajectory_min_um=trajectory_min_um)
+                              trajectory_min_um=trajectory_min_um,
+                              significance_df=significance_df)
 
     # Optional: export every *_triad_pairs.csv just written to QuPath-importable
     # TSVs (see _run_qupath_export above). No-op unless analysis.triad.qupath_export

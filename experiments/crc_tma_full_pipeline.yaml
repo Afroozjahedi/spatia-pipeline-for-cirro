@@ -400,6 +400,24 @@ cell_typing:
     cd45_std_multiplier: 3.0
     default_std_multiplier: 2.0
     per_marker_overrides: {}
+    # transform (added 2026-10-20, Afrouz): this config previously set NO
+    # transform at all -- confirmed from this file alone (no `transform:`
+    # key -> code default "none", no per_marker_transform_overrides block
+    # -> every marker fit untransformed). That matches what Afrouz
+    # remembered ("in my previous run I did not apply any transformation")
+    # and is DIFFERENT from experiments/crc_tma_celltyping.yaml, which has
+    # arcsinh on 14 zero-inflated markers (see that file's own 2026-09-11
+    # comment). Only CD163/CD68 are added here per Afrouz's explicit
+    # request today -- the other 14 markers validated in
+    # crc_tma_celltyping.yaml have NOT been ported to this production
+    # config yet; that's a separate, bigger decision (this config also
+    # runs under threshold_mode=posterior globally, never validated
+    # against Schürch ground truth -- see the note below) worth a
+    # deliberate yes/no rather than a silent copy.
+    transform: "none"
+    per_marker_transform_overrides:
+      CD163: "arcsinh"
+      CD68: "arcsinh"
     # threshold_mode (added 2026-09-14, Afrouz's explicit choice): "posterior"
     # instead of just inheriting cell_typing.py's own fallback default
     # (gmm_cfg.get("threshold_mode", "std_multiplier")), which this file was
