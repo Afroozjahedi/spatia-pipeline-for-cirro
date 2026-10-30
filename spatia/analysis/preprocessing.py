@@ -272,6 +272,58 @@ def _processed_files_exist(tissue_id: str, experiment_group: Optional[str], out_
 # MAIN PREPROCESSING PIPELINE
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ── Raw-intensity layer (added 2026-10-29) ──────────────────────────────────
+# Marker POSITIVITY must be called on raw intensities: per-image z-scoring makes
+# a cell's value relative to its own image's cell mix (validated on Schürch CRC:
+# same cells/rules, z-scored input -> Unassigned ~10% -> ~50%, weighted F1
+# 0.32 -> 0.27). Z-scores stay the default .X (used for noise removal, UMAP,
+# triads/functional); the matching raw values travel alongside as
+# adata.layers["raw"] and as {tissue_id}_{group}_raw.csv, cell-for-cell aligned.
+
+def _aligned_raw(df_filt: pd.DataFrame, df_norm: pd.DataFrame, removed: pd.DataFrame,
+                 marker_cols: list, n_expected: int) -> Optional[pd.DataFrame]:
+    """Raw (pre-z-score) marker values for exactly the cells that survived
+    noise removal, in the same row order as the cleaned z-scored frame.
+
+    spacec's format() keeps the row index of its input and remove_noise()
+    returns the removed rows with their ORIGINAL index (but resets the index
+    of the kept rows), so survivors = df_norm rows whose index is not in
+    `removed`. Returns None (with a warning) if alignment can't be proven,
+    so a run never silently pairs raw values with the wrong cells."""
+    missing = [c for c in marker_cols if c not in df_filt.columns]
+    if missing:
+        print(f"  ⚠️  raw layer skipped: {len(missing)} marker column(s) not in raw data "
+              f"(e.g. {missing[:3]})")
+        return None
+    if df_norm.index.isin(df_filt.index).all() and df_norm.index.is_unique:
+        kept = df_norm.index[~df_norm.index.isin(removed.index)]
+        raw = df_filt.loc[kept, marker_cols]
+    else:
+        print("  ⚠️  raw layer skipped: z-scored rows could not be matched to raw rows by index")
+        return None
+    if len(raw) != n_expected:
+        print(f"  ⚠️  raw layer skipped: {len(raw)} raw rows vs {n_expected} cleaned rows")
+        return None
+    return raw.reset_index(drop=True)
+
+
+def _raw_csv_path(tissues_dir: str, tissue_id: str, group: str) -> str:
+    return os.path.join(tissues_dir, f"{tissue_id}_{group}_raw.csv")
+
+
+def _attach_raw_layer(adata, raw: Optional[pd.DataFrame], label: str = "") -> None:
+    """Set adata.layers['raw'] from a raw DataFrame aligned row-for-row with
+    adata, matching columns by var name. No-op (with a note) if unavailable."""
+    if raw is None:
+        print(f"  ⚠️  {label}: no raw layer (cell_typing will fall back to .X)")
+        return
+    cols = list(adata.var_names)
+    if len(raw) != adata.n_obs or not all(c in raw.columns for c in cols):
+        print(f"  ⚠️  {label}: raw layer shape/columns don't match — not attached")
+        return
+    adata.layers["raw"] = raw[cols].to_numpy(dtype=np.float32)
+
+
 def run_preprocessing(cfg: dict) -> dict:
     """
     Full preprocessing pipeline driven by the SPATIA config dict.
@@ -538,9 +590,11 @@ def run_preprocessing(cfg: dict) -> dict:
                         if stale_blank_cols:
                             df_clean = df_clean.drop(columns=stale_blank_cols)
                         col_num = _get_last_marker_col(df_clean, resolved_last_marker, nuclei_col)
+                        _rp = _raw_csv_path(tissues_dir, tissue_id, experiment_group)
 
                         _tinfo = {
                             "data":      df_clean,
+                            "raw":       pd.read_csv(_rp) if os.path.exists(_rp) else None,
                             "experiment_group": experiment_group,
                             "image_id":  image_id,
                             "col_num":   col_num,
@@ -607,11 +661,16 @@ def run_preprocessing(cfg: dict) -> dict:
                     tissue_stats["z_count_cutoff"] = z_count_cut
                     tissue_stats["z_sum_cutoff"]   = z_sum_cut
 
-                    df_clean, _ = sp.pp.remove_noise(
+                    df_clean, df_noisy = sp.pp.remove_noise(
                         df=df_norm,
                         col_num=col_num,
                         z_count_thres=z_count_cut,
                         z_sum_thres=z_sum_cut,
+                    )
+                    # Raw values for the same surviving cells (see _aligned_raw).
+                    raw_clean = _aligned_raw(
+                        df_filt, df_norm, df_noisy,
+                        list(df_clean.columns[: col_num + 1]), len(df_clean),
                     )
                     # sp.pp.remove_noise() draws its own 3-panel QC figure
                     # internally (spacec/preprocessing/_general.py:127:
@@ -642,6 +701,7 @@ def run_preprocessing(cfg: dict) -> dict:
 
                     _tinfo = {
                         "data":      df_clean,
+                        "raw":       raw_clean,
                         "experiment_group": experiment_group,
                         "image_id":  image_id,
                         "col_num":   col_num,
@@ -748,8 +808,13 @@ def run_preprocessing(cfg: dict) -> dict:
                 csv_out = os.path.join(tissues_dir, f"{tissue_id}_{cond}.csv")
                 df_cond.to_csv(csv_out, index=False)
 
+                raw_cond = tinfo.get("raw")
+                if raw_cond is not None:
+                    raw_cond.to_csv(_raw_csv_path(tissues_dir, tissue_id, cond), index=False)
+
                 h5ad_out = os.path.join(tissues_dir, f"{tissue_id}_{cond}.h5ad")
                 adata = sp.hf.make_anndata(df_nn=df_cond, col_sum=col_num, nonFuncAb_list=[])
+                _attach_raw_layer(adata, raw_cond, f"{tissue_id}_{cond}")
                 adata.write_h5ad(h5ad_out)
                 print(f"  ✓ Saved {cond}: {df_cond.shape[0]} cells")
 
@@ -762,13 +827,16 @@ def run_preprocessing(cfg: dict) -> dict:
                 print(f"  ⏭️  Combined already exists, no new data")
                 continue
 
-            disk_dfs = []
+            disk_dfs, raw_dfs = [], []
             for cond in experiment_groups + ["Unknown"]:
                 cond_csv = os.path.join(tissues_dir, f"{tissue_id}_{cond}.csv")
                 if os.path.exists(cond_csv):
                     df_c = pd.read_csv(cond_csv)
                     df_c["experiment_group"] = cond   # ensure correct label
                     disk_dfs.append(df_c)
+                    rp = _raw_csv_path(tissues_dir, tissue_id, cond)
+                    raw_c = pd.read_csv(rp) if os.path.exists(rp) else None
+                    raw_dfs.append(raw_c if raw_c is not None and len(raw_c) == len(df_c) else None)
                     print(f"  + {cond}: {len(df_c)} cells")
 
             if not disk_dfs:
@@ -782,6 +850,9 @@ def run_preprocessing(cfg: dict) -> dict:
             adata_combined = sp.hf.make_anndata(
                 df_nn=combined_df, col_sum=col_num, nonFuncAb_list=[]
             )
+            raw_combined = (pd.concat(raw_dfs, ignore_index=True)
+                            if raw_dfs and all(r is not None for r in raw_dfs) else None)
+            _attach_raw_layer(adata_combined, raw_combined, f"{tissue_id} combined")
             adata_combined_path = os.path.join(
                 tissues_dir, f"{tissue_id}_combined_all_experiment_groups.h5ad"
             )

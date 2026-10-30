@@ -342,6 +342,83 @@ def _detect_point_mass(values: np.ndarray, min_frac: float = 0.05) -> Optional[f
     return float(vals[idx]) if frac >= min_frac else None
 
 
+def _point_mass_fraction(values: np.ndarray) -> Tuple[Optional[float], float]:
+    """Return (value, fraction) of the single most-repeated value in `values`
+    (rounded to 6 decimals, same as _detect_point_mass). Used by the automatic
+    transform selection below. On raw intensities the repeated value is
+    usually exactly 0; on per-image z-scored data it is some other
+    marker-specific constant -- this finds it either way."""
+    values = values[np.isfinite(values)]
+    if len(values) == 0:
+        return None, 0.0
+    vals, counts = np.unique(np.round(values, 6), return_counts=True)
+    idx = np.argmax(counts)
+    return float(vals[idx]), float(counts[idx] / len(values))
+
+
+def select_auto_transforms(adata, markers: list, column_map: dict,
+                           min_point_mass_frac: float = 0.30,
+                           transform: str = "arcsinh",
+                           explicit_overrides: Optional[dict] = None,
+                           group_col: Optional[str] = "auto") -> Tuple[dict, pd.DataFrame]:
+    """Automatic, label-free transform selection (added 2026-10-29).
+
+    For every marker, measure the fraction of cells sitting on one repeated
+    floor value (a "point mass" -- exact 0 on raw data, a shifted constant
+    after z-scoring). Markers with fraction >= min_point_mass_frac get
+    `transform`; the GMM fit then also excludes that point mass (see
+    _fit_gmm), which is the actual fix for the GMM collapsing onto it.
+
+    Calibrated 2026-10-29 on the Schürch CRC expert labels: cutoff 0.30
+    reproduces the 14 hand-picked markers and gave the best weighted F1
+    (0.294 vs 0.243 with no transform). Explicit per_marker_transform_overrides
+    always win over the automatic choice.
+
+    PER-IMAGE measurement: preprocessing.py z-scores every image separately,
+    so each image's floor lands on a DIFFERENT constant. Pooled across a
+    cohort, no single value repeats and a pooled check finds nothing (verified
+    2026-10-29: on per-image z-scored Schürch data a pooled check selected 0 of
+    the 14 markers; the per-image check recovers all 14). So the fraction is
+    measured within each image (group_col) and the median across images is
+    compared to the cutoff. group_col="auto" uses the first of
+    image_ID / tissue_id / sample_id present in adata.obs; None = pooled.
+
+    Returns (overrides_dict, report_dataframe).
+    """
+    explicit_overrides = explicit_overrides or {}
+    if group_col == "auto":
+        group_col = next((c for c in ("image_ID", "tissue_id", "sample_id")
+                          if c in adata.obs.columns), None)
+    groups = (adata.obs[group_col].astype(str).values
+              if group_col and group_col in adata.obs.columns else None)
+    chosen, rows = {}, []
+    for m in markers:
+        col = column_map.get(m, m)
+        if col not in adata.var_names:
+            continue
+        x = adata[:, col].X
+        x = x.toarray().flatten() if hasattr(x, "toarray") else np.asarray(x).flatten()
+        if groups is None:
+            pm_val, pm_frac = _point_mass_fraction(x)
+        else:
+            per = [_point_mass_fraction(x[groups == g]) for g in np.unique(groups)]
+            pm_frac = float(np.median([f for _, f in per]))
+            pm_val = None  # differs per image after z-scoring
+        if m in explicit_overrides:
+            decision, source = explicit_overrides[m], "explicit override"
+        elif pm_frac >= min_point_mass_frac:
+            decision, source = transform, "auto (point mass)"
+            chosen[m] = transform
+        else:
+            decision, source = "none", "auto (below cutoff)"
+        rows.append({"marker": m, "point_mass_value": pm_val,
+                     "measured_per": group_col or "pooled",
+                     "point_mass_frac": round(pm_frac, 4),
+                     "transform": decision, "source": source})
+    report = pd.DataFrame(rows).set_index("marker").sort_values("point_mass_frac", ascending=False)
+    return chosen, report
+
+
 def _fit_gmm(values: np.ndarray, n_components: int = 2, random_state: int = 42,
              n_init: int = 1, max_cells: int = 50_000, transform: str = "none",
              arcsinh_cofactor: float = 5.0, yeojohnson_lambda: Optional[float] = None) -> dict:
@@ -596,6 +673,9 @@ def compute_marker_thresholds(adata, markers: list, std_multipliers: dict,
     transform_overrides = transform_overrides or {}
     thresholds: Dict[str, float] = {}
     fit_info: Dict[str, dict] = {}
+    _gcol = next((c for c in ("image_ID", "tissue_id", "sample_id") if c in adata.obs.columns), None)
+    _groups = adata.obs[_gcol].astype(str).values if _gcol else None
+    _group_ids = np.unique(_groups) if _groups is not None else []
 
     for m in markers:
         real_col = column_map.get(m, m)
@@ -609,7 +689,21 @@ def compute_marker_thresholds(adata, markers: list, std_multipliers: dict,
             vals = np.array(vals).flatten()
 
         marker_transform = transform_overrides.get(m, transform)
-        fit = _fit_gmm(vals, n_components=n_components, random_state=random_state,
+        # Per-image point-mass exclusion (added 2026-10-29): after per-image
+        # z-scoring each image's floor sits on its own constant, so _fit_gmm's
+        # pooled _detect_point_mass() cannot find it. Blank each image's own
+        # floor (>=5% of that image's cells on one value) out of the FIT only;
+        # positivity is still called on the real values afterwards.
+        fit_vals = vals
+        if marker_transform != "none" and _groups is not None:
+            fit_vals = vals.astype(float).copy()
+            for _g in _group_ids:
+                _sel = _groups == _g
+                _pm = _detect_point_mass(fit_vals[_sel])
+                if _pm is not None:
+                    _idx = np.where(_sel)[0]
+                    fit_vals[_idx[np.abs(np.round(fit_vals[_idx], 6) - _pm) < 1e-9]] = np.nan
+        fit = _fit_gmm(fit_vals, n_components=n_components, random_state=random_state,
                        n_init=n_init, max_cells=max_cells, transform=marker_transform,
                        arcsinh_cofactor=arcsinh_cofactor)
 
@@ -957,6 +1051,46 @@ def assign_cluster_labels(adata, cluster_labels: dict) -> pd.Series:
 
 # ── Main entry point ──────────────────────────────────────────────────────────
 
+# ── Intensity source for positivity (added 2026-10-29) ──────────────────────
+# Positivity is called on RAW intensities when preprocessing saved them as
+# adata.layers["raw"]; z-scores (.X) are restored right after positivity so
+# cell-type assignment outputs, the saved h5ad (read by triads/functional),
+# clustering and UMAPs are unchanged. Diagnostic plots that draw thresholds
+# read the same raw layer (see _marker_values) so lines and values share a
+# scale. cell_typing.intensity_source:
+#   "auto" (default) -> raw layer if present, else .X with a warning
+#   "raw"            -> require the raw layer (error if missing)
+#   "X"              -> always .X (pre-2026-10-29 behaviour)
+_POSITIVITY_LAYER_KEY = "spatia_positivity_layer"
+
+
+def _resolve_intensity_source(adata, source: str = "auto") -> bool:
+    has_raw = "raw" in adata.layers
+    if source not in ("auto", "raw", "X"):
+        raise ValueError(f"cell_typing.intensity_source must be auto/raw/X, got {source!r}")
+    if source == "raw" and not has_raw:
+        raise ValueError("cell_typing.intensity_source='raw' but the input h5ad has no "
+                         "layers['raw'] -- re-run preprocessing with the 2026-10-29 code.")
+    use_raw = has_raw and source in ("auto", "raw")
+    if use_raw:
+        print("[cell_typing] Intensities: RAW (layers['raw']) for positivity; z-scores kept in .X")
+    elif source == "auto":
+        print("[cell_typing] Intensities: .X (no layers['raw'] in input -- older preprocessing "
+              "output; if .X is per-image z-scored, expect more Unassigned cells)")
+    else:
+        print("[cell_typing] Intensities: .X (intensity_source='X')")
+    return use_raw
+
+
+def _marker_values(adata, col: str) -> np.ndarray:
+    """Values used for positivity for one var column: layers['raw'] when this
+    run thresholded on raw, else .X."""
+    sub = adata[:, col]
+    vals = (sub.layers["raw"] if adata.uns.get(_POSITIVITY_LAYER_KEY) == "raw"
+            and "raw" in adata.layers else sub.X)
+    return vals.toarray().flatten() if hasattr(vals, "toarray") else np.asarray(vals).flatten()
+
+
 def run_cell_typing(cfg: dict) -> None:
     """
     Run cell typing for an experiment defined by cfg.
@@ -1117,6 +1251,10 @@ def run_cell_typing(cfg: dict) -> None:
     # ── Load data ─────────────────────────────────────────────
     adata = sc.read(input_file)
     print(f"[cell_typing] Loaded {adata.n_obs:,} cells × {adata.n_vars} markers")
+    use_raw = _resolve_intensity_source(adata, ct_cfg.get("intensity_source", "auto"))
+    if use_raw:
+        adata.layers["zscore"] = adata.X.copy()
+        adata.X = adata.layers["raw"].copy()
 
     # ── CD45 gate ─────────────────────────────────────────────
     # skip_cd45_gate: true  → run on all cells (needed when panel includes
@@ -1146,6 +1284,24 @@ def run_cell_typing(cfg: dict) -> None:
     if missing:
         print(f"  [cell_typing] WARNING: markers not in data: {missing}")
 
+    # ── Automatic transform selection (added 2026-10-29) ──────
+    # gmm.auto_transform: {enabled: true, min_point_mass_frac: 0.30, transform: "arcsinh"}
+    # Off unless enabled, so existing configs behave exactly as before.
+    auto_cfg = gmm_cfg.get("auto_transform", {}) or {}
+    if auto_cfg.get("enabled", False):
+        auto_chosen, auto_report = select_auto_transforms(
+            adata_cd45, markers_for_analysis, column_map,
+            min_point_mass_frac=auto_cfg.get("min_point_mass_frac", 0.30),
+            transform=auto_cfg.get("transform", "arcsinh"),
+            explicit_overrides=transform_overrides,
+        )
+        transform_overrides = {**auto_chosen, **transform_overrides}  # explicit wins
+        auto_report.to_csv(os.path.join(data_dir, "auto_transform_selection.csv"))
+        print(f"\n  [auto_transform] point-mass cutoff "
+              f"{auto_cfg.get('min_point_mass_frac', 0.30):.2f} -> "
+              f"{len(auto_chosen)} marker(s) get '{auto_cfg.get('transform', 'arcsinh')}': "
+              f"{sorted(auto_chosen)}")
+
     # ── GMM thresholds ────────────────────────────────────────
     print(f"\n  Computing GMM thresholds (n_init={n_init}, max_cells={max_cells_gmm:,}, "
           f"transform={gmm_transform}, threshold_mode={threshold_mode})...")
@@ -1162,7 +1318,7 @@ def run_cell_typing(cfg: dict) -> None:
     )
     threshold_report = pd.DataFrame({
         "threshold": thresholds,
-        "threshold_mode": {m: threshold_mode for m in thresholds},
+        "threshold_mode": {m: fit_info[m].get("threshold_mode", threshold_mode) for m in thresholds},
         # Per-marker actual transform (added 2026-09-11) -- reads
         # fit_info[m]["transform"], not the global gmm_transform, so a
         # marker with a per_marker_transform_overrides entry is reported
@@ -1179,6 +1335,14 @@ def run_cell_typing(cfg: dict) -> None:
     add_positivity_columns(adata_cd45, thresholds, fit_info=fit_info,
                             transform=gmm_transform, arcsinh_cofactor=arcsinh_cofactor,
                             column_map=column_map)
+
+    # Positivity is done: put z-scores back in .X for everything downstream.
+    if use_raw:
+        if adata_cd45.is_view:
+            adata_cd45 = adata_cd45.copy()
+        adata_cd45.X = adata_cd45.layers["zscore"]
+        del adata_cd45.layers["zscore"]
+        adata_cd45.uns[_POSITIVITY_LAYER_KEY] = "raw"
 
     # ══════════════════════════════════════════════════════════
     # AUTOMATIC MODE
@@ -1466,12 +1630,7 @@ def _get_column(adata, marker: str, column_map: dict):
     real_col = column_map.get(marker, marker)
     if real_col not in adata.var_names:
         return None, real_col
-    vals = adata[:, real_col].X
-    if hasattr(vals, "toarray"):
-        vals = vals.toarray().flatten()
-    else:
-        vals = np.asarray(vals).flatten()
-    return vals, real_col
+    return _marker_values(adata, real_col), real_col
 
 
 # ── 1. Per-marker GMM distribution plots ────────────────────────────────────
@@ -1741,8 +1900,7 @@ def plot_mean_expression_heatmap(adata, markers: list, column_map: dict, plot_di
         mask = (adata.obs["cell_type"] == ct).values
         sub = adata[mask]
         for m, real_col in usable:
-            vals = sub[:, real_col].X
-            vals = vals.toarray().flatten() if hasattr(vals, "toarray") else np.asarray(vals).flatten()
+            vals = _marker_values(sub, real_col)
             table.loc[ct, m] = float(np.mean(vals)) if len(vals) else np.nan
 
     table.to_csv(os.path.join(data_dir, "cell_type_marker_means.csv"))
@@ -1764,92 +1922,182 @@ def plot_mean_expression_heatmap(adata, markers: list, column_map: dict, plot_di
 
 # ── 4. Restyled cell-type-counts bar chart ──────────────────────────────────
 
+# ── Lineage-grouped cell-type palette (added 2026-10-29) ────────────────────
+# Afrouz: stacked/grouped composition plots used a rainbow (husl) palette that
+# made 25+ categories indistinguishable. Colors are now assigned by LINEAGE
+# FAMILY from keywords in the cell-type name (not hardcoded to one dataset),
+# with distinct shades inside each family, so related types read as related
+# and every plot (counts, stacked, grouped, UMAP) uses the same color per type.
+_LINEAGE_FAMILIES = [
+    # (family, keywords (lowercase substring match), shades)
+    ("mixed",   [" / ", "mixed", "doublet", "undefined", "dirt"],
+                ["#c7b98a", "#e0d39c", "#a89c6a", "#d8cfae", "#8f8455"]),
+    ("dc",      ["dc", "dendritic"], ["#c2185b", "#e85d9a", "#8e0f42"]),
+    ("treg",    ["treg", "foxp3"], ["#00838f", "#4fb3bf"]),
+    ("tcell",   ["cd8", "cd4", "cd3", "t cell", "t-cell"],
+                ["#08306b", "#2171b5", "#6baed6", "#9ecae1", "#08519c", "#4292c6", "#c6dbef"]),
+    ("nk",      ["nk", "natural killer"], ["#6a51a3", "#9e9ac8"]),
+    ("bcell",   ["b cell", "b-cell", "plasma", "cd20", "cd138"],
+                ["#238b45", "#74c476", "#00441b", "#a1d99b"]),
+    ("myeloid", ["macrophage", "monocyte", "granulocyte", "neutrophil", "myeloid", "mast", "cd68", "cd163"],
+                ["#e6550d", "#fd8d3c", "#a63603", "#fdae6b", "#d94801", "#f16913", "#7f2704", "#fdd0a2"]),
+    ("tumor",   ["tumor", "tumour", "cancer", "epithel", "malignant"], ["#252525", "#636363", "#969696"]),
+    ("stroma",  ["smooth muscle", "stroma", "fibroblast", "vascul", "endothel", "lymphatic",
+                 "nerve", "adipo", "pericyte", "muscle"],
+                ["#8c510a", "#35978f", "#bf812d", "#01665e", "#dfc27d", "#80cdc1", "#543005"]),
+    ("immune",  ["immune", "cd45", "leukocyte"], ["#bcbddc", "#9e9ac8"]),
+]
+_UNASSIGNED_COLOR = "#d9d9d9"
+
+
+def cell_type_palette(categories) -> dict:
+    """{cell_type: hex} for any list of labels. Family by first keyword match
+    (order above matters: doublets/'mixed' before lineages, Tregs before T
+    cells); shades assigned in the order types are given (pass most-common
+    first for the most saturated shades on the biggest groups). 'Unassigned'
+    is light grey. Unmatched labels get distinct tab20 colors."""
+    used = {f: 0 for f, _, _ in _LINEAGE_FAMILIES}
+    fallback = [mcolors.to_hex(plt.cm.tab20(i)) for i in range(0, 20, 2)] + \
+               [mcolors.to_hex(plt.cm.tab20(i)) for i in range(1, 20, 2)]
+    nfb, out = 0, {}
+    for c in categories:
+        name = str(c)
+        if name == "Unassigned":
+            out[name] = _UNASSIGNED_COLOR
+            continue
+        low = name.lower()
+        for fam, keys, shades in _LINEAGE_FAMILIES:
+            if any(k in low for k in keys):
+                out[name] = shades[used[fam] % len(shades)]
+                used[fam] += 1
+                break
+        else:
+            out[name] = fallback[nfb % len(fallback)]
+            nfb += 1
+    return out
+
+
+def _variants(adata):
+    """Yield (suffix, title_note, obs) for the with- and without-Unassigned versions."""
+    obs = adata.obs
+    yield "", "", obs
+    if "Unassigned" in set(obs["cell_type"].astype(str)):
+        yield "_no_unassigned", "  (Unassigned excluded)", obs[obs["cell_type"].astype(str) != "Unassigned"]
+
+
 def plot_cell_type_counts_pretty(adata, plot_dir: str, formats=("png", "pdf")):
     """
-    Replaces automatic mode's original cell_type_counts.png/.pdf (written
-    moments earlier by _save_and_plot()) with a horizontal, sorted,
-    value-labeled version -- the vertical/rotated-label version was flagged
-    as unreadable with this many cell-type categories (long names collide
-    at 45deg rotation). Horizontal bars sidestep that entirely.
+    Horizontal, sorted, value-labeled cell-type counts, colored by lineage
+    (cell_type_palette). Writes cell_type_counts.* and, when Unassigned cells
+    exist, cell_type_counts_no_unassigned.* (percentages re-based on assigned
+    cells only).
     """
     if "cell_type" not in adata.obs.columns:
         return
-    counts = adata.obs["cell_type"].value_counts().sort_values(ascending=True)
-    total = int(counts.sum())
-    pct = counts / total * 100
+    pal = cell_type_palette(adata.obs["cell_type"].astype(str).value_counts().index)
+    for suffix, note, obs in _variants(adata):
+        counts = obs["cell_type"].astype(str).value_counts().sort_values(ascending=True)
+        counts = counts[counts > 0]
+        total = int(counts.sum())
+        pct = counts / total * 100
+        fig_h = max(5, 0.32 * len(counts) + 1.5)
+        fig, ax = plt.subplots(figsize=(9.5, fig_h))
+        bars = ax.barh(counts.index, counts.values, color=[pal[c] for c in counts.index],
+                       edgecolor="white", height=0.72, zorder=3)
+        for bar, c, p in zip(bars, counts.values, pct.values):
+            ax.text(bar.get_width() + total * 0.006, bar.get_y() + bar.get_height() / 2,
+                    f"{c:,}  ({p:.1f}%)", va="center", fontsize=8.5, color="#333333")
+        ax.set_xlabel("Number of cells")
+        ax.set_title(f"Cell Type Distribution  —  {total:,} cells{note}", fontsize=13, pad=12)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.xaxis.grid(True, color="#e3e3e3", linewidth=0.8, zorder=0)
+        ax.set_axisbelow(True)
+        ax.margins(x=0.16)
+        plt.tight_layout()
+        _savefig(fig, os.path.join(plot_dir, f"cell_type_counts{suffix}"), formats)
+        plt.close(fig)
+    print(f"  [diagnostics] cell_type_counts (+ _no_unassigned) written")
 
-    fig_h = max(5, 0.32 * len(counts) + 1.5)
-    fig, ax = plt.subplots(figsize=(9.5, fig_h))
-    colors = ["#9a9a9a" if ct == "Unassigned" else "#4C72B0" for ct in counts.index]
-    bars = ax.barh(counts.index.astype(str), counts.values, color=colors,
-                    edgecolor="white", height=0.72, zorder=3)
-    for bar, c, p in zip(bars, counts.values, pct.values):
-        ax.text(bar.get_width() + total * 0.006, bar.get_y() + bar.get_height() / 2,
-                f"{c:,}  ({p:.1f}%)", va="center", fontsize=8.5, color="#333333")
 
-    ax.set_xlabel("Number of cells")
-    ax.set_title(f"Cell Type Distribution  —  {total:,} cells total", fontsize=13, pad=12)
-    ax.spines[["top", "right"]].set_visible(False)
-    ax.xaxis.grid(True, color="#e3e3e3", linewidth=0.8, zorder=0)
-    ax.set_axisbelow(True)
-    ax.margins(x=0.14)
-    plt.tight_layout()
-    _savefig(fig, os.path.join(plot_dir, "cell_type_counts"), formats)
-    plt.close(fig)
-    print(f"  [diagnostics] Restyled cell_type_counts.png ({len(counts)} cell types)")
-
-
-# ── 5. Stacked cell-type-by-group bar chart ─────────────────────────────────
+# ── 5. Stacked / grouped cell-type-by-group charts ──────────────────────────
 
 def plot_stacked_by_group(adata, group_col: str, plot_dir: str, data_dir: str,
                            formats=("png", "pdf")):
     """
-    100%-stacked bar chart: one bar per experiment_group (e.g. CLR, DII),
-    each fully stacked into its cell-type composition -- segments sum to
-    exactly 100% per bar. This is the standard reading of "stacked barplot
-    of cell types" and is DIFFERENT from a first draft of this function
-    that put cell_type on the x-axis and stacked CLR+DII on top of each
-    other per type -- caught in verification (2026-09-10, synthetic test):
-    that version's bars summed to (%-within-CLR + %-within-DII), which
-    isn't bounded or meaningful (e.g. a bar could total ~96%, another
-    ~28%), since each group's percentages are independently normalized to
-    100% across cell types, not across groups. Group-on-x-axis, cell-type
-    stacked is the only arrangement where the stack total is actually 100%.
-
-    Adds this alongside (not replacing -- Afrouz confirmed the existing
-    grouped/dodged version is fine as-is) _save_and_plot()'s existing
-    cell_type_by_experiment_group.png, which shows the same per-group
-    percentages as side-by-side bars instead of stacked ones.
+    100%-stacked bar chart: one bar per group (e.g. CLR, DII), segments =
+    cell-type composition summing to 100%. Lineage-grouped colors
+    (cell_type_palette); segments ordered by lineage family so related types
+    sit next to each other in the stack and legend. Writes
+    cell_type_by_<group>_stacked100.* and ..._stacked100_no_unassigned.*
+    (re-based on assigned cells only).
     """
     if "cell_type" not in adata.obs.columns or group_col not in adata.obs.columns:
         return
-    comp = pd.crosstab(adata.obs[group_col], adata.obs["cell_type"], normalize="index") * 100
-    # Canonical, reproducible column (segment) order: most-common cell type
-    # first, so colors/order are stable across re-runs of this cohort.
-    order = adata.obs["cell_type"].value_counts().index.tolist()
-    comp = comp[[c for c in order if c in comp.columns]]
-    comp.to_csv(os.path.join(data_dir, f"cell_type_by_{group_col}_stacked100_pct.csv"))
+    order = adata.obs["cell_type"].astype(str).value_counts().index.tolist()
+    pal = cell_type_palette(order)
+    fam_rank = {f: i for i, (f, _, _) in enumerate(_LINEAGE_FAMILIES)}
+    def fam_of(c):
+        low = c.lower()
+        for f, keys, _ in _LINEAGE_FAMILIES:
+            if any(k in low for k in keys):
+                return fam_rank[f]
+        return len(fam_rank)
+    lineage_order = sorted(order, key=lambda c: (c == "Unassigned", fam_of(c), order.index(c)))
+    for suffix, note, obs in _variants(adata):
+        comp = pd.crosstab(obs[group_col], obs["cell_type"].astype(str), normalize="index") * 100
+        cols = [c for c in lineage_order if c in comp.columns]
+        comp = comp[cols]
+        comp.to_csv(os.path.join(data_dir, f"cell_type_by_{group_col}_stacked100{suffix}_pct.csv"))
+        fig, ax = plt.subplots(figsize=(max(6, 1.6 * comp.shape[0] + 2) + 4, 7.5))
+        comp.plot(kind="bar", stacked=True, ax=ax, color=[pal[c] for c in cols],
+                  edgecolor="white", linewidth=0.4, width=0.6)
+        ax.set_title(f"Cell Type Composition by {group_col} (100% stacked){note}", fontsize=13)
+        ax.set_ylabel("% of cells")
+        ax.set_xlabel("")
+        ax.set_ylim(0, 100)
+        plt.setp(ax.get_xticklabels(), rotation=0)
+        h, l = ax.get_legend_handles_labels()
+        ax.legend(h[::-1], l[::-1], title="Cell type", bbox_to_anchor=(1.02, 1), loc="upper left",
+                  fontsize=7.5, ncol=1 if len(cols) <= 18 else 2, frameon=False)
+        ax.spines[["top", "right"]].set_visible(False)
+        plt.tight_layout()
+        _savefig(fig, os.path.join(plot_dir, f"cell_type_by_{group_col}_stacked100{suffix}"), formats)
+        plt.close(fig)
+    print(f"  [diagnostics] cell_type_by_{group_col}_stacked100 (+ _no_unassigned) written")
 
-    n_types = comp.shape[1]
-    palette = sns.color_palette("husl", n_types)
-    if "Unassigned" in comp.columns:
-        palette[list(comp.columns).index("Unassigned")] = (0.6, 0.6, 0.6)
 
-    fig, ax = plt.subplots(figsize=(max(6, 1.6 * comp.shape[0] + 2), 7))
-    comp.plot(kind="bar", stacked=True, ax=ax, color=palette, edgecolor="white",
-              linewidth=0.5, width=0.55)
-    ax.set_title(f"Cell Type Composition by {group_col} (100% stacked)", fontsize=13)
-    ax.set_ylabel("% of cells")
-    ax.set_xlabel("")
-    ax.set_ylim(0, 100)
-    plt.setp(ax.get_xticklabels(), rotation=0)
-    ax.legend(title="Cell type", bbox_to_anchor=(1.02, 1), loc="upper left",
-              fontsize=7, ncol=1 if n_types <= 15 else 2)
-    ax.spines[["top", "right"]].set_visible(False)
-    plt.tight_layout()
-    _savefig(fig, os.path.join(plot_dir, f"cell_type_by_{group_col}_stacked100"), formats)
-    plt.close(fig)
-    print(f"  [diagnostics] 100%-stacked cell-type-by-{group_col} chart written ({n_types} cell types)")
+def plot_grouped_by_group(adata, group_col: str, plot_dir: str, data_dir: str,
+                          formats=("png", "pdf")):
+    """
+    Side-by-side % of cells per cell type, one bar per group, cell types on a
+    horizontal axis sorted by overall abundance. Replaces _save_and_plot()'s
+    default-colored version of cell_type_by_<group>.png and adds
+    ..._no_unassigned (re-based on assigned cells only). Group colors are a
+    neutral dark/light pair so they never clash with cell-type colors.
+    """
+    if "cell_type" not in adata.obs.columns or group_col not in adata.obs.columns:
+        return
+    group_colors = ["#2f3c7e", "#c2185b", "#6b7280", "#e8a0bc", "#97a3d6", "#4a4f57"]
+    for suffix, note, obs in _variants(adata):
+        comp = pd.crosstab(obs["cell_type"].astype(str), obs[group_col], normalize="columns") * 100
+        comp = comp.loc[obs["cell_type"].astype(str).value_counts().index]
+        comp = comp.iloc[::-1]
+        comp.to_csv(os.path.join(data_dir, f"cell_type_by_{group_col}{suffix}_pct.csv"))
+        fig, ax = plt.subplots(figsize=(9.5, max(5, 0.38 * len(comp) + 1.5)))
+        comp.plot(kind="barh", ax=ax, width=0.78, edgecolor="white", linewidth=0.4,
+                  color=group_colors[:comp.shape[1]], zorder=3)
+        ax.set_xlabel("% of cells within group")
+        ax.set_ylabel("")
+        ax.set_title(f"Cell Type % by {group_col}{note}", fontsize=13, pad=10)
+        h, l = ax.get_legend_handles_labels()
+        ax.legend(h[::-1], l[::-1], title=group_col, frameon=False, loc="lower right")
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.xaxis.grid(True, color="#e3e3e3", linewidth=0.8, zorder=0)
+        ax.set_axisbelow(True)
+        plt.tight_layout()
+        _savefig(fig, os.path.join(plot_dir, f"cell_type_by_{group_col}{suffix}"), formats)
+        plt.close(fig)
+    print(f"  [diagnostics] cell_type_by_{group_col} (+ _no_unassigned) written")
 
 
 # ── 6. UMAP: cell type / group / core ───────────────────────────────────────
@@ -1872,17 +2120,12 @@ def _qualitative_palette(categories, unassigned_gray=(0.82, 0.82, 0.82, 1.0)):
     colors in that exact order (otherwise scanpy sorts alphabetically and
     the palette/category pairing drifts).
     """
+    # 2026-10-29: now delegates to cell_type_palette() so UMAP colors match
+    # the lineage-grouped colors used in the counts/stacked/grouped charts.
     cats = [c for c in categories if c != "Unassigned"]
-    has_unassigned = "Unassigned" in categories
-    base = ([plt.cm.tab20(i) for i in range(20)]
-            + [plt.cm.tab20b(i) for i in range(20)]
-            + [plt.cm.tab20c(i) for i in range(20)])
-    hex_colors = [mcolors.to_hex(base[i % len(base)]) for i in range(len(cats))]
-    ordered = list(cats)
-    if has_unassigned:
-        ordered.append("Unassigned")
-        hex_colors.append(mcolors.to_hex(unassigned_gray))
-    return hex_colors, ordered
+    ordered = list(cats) + (["Unassigned"] if "Unassigned" in categories else [])
+    pal = cell_type_palette(ordered)
+    return [pal[str(c)] for c in ordered], ordered
 
 
 def compute_and_plot_umaps(adata, plot_dir: str, data_dir: str, group_col: str, tissue_col: str,
@@ -2039,12 +2282,10 @@ def plot_spatial_celltype_overlay(adata, plot_dir: str, tissue_col: str = "tissu
 
     df = adata.obs[["cell_type", tissue_col, "centroid_x", "centroid_y"]].copy()
     cell_types = sorted(t for t in df["cell_type"].unique() if t != "Unassigned")
-    palette = [plt.cm.tab20(i) for i in range(20)] + [plt.cm.tab20b(i) for i in range(20)]
-    if len(cell_types) > len(palette):
-        print(f"  [diagnostics] NOTE: {len(cell_types)} cell types > {len(palette)} palette "
-              "colors available -- some will repeat.")
-    color_map = {ct: palette[i % len(palette)] for i, ct in enumerate(cell_types)}
-    color_map["Unassigned"] = (0.82, 0.82, 0.82, 1.0)
+    # 2026-10-29: same lineage-grouped colors as every other cell-type plot.
+    _order = adata.obs["cell_type"].astype(str).value_counts().index.tolist()
+    color_map = cell_type_palette(_order + [c for c in map(str, cell_types) if c not in _order])
+    color_map["Unassigned"] = _UNASSIGNED_COLOR
 
     core_sizes = df[tissue_col].value_counts()
 
@@ -2873,6 +3114,11 @@ def generate_cell_typing_diagnostics(adata, thresholds: dict, fit_info: dict, co
         plot_stacked_by_group(adata, group_col, plot_dir, data_dir, formats)
     except Exception as e:
         print(f"  WARNING: stacked cell-type-by-group plot failed (non-fatal): {e}")
+
+    try:
+        plot_grouped_by_group(adata, group_col, plot_dir, data_dir, formats)
+    except Exception as e:
+        print(f"  WARNING: grouped cell-type-by-group plot failed (non-fatal): {e}")
 
     try:
         compute_and_plot_umaps(adata, plot_dir, data_dir, group_col, tissue_col, random_state, formats)
