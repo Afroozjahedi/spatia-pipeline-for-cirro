@@ -1,6 +1,6 @@
 # ============================================================
-# IMMUNOSUPPRESSIVE TRIAD variant (2026-11-02): CD8+ T cells + Tregs + plasma
-# cells. Copy of crc_tma_full_pipeline.calibrated.params.yaml with ONLY
+# IMMUNOSUPPRESSIVE TRIAD variant (2026-11-02): B cell anchor + CD8+ T cells
+# + Tregs. Copy of crc_tma_full_pipeline.calibrated.params.yaml with ONLY
 # analysis.triad anchor/partners/names and experiment.name changed.
 # ============================================================
 # ============================================================
@@ -521,17 +521,17 @@ analysis:
     radius_um: 30.0
     report_radius_um: 20.0
     trajectory_min_um: 8.0
-    # IMMUNOSUPPRESSIVE TRIAD (2026-11-02): CD8+ T cells (anchor) with a
-    # regulatory T cell AND a plasma cell within radius_um. Names must match
-    # cell_type_definitions/crc_tma.yaml exactly ("CD8+ T cells", "Tregs",
-    # "plasma cells"). Everything else in this file is identical to
-    # crc_tma_full_pipeline.calibrated.params.yaml.
-    anchor_type: "CD8+ T cells"
-    partner_type_1: "Tregs"
-    partner_type_2: "plasma cells"
-    anchor_name: "CD8"
-    partner_1_name: "Treg"
-    partner_2_name: "Plasma"
+    # IMMUNOSUPPRESSIVE TRIAD (updated 2026-11-02, Afrouz): B cell (anchor)
+    # with a CD8+ T cell AND a regulatory T cell within radius_um.
+    # (First version was CD8 anchor + Tregs + plasma cells.) Names must match
+    # cell_type_definitions/crc_tma.yaml exactly. Everything else in this file
+    # is identical to crc_tma_full_pipeline.calibrated.params.yaml.
+    anchor_type: "B cells"
+    partner_type_1: "CD8+ T cells"
+    partner_type_2: "Tregs"
+    anchor_name: "B"
+    partner_1_name: "CD8"
+    partner_2_name: "Treg"
     matched_only: false
     min_triad_size: 1
     # Auto-prep, added 2026-09-15 (see spatia/analysis/triads.py's
