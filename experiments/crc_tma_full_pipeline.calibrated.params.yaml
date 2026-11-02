@@ -432,7 +432,17 @@ cell_typing:
     skip_cd45_gate: true
     cd45_std_multiplier: 2.0
     default_std_multiplier: 2.0
-    per_marker_overrides: {}
+    per_marker_overrides:
+      CD11c: 3.0   # DC FIX 2026-11-02, see below
+    # DC FIX (2026-11-02): CD11c's 2-component posterior split background
+    # vs. everything (CD11c+ in ~33-37% of cells; real DCs ~0.15%). CD11c is
+    # now fit on arcsinh and called with std_multiplier 3.0 (mean + 3 SD of the
+    # negative component). Validated on Schurch expert labels: DC F1 0.01 -> 0.10,
+    # DC calls 2.8% -> 0.11% of cells, overall weighted F1 0.320 -> 0.322.
+    per_marker_transform_overrides:
+      CD11c: "arcsinh"
+    per_marker_threshold_mode_overrides:
+      CD11c: "std_multiplier"
     # threshold_mode (added 2026-09-14, Afrouz's explicit choice): "posterior"
     # instead of just inheriting cell_typing.py's own fallback default
     # (gmm_cfg.get("threshold_mode", "std_multiplier")), which this file was
@@ -478,6 +488,14 @@ cell_typing:
     #         excluded: [CD8_pos]               file, one cell-type key at a time.
     #   cell_type_definitions:   <-- a COMPLETE replacement ruleset instead (this
     #     some type: {...}            file is ignored entirely if this key is set)
+  # DC FIX (2026-11-02): stricter DC rule. HLA-DR required (antigen-presenting);
+  # cells positive for tumor/stroma/vessel/granulocyte markers excluded. CD45
+  # kept as PREFERRED, not required (requiring it lowered DC F1 0.10 -> 0.05).
+  cell_type_definitions_overrides:
+    "CD11c+ DCs":
+      required:  [CD11c_pos, HLA_DR_pos]
+      excluded:  [CD68_pos, CD163_pos, CD3_pos, CD20_pos, CK_pos, aSMA_pos, CD31_pos, CD15_pos]
+      preferred: [CD45_pos, CD21_pos]
   cluster_labels_file: null
   # Added 2026-10-02 at Afrouz's request: writes one QuPath-importable
   # {tissue_id}_celltypes.tsv per image/core to {output_dir}/celltype_qupath_exports/
