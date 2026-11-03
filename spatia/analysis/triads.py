@@ -836,6 +836,39 @@ def _resolve_per_image_group_areas(
     return resolved_group_areas, per_image_area
 
 
+# ── Cell-type groups for triad matching (added 2026-11-03) ───────────────────
+
+def apply_triad_type_groups(df: pd.DataFrame, t_cfg: dict) -> pd.DataFrame:
+    """Collapse cell-type subtypes into one triad role label.
+
+    find_triads() matches cell_type with ==, so a partner_type_1 of
+    "CD4+ T cells" silently ignores "CD4+ T cells CD45RO+" and
+    "CD4+ T cells GATA3+". On the Schürch CRC cells that excluded ~70% of
+    CD4 calls (DC triads 26 vs 83 with all CD4 subtypes).
+
+    Config (analysis.triad.type_groups), group label -> member labels:
+        type_groups:
+          "CD4+ T cells": ["CD4+ T cells", "CD4+ T cells CD45RO+", "CD4+ T cells GATA3+"]
+
+    The original label is kept in cell_type_detail; cell_type holds the
+    group label for this step and the files it writes (triad pairs,
+    cells_with_triad_flags -> functional). Idempotent.
+    """
+    groups = (t_cfg or {}).get("type_groups") or {}
+    if not groups or "cell_type" not in df.columns:
+        return df
+    if "cell_type_detail" not in df.columns:
+        df["cell_type_detail"] = df["cell_type"]
+    rev = {}
+    for group_label, members in groups.items():
+        for m in (members or []):
+            if m in rev and rev[m] != group_label:
+                raise ValueError(f"type_groups: '{m}' is listed under both '{rev[m]}' and '{group_label}'")
+            rev[m] = group_label
+    df["cell_type"] = df["cell_type_detail"].map(lambda x: rev.get(x, x))
+    return df
+
+
 # ── Core detection ────────────────────────────────────────────────────────────
 
 def find_triads(
@@ -1544,6 +1577,11 @@ def run_triad_analysis(cfg: dict) -> None:
             continue
         if "cell_id" not in df.columns:
             df.insert(0, "cell_id", df.index.astype(str))
+
+        df = apply_triad_type_groups(df, t_cfg)
+        if t_cfg.get("type_groups"):
+            _n_grouped = int((df["cell_type"] != df["cell_type_detail"]).sum())
+            print(f"  Type groups applied: {_n_grouped} cells relabelled to their triad group")
 
         tree = cKDTree(df[["centroid_x", "centroid_y"]].values)
         cell_types = sorted(df["cell_type"].dropna().unique().tolist())

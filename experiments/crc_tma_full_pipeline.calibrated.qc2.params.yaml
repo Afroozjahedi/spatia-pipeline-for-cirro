@@ -503,6 +503,12 @@ analysis:
     anchor_type: "CD11c+ DCs"
     partner_type_1: "CD4+ T cells"
     partner_type_2: "CD8+ T cells"
+    # Added 2026-11-03: count every CD4 subtype as a CD4 partner. find_triads
+    # matches cell_type exactly, so "CD4+ T cells" alone left out memory
+    # (CD45RO+) and GATA3+ CD4 (~70% of CD4 calls; DC triads 26 -> 83 on the
+    # Schürch cells). Original label is kept in cell_type_detail.
+    type_groups:
+      "CD4+ T cells": ["CD4+ T cells", "CD4+ T cells CD45RO+", "CD4+ T cells GATA3+"]
     anchor_name: "DC"
     partner_1_name: "CD4"
     partner_2_name: "CD8"
@@ -592,7 +598,12 @@ analysis:
       spot_col: "TMA spot / region"
     area_per_image_um2: 1168128.0
     split_by: "median"
-    censor_is_one: true
+    # FIXED 2026-11-03: was true. The Schürch clinical table (and
+    # patient_with_tls_class.csv) codes OS_Censor / DFS_Censor as 1 = EVENT
+    # (death / recurrence): events have median OS 12.8 months vs 69 for 0.
+    # With true, CLR vs DII OS gave p=0.744; with false p=0.002, CLR better,
+    # matching Schürch et al. 2020. All earlier survival curves were inverted.
+    censor_is_one: false
     outcomes:
       - name: "Overall Survival (OS)"
         duration_col: "OS"

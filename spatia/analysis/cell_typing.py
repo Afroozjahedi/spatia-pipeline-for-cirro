@@ -1336,6 +1336,39 @@ def run_cell_typing(cfg: dict) -> None:
                             transform=gmm_transform, arcsinh_cofactor=arcsinh_cofactor,
                             column_map=column_map)
 
+    # ── Positive-rate caps (added 2026-11-03) ─────────────────
+    # gmm.per_marker_max_positive_frac: {marker: max fraction of cells}.
+    # On the Schürch CRC cells several markers (CD31, CD20, CD15,
+    # Podoplanin) separate their cell type well (AUC 0.72-0.99) but the GMM
+    # cut sits in the bleed-through background (CD31 44% positive vs 4.5%
+    # vessels). Raising the cut to the (1 - cap) quantile -- cap set from
+    # prior knowledge, ~2x the expected share of the cell type -- recovered
+    # most of the best-threshold F1 without using labels. Markers without a
+    # cap are unchanged; a cap only ever removes positives.
+    cap_cfg = gmm_cfg.get("per_marker_max_positive_frac") or {}
+    cap_rows = []
+    for _m, _cap in cap_cfg.items():
+        _col = f"{_m}_pos"
+        _var = column_map.get(_m, _m) if column_map else _m
+        if _col not in adata_cd45.obs.columns or _var not in adata_cd45.var_names:
+            print(f"  [cap] {_m}: not found -- skipped")
+            continue
+        _vals = _marker_values(adata_cd45, _var)
+        _pos = adata_cd45.obs[_col].astype(bool).values
+        _before = float(_pos.mean())
+        if _before > float(_cap):
+            _q = float(np.quantile(_vals, 1.0 - float(_cap)))
+            _pos = _pos & (_vals > _q)
+            adata_cd45.obs[_col] = _pos
+            print(f"  [cap] {_m}: {_before*100:.1f}% -> {_pos.mean()*100:.1f}% positive "
+                  f"(cap {float(_cap)*100:.1f}%, raw cut {_q:.4g})")
+            cap_rows.append({"marker": _m, "cap": float(_cap), "pos_before": _before,
+                             "pos_after": float(_pos.mean()), "raw_cut": _q})
+        else:
+            print(f"  [cap] {_m}: {_before*100:.1f}% <= cap {float(_cap)*100:.1f}% -- unchanged")
+    if cap_rows:
+        pd.DataFrame(cap_rows).to_csv(os.path.join(data_dir, "marker_positive_rate_caps.csv"), index=False)
+
     # Positivity is done: put z-scores back in .X for everything downstream.
     if use_raw:
         if adata_cd45.is_view:

@@ -89,7 +89,7 @@ Config shape (generic example — no dataset-specific column names implied)
         group_code_map: {1: "WT", 2: "KO"}  # optional; falls back to a positional guess
         area_per_image_um2: 1000000.0
         split_by: "median"                  # or a numeric triads/mm² threshold
-        censor_is_one: true
+        censor_is_one: false   # Schürch table: 1 = event (fixed 2026-11-03)
         outcomes:
           - name: "Overall Survival (OS)"
             duration_col: "OS"
@@ -600,6 +600,27 @@ def _add_split(df: pd.DataFrame, value_col: str, split_col: str, split_by, pos_l
 
 # ── Main entry point ─────────────────────────────────────────────────────────
 
+
+def _check_censor_coding(df: pd.DataFrame, duration_col: str, event_col: str,
+                         censor_is_one: bool, name: str = "") -> None:
+    """Warn when the censor coding looks inverted (added 2026-11-03).
+
+    Events normally occur before the end of follow-up, so rows treated as
+    events should have a shorter median time than rows treated as censored.
+    """
+    if event_col not in df.columns or duration_col not in df.columns:
+        return
+    d = df[[duration_col, event_col]].dropna()
+    if d.empty:
+        return
+    ev = (1 - d[event_col].astype(int)) if censor_is_one else d[event_col].astype(int)
+    t_ev, t_cens = d.loc[ev == 1, duration_col].median(), d.loc[ev == 0, duration_col].median()
+    print(f"[survival]   {name}: {int(ev.sum())} events / {len(d)} patients; "
+          f"median time events {t_ev:.1f} vs censored {t_cens:.1f} (censor_is_one={censor_is_one})")
+    if pd.notna(t_ev) and pd.notna(t_cens) and t_ev > t_cens:
+        print(f"[survival]   ⚠️  Events have a LONGER median time than censored patients for {name}. "
+              f"The censor coding is probably inverted — check analysis.survival.censor_is_one.")
+
 def run_survival_analysis(cfg: dict) -> None:
     """
     Cohort-wide survival analysis — called by run_pipeline.py, after triads
@@ -667,6 +688,10 @@ def run_survival_analysis(cfg: dict) -> None:
     area_per_image      = s_cfg.get("area_per_image_um2", 1_000_000.0)
     split_by             = s_cfg.get("split_by", "median")
     censor_is_one        = s_cfg.get("censor_is_one", True)
+    # Guard (added 2026-11-03): events usually happen earlier than the end of
+    # follow-up. If the rows treated as events have a LONGER median time than
+    # the rows treated as censored, the censor coding is probably inverted
+    # (this is what happened with the Schürch CRC table, where 1 = event).
     outcomes_cfg          = s_cfg.get("outcomes") or [
         {"name": "Overall Survival (OS)", "duration_col": "OS", "event_col": "OS_Censor"},
         {"name": "Disease-Free Survival (DFS)", "duration_col": "DFS", "event_col": "DFS_Censor"},
@@ -755,6 +780,7 @@ def run_survival_analysis(cfg: dict) -> None:
         if dur_col not in patient_df.columns:
             print(f"[survival] ⚠️  Column {dur_col!r} not found — skipping {name}.")
             continue
+        _check_censor_coding(patient_df, dur_col, cens_col, censor_is_one, name)
 
         # -- density split --
         save_path = os.path.join(surv_out, f"km_{dur_col}_density.png")

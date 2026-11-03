@@ -571,7 +571,8 @@ analysis:
       spot_col: "TMA spot / region"
     area_per_image_um2: 1168128.0
     split_by: "median"
-    censor_is_one: true
+    # FIXED 2026-11-03: was true; the clinical table codes 1 = event (see calibrated config).
+    censor_is_one: false
     outcomes:
       - name: "Overall Survival (OS)"
         duration_col: "OS"

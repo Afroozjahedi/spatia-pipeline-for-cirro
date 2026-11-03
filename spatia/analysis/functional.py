@@ -190,6 +190,10 @@ def run_functional_analysis(cfg: dict) -> None:
 
         if "cell_id" not in df.columns:
             df.insert(0, "cell_id", df.index.astype(str))
+        # Same subtype grouping the triads step used (no-op if already applied
+        # or no analysis.triad.type_groups configured).
+        from spatia.analysis.triads import apply_triad_type_groups
+        df = apply_triad_type_groups(df, t_cfg)
 
         # Load corresponding triad pairs (may not exist if no triads were found)
         pairs_path = _triad_file(output_dir, f"{image_id}_triad_pairs.csv")

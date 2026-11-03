@@ -443,6 +443,25 @@ cell_typing:
       CD11c: "arcsinh"
     per_marker_threshold_mode_overrides:
       CD11c: "std_multiplier"
+    # POSITIVE-RATE CAPS (2026-11-03): these markers separate their cell type
+    # (CD31, CD20, CD15, Podoplanin: AUC 0.72-0.99 on the Schürch cells) but the
+    # GMM cut sits in bleed-through background (CD31 44% positive vs 4.5% vessels;
+    # stricter std multipliers up to 8 SD barely moved it). Cap = max fraction of
+    # cells called positive, set from prior knowledge at ~2-3x the expected share
+    # of the cell type. CD138, GzmB and GFAP barely separate their types (AUC
+    # 0.54-0.59); capping stops them from wrongly EXCLUDING other cells.
+    # Schürch calibration (run CAPC vs DC fix): weighted F1 0.32 -> 0.37,
+    # lineage F1 0.40 -> 0.44, vessel per-core rho 0.42 -> 0.64, nerves 4.4x -> 0.6x,
+    # lymphatics 12.8x -> 2.4x, granulocyte recall 0.04 -> 0.12, plasma 1.6x -> 1.0x.
+    # Cost: Unassigned 14.9% -> 16.7%, DCs 0.69x -> 1.6x of expert.
+    per_marker_max_positive_frac:
+      CD31: 0.15
+      CD20: 0.10
+      CD15: 0.15
+      Podoplanin: 0.03
+      CD138: 0.15
+      GzmB: 0.10
+      GFAP: 0.02
     # threshold_mode (added 2026-09-14, Afrouz's explicit choice): "posterior"
     # instead of just inheriting cell_typing.py's own fallback default
     # (gmm_cfg.get("threshold_mode", "std_multiplier")), which this file was
@@ -496,6 +515,13 @@ cell_typing:
       required:  [CD11c_pos, HLA_DR_pos]
       excluded:  [CD68_pos, CD163_pos, CD3_pos, CD20_pos, CK_pos, aSMA_pos, CD31_pos, CD15_pos]
       preferred: [CD45_pos, CD21_pos]
+    # GRANULOCYTE FIX (2026-11-03): 47% of expert granulocytes are CD45-negative
+    # by our calls, so requiring CD45 dropped half of them. CD45 is now preferred;
+    # CK/CDX2 excluded so tumor cells cannot become granulocytes.
+    granulocytes:
+      required:  [CD15_pos]
+      excluded:  [CD3_pos, CD20_pos, CD68_pos, CD138_pos, CK_pos, CDX2_pos]
+      preferred: [CD45_pos, CD11b_pos]
   cluster_labels_file: null
   # Added 2026-10-02 at Afrouz's request: writes one QuPath-importable
   # {tissue_id}_celltypes.tsv per image/core to {output_dir}/celltype_qupath_exports/
@@ -519,6 +545,12 @@ analysis:
     anchor_type: "CD11c+ DCs"
     partner_type_1: "CD4+ T cells"
     partner_type_2: "CD8+ T cells"
+    # Added 2026-11-03: count every CD4 subtype as a CD4 partner. find_triads
+    # matches cell_type exactly, so "CD4+ T cells" alone left out memory
+    # (CD45RO+) and GATA3+ CD4 (~70% of CD4 calls; DC triads 26 -> 83 on the
+    # Schürch cells). Original label is kept in cell_type_detail.
+    type_groups:
+      "CD4+ T cells": ["CD4+ T cells", "CD4+ T cells CD45RO+", "CD4+ T cells GATA3+"]
     anchor_name: "DC"
     partner_1_name: "CD4"
     partner_2_name: "CD8"
@@ -608,7 +640,12 @@ analysis:
       spot_col: "TMA spot / region"
     area_per_image_um2: 1168128.0
     split_by: "median"
-    censor_is_one: true
+    # FIXED 2026-11-03: was true. The Schürch clinical table (and
+    # patient_with_tls_class.csv) codes OS_Censor / DFS_Censor as 1 = EVENT
+    # (death / recurrence): events have median OS 12.8 months vs 69 for 0.
+    # With true, CLR vs DII OS gave p=0.744; with false p=0.002, CLR better,
+    # matching Schürch et al. 2020. All earlier survival curves were inverted.
+    censor_is_one: false
     outcomes:
       - name: "Overall Survival (OS)"
         duration_col: "OS"
