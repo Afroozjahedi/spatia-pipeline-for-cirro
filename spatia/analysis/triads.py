@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.spatial import cKDTree
+from scipy import sparse as _sparse
 from scipy import stats as scipy_stats
 from itertools import combinations, permutations
 
@@ -836,6 +837,118 @@ def _resolve_per_image_group_areas(
     return resolved_group_areas, per_image_area
 
 
+# ── Permutation null for triads (added 2026-11-03) ─────────────────────────
+
+def _neighbour_matrix(coords: np.ndarray, radius_px: float):
+    """Symmetric 0/1 sparse matrix of cell pairs within radius (no self-pairs)."""
+    n = len(coords)
+    pairs = cKDTree(coords).query_pairs(r=radius_px, output_type="ndarray")
+    if len(pairs) == 0:
+        return _sparse.csr_matrix((n, n))
+    i, j = pairs[:, 0], pairs[:, 1]
+    data = np.ones(2 * len(pairs), dtype=np.float32)
+    return _sparse.csr_matrix((data, (np.r_[i, j], np.r_[j, i])), shape=(n, n))
+
+
+def _count_triads_sparse(A, labels: np.ndarray, anchor: str, p1: str, p2: str) -> int:
+    """Same total as len(find_triads(...)) for p1 != p2: sum over anchors of
+    (#p1 neighbours) x (#p2 neighbours)."""
+    a = (labels == anchor)
+    if not a.any():
+        return 0
+    n1 = A @ (labels == p1).astype(np.float32)
+    n2 = A @ (labels == p2).astype(np.float32)
+    return int(np.rint((n1[a] * n2[a]).sum()))
+
+
+def triad_permutation_for_image(df: pd.DataFrame, anchor: str, p1: str, p2: str,
+                                radius_px: float, perm_cfg: dict, rng) -> tuple:
+    """Label-shuffle null for one image.
+
+    Cell positions and the number of cells of each type stay fixed; cell-type
+    labels are shuffled n_perm times and the triad count is recomputed.
+
+    null: "immune" (default) shuffles labels only among cells NOT listed in
+      perm_cfg["exclude_from_shuffle"] (non-immune types). This keeps the
+      immune compartment where it is, so enrichment measures whether the
+      anchor sits next to both partners more than other immune cells do --
+      not just that immune cells share a region. "all" shuffles every cell
+      (what matusiak_triad_permutation.py did; inflated ~1.4x on the Schürch
+      CRC cells because immune cells cluster in stroma/lymphoid areas).
+
+    Returns (row dict, permuted count vector).
+    """
+    n_perm = int(perm_cfg.get("n_perm", 1000))
+    null = perm_cfg.get("null_model", "immune")  # key "null" is YAML-reserved
+    labels = df["cell_type"].astype(str).values
+    coords = df[["centroid_x", "centroid_y"]].values
+    A = _neighbour_matrix(coords, radius_px)
+    observed = _count_triads_sparse(A, labels, anchor, p1, p2)
+    if null == "all":
+        pool = np.arange(len(labels))
+    else:
+        excl = set(perm_cfg.get("exclude_from_shuffle") or [])
+        pool = np.where(~np.isin(labels, list(excl)))[0]
+    perm = np.empty(n_perm, dtype=np.int64)
+    shuffled = labels.copy()
+    pool_labels = labels[pool].copy()
+    for k in range(n_perm):
+        shuffled[pool] = rng.permutation(pool_labels)
+        perm[k] = _count_triads_sparse(A, shuffled, anchor, p1, p2)
+    mean_p = float(perm.mean())
+    sd_p = float(perm.std(ddof=1)) if n_perm > 1 else float("nan")
+    row = {
+        "observed": observed, "expected": round(mean_p, 3), "sd_perm": round(sd_p, 3),
+        "enrichment": (observed / mean_p) if mean_p > 0 else float("nan"),
+        "z": ((observed - mean_p) / sd_p) if sd_p and sd_p > 0 else float("nan"),
+        "p_enriched": (int(np.sum(perm >= observed)) + 1) / (n_perm + 1),
+        "p_depleted": (int(np.sum(perm <= observed)) + 1) / (n_perm + 1),
+        "n_perm": n_perm, "null": null, "n_shuffled_cells": int(len(pool)),
+        "n_anchor": int((labels == anchor).sum()), "n_p1": int((labels == p1).sum()),
+        "n_p2": int((labels == p2).sum()),
+    }
+    return row, perm
+
+
+def summarise_triad_permutations(perm_rows: list, perm_vectors: dict, experiment_groups: list) -> pd.DataFrame:
+    """Pooled (cohort / per-group) permutation test: summed observed triads vs
+    the distribution of summed permuted triads (same permutation index summed
+    across images). Far more power than per-image p-values when each image
+    has only a handful of triads."""
+    out = []
+    per = pd.DataFrame(perm_rows)
+    if per.empty:
+        return pd.DataFrame()
+    groups = [("all images", per)] + [(g, per[per["experiment_group"] == g]) for g in experiment_groups]
+    for name, sub in groups:
+        sub = sub[sub["expected"] > 0]
+        if sub.empty:
+            continue
+        tot = np.sum([perm_vectors[i] for i in sub["image_id"]], axis=0)
+        obs = int(sub["observed"].sum())
+        out.append({"group": name, "n_images": len(sub), "observed": obs,
+                    "expected": round(float(tot.mean()), 2),
+                    "enrichment": obs / float(tot.mean()) if tot.mean() > 0 else float("nan"),
+                    "p_enriched": (int(np.sum(tot >= obs)) + 1) / (len(tot) + 1),
+                    "p_depleted": (int(np.sum(tot <= obs)) + 1) / (len(tot) + 1),
+                    "n_images_p_lt_0.05": int((sub["p_enriched"] < 0.05).sum())})
+    res = pd.DataFrame(out)
+    # Between-group comparison of per-image enrichment (Mann-Whitney on log2)
+    if len(experiment_groups) == 2:
+        g1, g2 = experiment_groups
+        e = per[(per["expected"] > 0)].copy()
+        e["log2_enrichment"] = np.log2((e["observed"] + 0.5) / (e["expected"] + 0.5))
+        a = e.loc[e["experiment_group"] == g1, "log2_enrichment"]
+        b = e.loc[e["experiment_group"] == g2, "log2_enrichment"]
+        if len(a) >= 2 and len(b) >= 2:
+            u = scipy_stats.mannwhitneyu(a, b, alternative="two-sided")
+            res = pd.concat([res, pd.DataFrame([{"group": f"{g1} vs {g2} (per-image log2 enrichment, Mann-Whitney)",
+                                                  "n_images": len(a) + len(b),
+                                                  "enrichment": float(2 ** (a.median() - b.median())),
+                                                  "p_enriched": float(u.pvalue)}])], ignore_index=True)
+    return res
+
+
 # ── Cell-type groups for triad matching (added 2026-11-03) ───────────────────
 
 def apply_triad_type_groups(df: pd.DataFrame, t_cfg: dict) -> pd.DataFrame:
@@ -1526,6 +1639,28 @@ def run_triad_analysis(cfg: dict) -> None:
 
     all_summary_rows = []
     all_triad_dfs    = []
+    # Permutation null (added 2026-11-03), analysis.triad.permutation
+    perm_cfg = t_cfg.get("permutation") or {}
+    perm_on  = bool(perm_cfg.get("enabled", False)) and bool(anchor_type and partner1_type and partner2_type)
+    perm_rows, perm_vectors = [], {}
+    perm_rng = np.random.default_rng(int(perm_cfg.get("seed", 42)))
+    if perm_on:
+        print(f"[SPATIA] Permutation null ON: n_perm={perm_cfg.get('n_perm', 1000)}, "
+              f"null_model={perm_cfg.get('null_model', 'immune')}")
+
+    def _run_perm(_df, _image_id, _group):
+        if not perm_on:
+            return
+        _df = apply_triad_type_groups(_df, t_cfg)
+        if not {"centroid_x", "centroid_y", "cell_type"} <= set(_df.columns):
+            print(f"  ⚠️  [perm] {_image_id}: missing centroid/cell_type columns — skipped")
+            return
+        _row, _vec = triad_permutation_for_image(_df, anchor_type, partner1_type, partner2_type,
+                                                 radius_px, perm_cfg, perm_rng)
+        _row.update({"image_id": _image_id, "experiment_group": _group})
+        perm_rows.append(_row); perm_vectors[_image_id] = _vec
+        print(f"  [perm] observed {_row['observed']}  expected {_row['expected']}  "
+              f"enrichment {_row['enrichment']:.2f}  p {_row['p_enriched']:.3f}")
 
     for csv_file in csv_files:
         image_id  = csv_file.replace("_matched_with_boundaries.csv", "")
@@ -1553,6 +1688,8 @@ def run_triad_analysis(cfg: dict) -> None:
             if cached_summary:
                 all_triad_dfs.append(cached_triads_df)
             all_summary_rows.extend(cached_summary)
+            if perm_on:
+                _run_perm(pd.read_csv(flags_path), image_id, experiment_group)
             print()
             continue
 
@@ -1584,6 +1721,7 @@ def run_triad_analysis(cfg: dict) -> None:
             print(f"  Type groups applied: {_n_grouped} cells relabelled to their triad group")
 
         tree = cKDTree(df[["centroid_x", "centroid_y"]].values)
+        _run_perm(df, image_id, experiment_group)
         cell_types = sorted(df["cell_type"].dropna().unique().tolist())
         print(f"  Cell types ({len(cell_types)}): {cell_types}")
 
@@ -1673,6 +1811,18 @@ def run_triad_analysis(cfg: dict) -> None:
     # what compute_triad_group_significance() needs as its replication unit.
     summary_df["area_um2"]       = summary_df["image_id"].map(per_image_area_um2)
     summary_df["triads_per_mm2"] = summary_df["n_triads"] / (summary_df["area_um2"] / 1e6)
+    if perm_rows:
+        perm_df = pd.DataFrame(perm_rows)
+        perm_df.to_csv(os.path.join(triad_data_dir, "triad_permutation_per_image.csv"), index=False)
+        pooled = summarise_triad_permutations(perm_rows, perm_vectors, experiment_groups)
+        pooled.to_csv(os.path.join(triad_data_dir, "triad_permutation_pooled.csv"), index=False)
+        print("\n[SPATIA] Permutation null — pooled enrichment (observed / expected):")
+        print(pooled.to_string(index=False))
+        # carry per-image enrichment into the summary for downstream steps
+        summary_df = summary_df.merge(perm_df[["image_id", "expected", "enrichment", "z", "p_enriched"]]
+                                      .rename(columns={"expected": "perm_expected", "enrichment": "triad_enrichment",
+                                                       "z": "triad_enrichment_z", "p_enriched": "triad_perm_p"}),
+                                      on="image_id", how="left")
     summary_df.to_csv(os.path.join(triad_data_dir, "triad_summary.csv"), index=False)
 
     all_triads_combined = pd.concat(all_triad_dfs, ignore_index=True) if all_triad_dfs else pd.DataFrame()

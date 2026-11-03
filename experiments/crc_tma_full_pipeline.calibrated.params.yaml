@@ -556,6 +556,23 @@ analysis:
     partner_2_name: "CD8"
     matched_only: false
     min_triad_size: 1
+    # PERMUTATION NULL (added 2026-11-03): three cell types can co-occur by
+    # density alone, so raw triad counts are not evidence of interaction.
+    # Per image, cell-type labels are shuffled n_perm times (positions and
+    # counts fixed) and enrichment = observed / expected is reported, plus a
+    # pooled cohort/group test. null_model "immune" shuffles only among cells NOT in
+    # exclude_from_shuffle, so enrichment is not just "immune cells share a
+    # region". null_model "all" shuffles every cell. On the Schürch cells: shuffle-all 2.1x, immune-only 1.5x.
+    # Outputs: triad_data/triad_permutation_per_image.csv, triad_permutation_pooled.csv,
+    # and triad_enrichment columns in triad_summary.csv.
+    permutation:
+      enabled: true
+      n_perm: 1000
+      null_model: "immune"
+      seed: 42
+      exclude_from_shuffle: ["tumor cells", "smooth muscle", "stroma", "vasculature",
+                             "lymphatics", "nerves", "Unassigned", "mixed lineage (dirt/undefined)",
+                             "tumor cells / immune cells", "immune cells / vasculature"]
     # Auto-prep, added 2026-09-15 (see spatia/analysis/triads.py's
     # _run_matched_cells_prep): only fires if paths.input_dir has no
     # *_matched_with_boundaries.csv files yet. Right now it doesn't need to

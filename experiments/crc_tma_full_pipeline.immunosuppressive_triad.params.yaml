@@ -560,6 +560,23 @@ analysis:
     partner_2_name: "Treg"
     matched_only: false
     min_triad_size: 1
+    # PERMUTATION NULL (added 2026-11-03): three cell types can co-occur by
+    # density alone, so raw triad counts are not evidence of interaction.
+    # Per image, cell-type labels are shuffled n_perm times (positions and
+    # counts fixed) and enrichment = observed / expected is reported, plus a
+    # pooled cohort/group test. null_model "immune" shuffles only among cells NOT in
+    # exclude_from_shuffle, so enrichment is not just "immune cells share a
+    # region". null_model "all" shuffles every cell. On the Schürch cells: shuffle-all 2.1x, immune-only 1.5x.
+    # Outputs: triad_data/triad_permutation_per_image.csv, triad_permutation_pooled.csv,
+    # and triad_enrichment columns in triad_summary.csv.
+    permutation:
+      enabled: true
+      n_perm: 1000
+      null_model: "immune"
+      seed: 42
+      exclude_from_shuffle: ["tumor cells", "smooth muscle", "stroma", "vasculature",
+                             "lymphatics", "nerves", "Unassigned", "mixed lineage (dirt/undefined)",
+                             "tumor cells / immune cells", "immune cells / vasculature"]
     # Auto-prep, added 2026-09-15 (see spatia/analysis/triads.py's
     # _run_matched_cells_prep): only fires if paths.input_dir has no
     # *_matched_with_boundaries.csv files yet. Right now it doesn't need to
@@ -591,16 +608,47 @@ analysis:
   functional:
     enabled: true
     report_radius_um: 20.0
+    # B-TRIAD FUNCTIONAL MARKERS (2026-11-03): per-role lists for anchor =
+    # B cells, partner 1 = CD8+ T cells, partner 2 = Tregs. Lineage-defining
+    # markers are left out on purpose (CD20 on B, CD8 on CD8, FOXP3 on Tregs):
+    # comparing a gating marker in- vs out-of-triad tests the gate, not biology.
+    # Question per role:
+    #   B cells : are triad B cells antigen-presenting / activated / regulatory?
+    #   CD8     : are triad CD8 cells exhausted rather than cytotoxic?
+    #   Tregs   : are triad Tregs activated / suppressive effector Tregs?
+    # Shared fallback list (used only if a per-role list is missing):
     markers:
-      GzmB: "Granzyme B - cytotoxicity (C50)"
-      PD-1: "PD-1 - checkpoint (C48)"
-      LAG-3: "LAG-3 - checkpoint (C32)"
-      FOXP3: "FOXP3 - regulatory T cells (C7)"
-      ICOS: "ICOS - costimulator (C56)"
       Ki67: "Ki67 - proliferation (C20)"
+      PD-1: "PD-1 - checkpoint (C48)"
       HLA-DR: "HLA-DR - MHC-II (C18)"
-      PD-L1: "PD-L1 - checkpoint (C19)"
-      CD25: "CD25 - IL-2 Ra (C44)"
+    markers_anchor:                      # B cells
+      HLA-DR: "HLA-DR - MHC-II (C18)"    # antigen presentation (MHC-II)
+      CD21: "CD21 - DCs (C24)"           # CR2 on mature/follicular B cells (also FDCs)
+      CD38: "CD38 - multifunctional (C80)"   # activation, plasmablast transition
+      Ki67: "Ki67 - proliferation (C20)"     # proliferating / germinal-centre-like
+      BCL-2: "BCL-2 - apoptosis (C43)"       # low in germinal-centre B cells
+      CD45RA: "CD45RA - naive T cells (C22)" # naive B cells (CD45RA+); antibody named for T cells
+      PD-L1: "PD-L1 - checkpoint (C19)"      # regulatory / suppressive B-cell phenotype
+      CD25: "CD25 - IL-2 Ra (C44)"           # reported on regulatory B cells
+    markers_partner1:                    # CD8+ T cells
+      GzmB: "Granzyme B - cytotoxicity (C50)"  # cytotoxic effector
+      PD-1: "PD-1 - checkpoint (C48)"          # exhaustion / activation
+      LAG-3: "LAG-3 - checkpoint (C32)"        # exhaustion
+      Ki67: "Ki67 - proliferation (C20)"
+      T-bet: "T-bet - Th1 cells (C15)"         # effector (Tc1) programme
+      CD45RO: "CD45RO - memory cells (C71)"    # antigen-experienced memory
+      CD57: "CD57 - NK cells (C68)"            # terminal differentiation
+      HLA-DR: "HLA-DR - MHC-II (C18)"          # activated CD8
+      CD38: "CD38 - multifunctional (C80)"     # activation / exhaustion (with PD-1)
+    markers_partner2:                    # Tregs
+      CD25: "CD25 - IL-2 Ra (C44)"             # IL-2 receptor, suppressive capacity
+      ICOS: "ICOS - costimulator (C56)"        # activated effector Tregs
+      CCR4: "CD194 - CCR4 chemokine R (C55)"   # effector Treg homing to tumour
+      LAG-3: "LAG-3 - checkpoint (C32)"        # suppressive function
+      PD-1: "PD-1 - checkpoint (C48)"
+      Ki67: "Ki67 - proliferation (C20)"
+      CD45RO: "CD45RO - memory cells (C71)"    # memory/effector Treg
+      HLA-DR: "HLA-DR - MHC-II (C18)"          # activated, highly suppressive Tregs
   survival:
     enabled: true
     # Annotation file confirmed present on HPC 2026-09-16 (repo root, not a
