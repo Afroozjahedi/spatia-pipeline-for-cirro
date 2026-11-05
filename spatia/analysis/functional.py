@@ -239,18 +239,54 @@ def run_functional_analysis(cfg: dict) -> None:
     print(f"[functional] Aggregated {len(all_cells):,} cells from {len(all_cell_dfs)} images\n")
 
     # ── Per-cell-type analysis ────────────────────────────────────────────────
-    GROUP_COLORS = dict(zip(
-        experiment_groups,
-        ["#2196F3", "#F44336", "#4CAF50", "#FF9800", "#9C27B0"],
-    ))
-    COLOR_OUT = "#1f77b4"   # blue — out of triad
-    COLOR_IN  = "#ff7f0e"   # orange — in triad
+    # 2026-11-05 rewrite of the statistics:
+    #  * The unit of replication is the IMAGE (core / ROI), not the cell.
+    #    Each image contributes one median per marker. Old plots tested
+    #    cells (e.g. "CLR n=42, DII n=15" were 57 in-triad CD4 *cells*),
+    #    which treats neighbouring cells of one core as independent samples.
+    #  * In-triad vs out-of-triad is a PAIRED test within each image that has
+    #    in-triad cells (Wilcoxon signed-rank), so core-to-core staining
+    #    differences cancel out.
+    #  * Out-of-triad cells from cores with NO triads are now loaded too
+    #    (the triads step writes their flags file) and shown as their own box.
+    #  * CLR vs DII compares per-image medians of in-triad cells (Mann-Whitney).
+    #  * BH-FDR across all per-image tests; per-cell p-values kept in the CSV.
+    from scipy.stats import wilcoxon
+    from spatia.analysis.plot_style import group_color, add_sig_bracket, bh_fdr, p_to_stars
+    COLOR_OUT_NOTRIAD = "#cfcfcf"
+    COLOR_OUT = "#8c8c8c"
+    COLOR_IN = "#6A3D9A"
+    min_cells_img = int(func_cfg.get("min_cells_per_image", 3))
+
+    imgs_with_triads = set(all_cells.loc[
+        all_cells[["_in_triad_anchor", "_in_triad_partner1", "_in_triad_partner2"]].any(axis=1),
+        "image_id"])
 
     cell_role_map = [
         (anchor_type,   anchor_name,   "_in_triad_anchor",   markers_anchor),
         (partner1_type, partner1_name, "_in_triad_partner1", markers_partner1),
         (partner2_type, partner2_name, "_in_triad_partner2", markers_partner2),
     ]
+
+    def _img_medians(sub, col):
+        g = sub.groupby("image_id")[col]
+        med = g.median()
+        n = g.size()
+        return med[n >= min_cells_img].dropna()
+
+    def _box(ax, data, positions, colors, labels):
+        bp = ax.boxplot(data, positions=positions, widths=0.55, patch_artist=True,
+                        showfliers=False, medianprops=dict(color="black", linewidth=2))
+        for patch, c in zip(bp["boxes"], colors):
+            patch.set_facecolor(c)
+            patch.set_alpha(0.8)
+        rng = np.random.default_rng(0)
+        for pos, d in zip(positions, data):
+            ax.scatter(pos + rng.uniform(-0.12, 0.12, len(d)), d, s=14, color="black",
+                       alpha=0.6, zorder=3, linewidths=0)
+        ax.set_xticks(positions)
+        ax.set_xticklabels(labels, fontsize=8)
+        ax.spines[["top", "right"]].set_visible(False)
 
     all_summary = []
 
@@ -264,126 +300,129 @@ def run_functional_analysis(cfg: dict) -> None:
         missing = [n for n in role_markers if n not in avail]
         if missing:
             print(f"[functional]   Marker columns not found for {display_name}: {missing}")
-            print(f"[functional]   (Your data-prep step must keep marker intensity columns — "
-                  f"e.g. prepare_crc_data.py's KEEP_INTENSITIES=True — then re-run the triads step.)")
         if not avail:
             print(f"[functional] ⚠️  No usable marker columns for {display_name} — skipping.")
             continue
 
         in_triad     = cells[cells[flag_col] == True]
-        not_in_triad = cells[cells[flag_col] == False]
-        n_in, n_out  = len(in_triad), len(not_in_triad)
-        print(f"[functional] {display_name}: {n_in:,} in-triad  |  {n_out:,} out-of-triad")
+        out_tri_img  = cells[(cells[flag_col] == False) & cells["image_id"].isin(imgs_with_triads)]
+        out_no_img   = cells[(cells[flag_col] == False) & ~cells["image_id"].isin(imgs_with_triads)]
+        n_in = len(in_triad)
+        print(f"[functional] {display_name}: {n_in:,} in-triad cells in {in_triad['image_id'].nunique()} images  |  "
+              f"{len(out_tri_img):,} out-of-triad (same images)  |  "
+              f"{len(out_no_img):,} in {out_no_img['image_id'].nunique()} images without triads")
 
         n_m = len(avail)
 
-        # ── Plot 1: in-triad vs out-of-triad ─────────────────────────────────
-        fig1, axes1 = plt.subplots(1, n_m, figsize=(max(4 * n_m, 8), 6))
+        # ── Plot 1: in vs out of triad, per image ───────────────────────────
+        fig1, axes1 = plt.subplots(1, n_m, figsize=(max(3.6 * n_m, 8), 5.8))
         axes1 = [axes1] if n_m == 1 else list(axes1)
-
         for ax, (marker_name, col) in zip(axes1, avail.items()):
-            vals_in  = in_triad[col].dropna().values.astype(float)
-            vals_out = not_in_triad[col].dropna().values.astype(float)
-
-            stat, pval, sig = _violin_pair(
-                ax, vals_out, vals_in,
-                label_a=f"Out of triad", label_b=f"In triad",
-                color_a=COLOR_OUT, color_b=COLOR_IN,
-                title=marker_name,
-            )
+            m_in = _img_medians(in_triad, col)
+            m_out = _img_medians(out_tri_img, col)
+            m_none = _img_medians(out_no_img, col)
+            paired = pd.concat([m_out.rename("out"), m_in.rename("in")], axis=1).dropna()
+            for _, r in paired.iterrows():
+                ax.plot([1, 2], [r["out"], r["in"]], color="#bbbbbb", linewidth=0.7, zorder=1)
+            _box(ax, [m_none.values, m_out.values, m_in.values], [0, 1, 2],
+                 [COLOR_OUT_NOTRIAD, COLOR_OUT, COLOR_IN],
+                 [f"Out\n(cores w/o\ntriads)\nn={len(m_none)}", f"Out\n(same\ncores)\nn={len(m_out)}",
+                  f"In triad\nn={len(m_in)}"])
+            p_pair = (wilcoxon(paired["in"], paired["out"]).pvalue
+                      if len(paired) >= 5 and (paired["in"] != paired["out"]).any() else np.nan)
+            p_all = (mannwhitneyu(m_in, pd.concat([m_out, m_none]), alternative="two-sided").pvalue
+                     if len(m_in) >= 3 and (len(m_out) + len(m_none)) >= 3 else np.nan)
+            top = np.nanmax([np.nanmax(d) if len(d) else np.nan for d in (m_none, m_out, m_in)] + [0])
+            if np.isfinite(p_pair):
+                add_sig_bracket(ax, 1, 2, top * 1.04 + 1e-9, p_pair, label_fmt="{stars} paired p={p:.2g}",
+                                fontsize=7)
+            ax.set_title(marker_name, fontsize=10, fontweight="bold")
+            ax.set_ylabel("Median expression per image", fontsize=9)
+            # per-cell test kept for the CSV only
+            vi, vo = in_triad[col].dropna().astype(float), out_tri_img[col].dropna().astype(float)
+            p_cell = (mannwhitneyu(vi, vo, alternative="two-sided").pvalue
+                      if len(vi) >= 3 and len(vo) >= 3 else np.nan)
             all_summary.append({
-                "cell_type":     display_name,
-                "comparison":    "in_triad_vs_out",
-                "marker":        marker_name,
-                "marker_col":    col,
-                "group_A":       "in_triad",
-                "group_B":       "not_in_triad",
-                "n_A":           len(vals_in),
-                "n_B":           len(vals_out),
-                "mean_A":        float(np.mean(vals_in))    if len(vals_in)  else np.nan,
-                "mean_B":        float(np.mean(vals_out))   if len(vals_out) else np.nan,
-                "median_A":      float(np.median(vals_in))  if len(vals_in)  else np.nan,
-                "median_B":      float(np.median(vals_out)) if len(vals_out) else np.nan,
-                "mannwhitney_U": stat,
-                "p_value":       pval,
-                "significance":  sig,
+                "cell_type": display_name, "comparison": "in_triad_vs_out", "marker": marker_name,
+                "marker_col": col, "group_A": "in_triad", "group_B": "not_in_triad",
+                "unit": "image (paired)", "n_images_A": len(m_in), "n_images_B": len(m_out),
+                "n_images_paired": len(paired), "n_images_no_triads": len(m_none),
+                "n_cells_A": len(vi), "n_cells_B": len(vo),
+                "median_A": float(m_in.median()) if len(m_in) else np.nan,
+                "median_B": float(m_out.median()) if len(m_out) else np.nan,
+                "median_no_triad_cores": float(m_none.median()) if len(m_none) else np.nan,
+                "p_value": p_pair, "test": "Wilcoxon signed-rank on per-image medians",
+                "p_in_vs_all_out_cores": p_all, "p_per_cell_mannwhitney": p_cell,
             })
-
-        fig1.suptitle(
-            f"{display_name}: In-triad vs Out-of-triad Marker Expression\n"
-            f"(triad threshold = {func_radius} µm)",
-            fontsize=12, fontweight="bold",
-        )
+        fig1.suptitle(f"{display_name}: in-triad vs out-of-triad — one dot per image (core/ROI)\n"
+                      f"(triad radius {func_radius} µm; images need ≥{min_cells_img} cells; "
+                      f"lines join the same image)", fontsize=11, fontweight="bold")
         plt.tight_layout()
-        fig1.savefig(
-            os.path.join(func_out, f"functional_{display_name}_intriad_vs_out.png"),
-            dpi=150, bbox_inches="tight",
-        )
+        fig1.savefig(os.path.join(func_out, f"functional_{display_name}_intriad_vs_out.png"),
+                     dpi=150, bbox_inches="tight")
         plt.close(fig1)
 
-        # ── Plot 2: experiment_group comparison within in-triad cells ────────────────
-        if len(experiment_groups) >= 2 and "experiment_group" in cells.columns and n_in >= 6:
-            group_sub    = {c: in_triad[in_triad["experiment_group"] == c] for c in experiment_groups}
-            valid_groups = [c for c in experiment_groups if len(group_sub[c]) >= 3]
-
-            if len(valid_groups) >= 2:
-                fig2, axes2 = plt.subplots(1, n_m, figsize=(max(4 * n_m, 8), 6))
-                axes2 = [axes2] if n_m == 1 else list(axes2)
-
-                cA, cB = valid_groups[0], valid_groups[1]
-                for ax, (marker_name, col) in zip(axes2, avail.items()):
-                    vA = group_sub[cA][col].dropna().values.astype(float)
-                    vB = group_sub[cB][col].dropna().values.astype(float)
-
-                    stat2, pval2, sig2 = _violin_pair(
-                        ax, vA, vB,
-                        label_a=cA, label_b=cB,
-                        color_a=GROUP_COLORS.get(cA, "#888"),
-                        color_b=GROUP_COLORS.get(cB, "#888"),
-                        title=marker_name,
-                    )
-                    all_summary.append({
-                        "cell_type":     display_name,
-                        "comparison":    f"{cA}_vs_{cB}_in_triad",
-                        "marker":        marker_name,
-                        "marker_col":    col,
-                        "group_A":       cA,
-                        "group_B":       cB,
-                        "n_A":           len(vA),
-                        "n_B":           len(vB),
-                        "mean_A":        float(np.mean(vA))    if len(vA) else np.nan,
-                        "mean_B":        float(np.mean(vB))    if len(vB) else np.nan,
-                        "median_A":      float(np.median(vA))  if len(vA) else np.nan,
-                        "median_B":      float(np.median(vB))  if len(vB) else np.nan,
-                        "mannwhitney_U": stat2,
-                        "p_value":       pval2,
-                        "significance":  sig2,
-                    })
-
-                fig2.suptitle(
-                    f"{display_name}: {cA} vs {cB} — In-triad cells only\n"
-                    f"(triad threshold = {func_radius} µm)",
-                    fontsize=12, fontweight="bold",
-                )
-                plt.tight_layout()
-                fig2.savefig(
-                    os.path.join(func_out, f"functional_{display_name}_experiment_group_compare.png"),
-                    dpi=150, bbox_inches="tight",
-                )
-                plt.close(fig2)
+        # ── Plot 2: experiment groups, in-triad cells, per image ─────────────
+        if len(experiment_groups) >= 2 and n_in >= 6:
+            gA, gB = experiment_groups[0], experiment_groups[1]
+            fig2, axes2 = plt.subplots(1, n_m, figsize=(max(3.2 * n_m, 8), 5.6))
+            axes2 = [axes2] if n_m == 1 else list(axes2)
+            for ax, (marker_name, col) in zip(axes2, avail.items()):
+                mA = _img_medians(in_triad[in_triad["experiment_group"] == gA], col)
+                mB = _img_medians(in_triad[in_triad["experiment_group"] == gB], col)
+                nA_c = int((in_triad["experiment_group"] == gA).sum())
+                nB_c = int((in_triad["experiment_group"] == gB).sum())
+                _box(ax, [mA.values, mB.values], [0, 1], [group_color(gA), group_color(gB)],
+                     [f"{gA}\n{len(mA)} images\n({nA_c} cells)", f"{gB}\n{len(mB)} images\n({nB_c} cells)"])
+                p2 = (mannwhitneyu(mA, mB, alternative="two-sided").pvalue
+                      if len(mA) >= 3 and len(mB) >= 3 else np.nan)
+                top = np.nanmax([np.nanmax(d) if len(d) else np.nan for d in (mA, mB)] + [0])
+                if np.isfinite(p2):
+                    add_sig_bracket(ax, 0, 1, top * 1.04 + 1e-9, p2, fontsize=8)
+                else:
+                    ax.text(0.5, 0.97, "too few images to test", transform=ax.transAxes,
+                            ha="center", va="top", fontsize=7, color="#777777")
+                ax.set_title(marker_name, fontsize=10, fontweight="bold")
+                ax.set_ylabel("Median expression per image", fontsize=9)
+                vA = in_triad.loc[in_triad["experiment_group"] == gA, col].dropna().astype(float)
+                vB = in_triad.loc[in_triad["experiment_group"] == gB, col].dropna().astype(float)
+                p_cell = (mannwhitneyu(vA, vB, alternative="two-sided").pvalue
+                          if len(vA) >= 3 and len(vB) >= 3 else np.nan)
+                all_summary.append({
+                    "cell_type": display_name, "comparison": f"{gA}_vs_{gB}_in_triad",
+                    "marker": marker_name, "marker_col": col, "group_A": gA, "group_B": gB,
+                    "unit": "image", "n_images_A": len(mA), "n_images_B": len(mB),
+                    "n_cells_A": len(vA), "n_cells_B": len(vB),
+                    "median_A": float(mA.median()) if len(mA) else np.nan,
+                    "median_B": float(mB.median()) if len(mB) else np.nan,
+                    "p_value": p2, "test": "Mann-Whitney on per-image medians",
+                    "p_per_cell_mannwhitney": p_cell,
+                })
+            fig2.suptitle(f"{display_name}: {gA} vs {gB} — in-triad cells, one dot per image\n"
+                          f"(triad radius {func_radius} µm)", fontsize=11, fontweight="bold")
+            plt.tight_layout()
+            fig2.savefig(os.path.join(func_out, f"functional_{display_name}_experiment_group_compare.png"),
+                         dpi=150, bbox_inches="tight")
+            plt.close(fig2)
 
     # ── Summary CSV ───────────────────────────────────────────────────────────
     if all_summary:
         summary_df = pd.DataFrame(all_summary)
-        n_tests = len(summary_df)
+        n_tests = int(summary_df["p_value"].notna().sum())
+        summary_df["q_bh"] = bh_fdr(summary_df["p_value"].values)
+        summary_df["sig_bh_0.05"] = summary_df["q_bh"] < 0.05
         bonf_alpha = 0.05 / max(n_tests, 1)
         summary_df["bonferroni_alpha"] = round(bonf_alpha, 8)
-        summary_df["sig_bonferroni"]   = summary_df["p_value"] < bonf_alpha
+        summary_df["sig_bonferroni"] = summary_df["p_value"] < bonf_alpha
+        summary_df["significance"] = [p_to_stars(q) for q in summary_df["q_bh"]]
         out_csv = os.path.join(func_out, "functional_marker_summary.csv")
         summary_df.to_csv(out_csv, index=False)
-        sig_hits = summary_df["sig_bonferroni"].sum()
-        print(f"\n[functional] ✓  {n_tests} tests  |  Bonferroni α={bonf_alpha:.3e}  "
-              f"|  {sig_hits} hits after correction")
+        print(f"\n[functional] ✓  {n_tests} per-image tests  |  BH q<0.05: "
+              f"{int(summary_df['sig_bh_0.05'].sum())}  |  Bonferroni: {int(summary_df['sig_bonferroni'].sum())}")
+        hits = summary_df[summary_df["sig_bh_0.05"]]
+        for _, r in hits.iterrows():
+            print(f"[functional]    hit: {r['cell_type']} {r['marker']} {r['comparison']} "
+                  f"median {r['median_A']:.3g} vs {r['median_B']:.3g}  q={r['q_bh']:.2g}")
         print(f"[functional]    Outputs → {func_out}")
     else:
         print("[functional] ⚠️  No results produced.")

@@ -483,8 +483,15 @@ def _km_plot(
         print(f"  ⚠️  Only one group in {group_col} — cannot plot KM.")
         return {}
 
-    palette = ["#d62728", "#1f77b4", "#2ca02c", "#ff7f0e", "#9467bd"]
-    colors = {g: palette[i % len(palette)] for i, g in enumerate(groups)}
+    # Experiment groups (CLR/DII...) use the shared plot_style colours so
+    # they match every other step; other splits (e.g. triad density
+    # high/low) get a neutral dark/light pair that can't be confused with them.
+    from spatia.analysis.plot_style import GROUP_COLORS
+    other = ["#E08214", "#5E3C99", "#1B7837", "#4D4D4D", "#8C510A"]
+    if all(str(g) in GROUP_COLORS for g in groups):
+        colors = {g: GROUP_COLORS[str(g)] for g in groups}
+    else:
+        colors = {g: other[i % len(other)] for i, g in enumerate(groups)}
 
     fig, ax = plt.subplots(figsize=(9, 6))
     results = {}

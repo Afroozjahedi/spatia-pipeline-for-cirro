@@ -503,15 +503,19 @@ def _fit_gmm(values: np.ndarray, n_components: int = 2, random_state: int = 42,
         gmm = GaussianMixture(n_components=n_components, random_state=random_state,
                               max_iter=200, n_init=n_init)
         gmm.fit(fit_data)
-        means = gmm.means_.flatten()
-        result.update({
-            "gmm": gmm,
-            "low_idx": int(np.argmin(means)),
-            "high_idx": int(np.argmax(means)),
-        })
     except Exception as e:
         print(f"    [GMM] WARNING: {e} — GMM fit failed")
-
+        return result
+    means = gmm.means_.flatten()
+    result.update({
+        "gmm": gmm,
+        "low_idx": int(np.argmin(means)),
+        "high_idx": int(np.argmax(means)),
+        # share of ALL cells that the GMM was fit on (point masses and
+        # per-image floors excluded) -- plots scale the curves by this so
+        # they sit on the same density axis as the full histogram.
+        "fit_frac": float(len(fit_input) / len(values)) if len(values) else 1.0,
+    })
     return result
 
 
@@ -1327,6 +1331,17 @@ def run_cell_typing(cfg: dict) -> None:
         "transform_lambda": {
             m: fit_info[m]["transform_params"].get("lambda") for m in thresholds
         },
+        # Threshold on the scale the GMM was fit in (added 2026-11-05).
+        # arcsinh: threshold_raw = cofactor * sinh(threshold_transformed).
+        "threshold_transformed": {
+            m: (float(np.arcsinh(thresholds[m] / arcsinh_cofactor))
+                if fit_info[m]["transform"] == "arcsinh"
+                else float(np.log1p(thresholds[m])) if fit_info[m]["transform"] == "log1p"
+                else thresholds[m])
+            for m in thresholds
+        },
+        "arcsinh_cofactor": {m: (arcsinh_cofactor if fit_info[m]["transform"] == "arcsinh" else None)
+                             for m in thresholds},
     })
     threshold_report.index.name = "marker"
     threshold_report.to_csv(os.path.join(data_dir, "marker_thresholds.csv"))
@@ -1368,6 +1383,20 @@ def run_cell_typing(cfg: dict) -> None:
             print(f"  [cap] {_m}: {_before*100:.1f}% <= cap {float(_cap)*100:.1f}% -- unchanged")
     if cap_rows:
         pd.DataFrame(cap_rows).to_csv(os.path.join(data_dir, "marker_positive_rate_caps.csv"), index=False)
+        # 2026-11-05: report the cut that was actually used. Before this, the
+        # distribution / UMAP plots and marker_thresholds.csv still showed the
+        # GMM threshold for capped markers (e.g. CD31 2.9 instead of 78).
+        for _r in cap_rows:
+            _m = _r["marker"]
+            if _m in thresholds:
+                fit_info[_m]["gmm_threshold_before_cap"] = thresholds[_m]
+                fit_info[_m]["cap_applied"] = _r["cap"]
+                thresholds[_m] = float(max(_r["raw_cut"], thresholds[_m]))
+        threshold_report["threshold_after_cap"] = pd.Series(
+            {m: thresholds[m] for m in threshold_report.index})
+        threshold_report["cap_applied"] = pd.Series(
+            {m: fit_info[m].get("cap_applied") for m in threshold_report.index})
+        threshold_report.to_csv(os.path.join(data_dir, "marker_thresholds.csv"))
 
     # Positivity is done: put z-scores back in .X for everything downstream.
     if use_raw:
@@ -1456,6 +1485,7 @@ def run_cell_typing(cfg: dict) -> None:
                 adata_cd45, thresholds, fit_info, column_map, data_dir, plot_dir,
                 transform=gmm_transform, arcsinh_cofactor=arcsinh_cofactor,
                 random_state=random_state,
+                umap_cfg=ct_cfg.get("umap"),
             )
         except Exception as e:
             print(f"WARNING: cell-typing diagnostic plots failed (non-fatal -- "
@@ -1714,7 +1744,19 @@ def plot_marker_distributions(adata, thresholds: dict, fit_info: dict, column_ma
     sub_dir = os.path.join(plot_dir, "marker_distributions")
     os.makedirs(sub_dir, exist_ok=True)
 
-    NEG_COLOR, POS_COLOR = "#4C72B0", "#DD8452"  # colorblind-safe blue/orange pair
+    # Purple / green (PRGn ends): colorblind-safe, and kept clear of the
+    # blue/red used for experiment groups. Intermediate (K=3) = tan.
+    NEG_COLOR, POS_COLOR, MID_COLOR = "#762A83", "#1B7837", "#BF812D"
+    THR_COLOR = "#000000"
+
+    def _fwd(x, mt, tparams):
+        if mt == "arcsinh":
+            return np.arcsinh(x / arcsinh_cofactor)
+        if mt == "log1p":
+            return np.log1p(x)
+        if mt == "yeojohnson":
+            return _yeojohnson_forward_local(x, tparams.get("lambda", 1.0))
+        return x
 
     n_done, skipped = 0, []
     for marker, threshold in thresholds.items():
@@ -1737,118 +1779,118 @@ def plot_marker_distributions(adata, thresholds: dict, fit_info: dict, column_ma
         stds_t = np.sqrt(gmm.covariances_.flatten())
         weights = gmm.weights_
         tparams = info.get("transform_params", {})
+        fit_frac = float(info.get("fit_frac", 1.0))
+        k = len(means_t)
+        order = np.argsort(means_t)
+        comp_names, comp_colors = {}, {}
+        for rank, i in enumerate(order):
+            if i == high_idx:
+                comp_names[i], comp_colors[i] = "positive", POS_COLOR
+            elif i == low_idx:
+                comp_names[i], comp_colors[i] = "negative", NEG_COLOR
+            else:
+                comp_names[i], comp_colors[i] = "intermediate", MID_COLOR
 
         pos_col = f"{marker}_pos"
         pos_bool = (adata.obs[pos_col].to_numpy()[finite_mask]
                     if pos_col in adata.obs.columns else None)
 
         try:
-            lo, hi = np.percentile(clean, [0.1, 99.9])
+            # Clip the x-range to the 0.1-99.5th percentile so a handful of
+            # very bright outliers no longer squash every cell into the
+            # first bin (the old CD11c raw panels ran to 40,000).
+            lo, hi = np.percentile(clean, [0.1, 99.5])
+            hi = max(hi, threshold * 1.15)
             if lo >= hi:
                 lo, hi = float(np.min(clean)), float(np.max(clean))
             x_raw = np.linspace(lo, hi, 500)
+            in_rng = clean[(clean >= lo) & (clean <= hi)]
+            n_out = int((clean > hi).sum())
 
             fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(19, 5.5))
-            comp_names = {low_idx: "negative", high_idx: "positive"}
 
             # ── Panel 1: raw expression ──────────────────────────────
-            ax1.hist(clean, bins=60, alpha=0.7, density=True, color="#8c8c8c",
+            ax1.hist(in_rng, bins=80, range=(lo, hi), density=True, color="#8c8c8c",
                      edgecolor="white", linewidth=0.3, label=f"All cells (n={len(clean):,})")
-            ax1.axvline(threshold, color="#C44E52", linestyle="--", linewidth=1.8,
-                        label=f"Threshold: {threshold:.3f}")
-            ax1.set_title("Raw expression", fontsize=11)
+            ax1.axvline(threshold, color=THR_COLOR, linestyle="--", linewidth=1.8,
+                        label=f"Threshold (raw): {threshold:,.1f}")
+            ax1.set_title("Raw expression" + (f"  ({n_out:,} cells > x-limit)" if n_out else ""),
+                          fontsize=11)
             ax1.set_xlabel("Expression level (raw)")
             ax1.set_ylabel("Density")
             ax1.legend(fontsize="small", frameon=False)
 
-            # ── Panel 2: this marker's own transformed space ────────
-            if marker_transform == "none":
-                ax2.hist(clean, bins=60, alpha=0.7, density=True, color="#8c8c8c",
-                         edgecolor="white", linewidth=0.3)
-                ax2.axvline(threshold, color="#C44E52", linestyle="--", linewidth=1.8)
-                ax2.set_title("Transformed space (transform: none)", fontsize=11)
-                ax2.set_xlabel("Expression level (raw)")
-            else:
-                if marker_transform == "arcsinh":
-                    clean_t = np.arcsinh(clean / arcsinh_cofactor)
-                    x_t = np.arcsinh(x_raw / arcsinh_cofactor)
-                elif marker_transform == "log1p":
-                    clean_t = np.log1p(clean)
-                    x_t = np.log1p(x_raw)
-                elif marker_transform == "yeojohnson":
-                    lam = tparams.get("lambda", 1.0)
-                    clean_t = _yeojohnson_forward_local(clean, lam)
-                    x_t = _yeojohnson_forward_local(x_raw, lam)
-                else:
-                    clean_t, x_t = clean, x_raw
-
-                ax2.hist(clean_t, bins=60, alpha=0.7, density=True, color="#8c8c8c",
-                         edgecolor="white", linewidth=0.3, label=f"All cells (n={len(clean_t):,})")
-                comp_names = {low_idx: "negative", high_idx: "positive"}
-                mixture = np.zeros_like(x_t)
-                for i in (low_idx, high_idx):
-                    comp_pdf = weights[i] * norm.pdf(x_t, means_t[i], stds_t[i])
-                    mixture += comp_pdf
-                    ax2.plot(x_t, comp_pdf, linewidth=2,
-                             label=f"{comp_names[i]} (μ={means_t[i]:.2f}, w={weights[i]:.2f})")
-                ax2.plot(x_t, mixture, "k--", linewidth=1.3, label="GMM mixture")
-                # Threshold in this same transformed space: forward-transform
-                # the already-known raw threshold (exact, since it was
-                # produced by inverse-transforming this same fit).
-                if marker_transform == "arcsinh":
-                    threshold_t = np.arcsinh(threshold / arcsinh_cofactor)
-                elif marker_transform == "log1p":
-                    threshold_t = np.log1p(threshold)
-                else:
-                    threshold_t = _yeojohnson_forward_local(np.array([threshold]), tparams.get("lambda", 1.0))[0]
-                ax2.axvline(threshold_t, color="#C44E52", linestyle="--", linewidth=1.8,
-                            label=f"Threshold: {threshold_t:.3f}")
-                ax2.set_title(f"Transformed space (transform: {marker_transform})", fontsize=11)
-                ax2.set_xlabel("Expression level (transformed)")
-                ax2.legend(fontsize="small", frameon=False)
+            # ── Panel 2: transformed space + GMM components ─────────
+            clean_t = _fwd(clean, marker_transform, tparams)
+            x_t = _fwd(x_raw, marker_transform, tparams)
+            threshold_t = float(_fwd(np.array([threshold]), marker_transform, tparams)[0])
+            lo_t, hi_t = float(x_t.min()), float(x_t.max())
+            hvals, _, _ = ax2.hist(clean_t[(clean_t >= lo_t) & (clean_t <= hi_t)], bins=80, range=(lo_t, hi_t),
+                                   density=True, color="#cfcfcf", edgecolor="white", linewidth=0.3,
+                                   label=f"All cells (n={len(clean_t):,})")
+            # Curves are scaled by fit_frac: the GMM was fit only on cells
+            # outside the point mass, so unscaled curves would overshoot the
+            # histogram, which includes every cell.
+            mixture = np.zeros_like(x_t)
+            for i in order:
+                comp_pdf = fit_frac * weights[i] * norm.pdf(x_t, means_t[i], stds_t[i])
+                mixture += comp_pdf
+                ax2.plot(x_t, comp_pdf, linewidth=2.4, color=comp_colors[i],
+                         label=f"{comp_names[i]} (μ={means_t[i]:.2f}, w={weights[i]:.2f})")
+            ax2.plot(x_t, mixture, "k:", linewidth=1.4, label="GMM mixture")
+            # A zero / floor spike (excluded from the fit) can be 10x taller
+            # than everything else and flatten the curves; cap the y-axis
+            # just above the curves and the second-tallest bar.
+            if len(hvals) > 2:
+                ycap = 1.35 * max(float(np.max(mixture)), float(np.sort(hvals)[-2]))
+                if np.max(hvals) > ycap:
+                    ax2.set_ylim(0, ycap)
+                    ax2.text(0.01, 0.98, f"floor spike cut off\n({100 * (1 - fit_frac):.0f}% of cells,\nnot used in the fit)",
+                             transform=ax2.transAxes, va="top", ha="left", fontsize=7, color="#555555")
+            thr_lab = (f"Threshold: {threshold_t:.3f}  = raw {threshold:,.0f}"
+                       if marker_transform != "none" else f"Threshold: {threshold:,.1f}")
+            ax2.axvline(threshold_t, color=THR_COLOR, linestyle="--", linewidth=1.8, label=thr_lab)
+            ax2.set_title(f"Transformed space (transform: {marker_transform})", fontsize=11)
+            ax2.set_xlabel("Expression level (transformed)" if marker_transform != "none"
+                           else "Expression level (raw)")
             ax2.set_ylabel("Density")
+            ax2.legend(fontsize="small", frameon=False)
 
-            # ── Panel 3: positive vs. negative split ─────────────────
+            # ── Panel 3: positive vs negative split ──────────────────
+            # Drawn on the transformed axis (where the two populations are
+            # actually separable), with tick labels converted back to raw
+            # intensity so the reader sees both scales at once. Bars are
+            # overlaid (not stacked) so each population's full shape shows.
             if pos_bool is not None and pos_bool.any() and (~pos_bool).any():
-                ax3.hist([clean[~pos_bool], clean[pos_bool]], bins=60, stacked=True,
-                         density=False, color=[NEG_COLOR, POS_COLOR],
-                         label=[f"negative (n={int((~pos_bool).sum()):,})",
-                                f"positive (n={int(pos_bool.sum()):,})"],
-                         edgecolor="white", linewidth=0.2)
+                neg_t, pos_t = clean_t[~pos_bool], clean_t[pos_bool]
+                ax3.hist(neg_t, bins=80, range=(lo_t, hi_t), color=NEG_COLOR, alpha=0.55,
+                         label=f"negative (n={len(neg_t):,})")
+                ax3.hist(pos_t, bins=80, range=(lo_t, hi_t), color=POS_COLOR, alpha=0.55,
+                         label=f"positive (n={len(pos_t):,})")
             else:
-                ax3.hist(clean, bins=60, color="#8c8c8c", edgecolor="white", linewidth=0.3)
-
-            # GMM component curves on this RAW axis, Jacobian-corrected back
-            # from the transformed space they were actually fit in -- see
-            # _transform_derivative_local(). Scaled from a density to a
-            # cell-count curve (* N * bin_width) so they sit on the same
-            # y-axis as the density=False histogram above.
-            if marker_transform == "arcsinh":
-                x_t3 = np.arcsinh(x_raw / arcsinh_cofactor)
-            elif marker_transform == "log1p":
-                x_t3 = np.log1p(x_raw)
-            elif marker_transform == "yeojohnson":
-                x_t3 = _yeojohnson_forward_local(x_raw, tparams.get("lambda", 1.0))
+                ax3.hist(clean_t, bins=80, range=(lo_t, hi_t), color="#8c8c8c")
+            ax3.axvline(threshold_t, color=THR_COLOR, linestyle="--", linewidth=1.8,
+                        label="Threshold")
+            ax3.set_yscale("log")
+            ax3.set_ylabel("Cells (log scale)")
+            if marker_transform != "none":
+                ticks = np.linspace(lo_t, hi_t, 6)
+                ax3.set_xticks(ticks)
+                labels = []
+                for tv in ticks:
+                    if marker_transform == "arcsinh":
+                        rv = np.sinh(tv) * arcsinh_cofactor
+                    elif marker_transform == "log1p":
+                        rv = np.expm1(tv)
+                    else:
+                        rv = np.nan
+                    labels.append(f"{tv:.1f}\n({rv:,.0f})" if np.isfinite(rv) else f"{tv:.1f}")
+                ax3.set_xticklabels(labels, fontsize=8)
+                ax3.set_xlabel("Transformed  (raw intensity in brackets)")
             else:
-                x_t3 = x_raw
-            jac = _transform_derivative_local(x_raw, marker_transform, arcsinh_cofactor,
-                                               tparams.get("lambda"))
-            bin_width = (hi - lo) / 60.0
-            mixture_counts = np.zeros_like(x_raw)
-            for i in (low_idx, high_idx):
-                comp_density_t = weights[i] * norm.pdf(x_t3, means_t[i], stds_t[i])
-                comp_counts = comp_density_t * jac * len(clean) * bin_width
-                mixture_counts += comp_counts
-                ax3.plot(x_raw, comp_counts, linewidth=2,
-                         color=(NEG_COLOR if i == low_idx else POS_COLOR),
-                         label=f"{comp_names[i]} GMM fit")
-            ax3.plot(x_raw, mixture_counts, "k--", linewidth=1.3, label="GMM mixture")
+                ax3.set_xlabel("Expression level (raw)")
+            ax3.set_title("Positive / negative split", fontsize=11)
             ax3.legend(fontsize="small", frameon=False)
-
-            ax3.axvline(threshold, color="#C44E52", linestyle="--", linewidth=1.8)
-            ax3.set_title("Positive / negative split (raw scale)", fontsize=11)
-            ax3.set_xlabel("Expression level (raw)")
-            ax3.set_ylabel("Cells")
 
             if pos_col in adata.obs.columns:
                 pct_pos = 100 * adata.obs[pos_col].mean()
@@ -1856,6 +1898,9 @@ def plot_marker_distributions(adata, thresholds: dict, fit_info: dict, column_ma
                 suptitle = f"{marker}  ({real_col})\nPositive: {n_pos:,} cells ({pct_pos:.1f}%)"
             else:
                 suptitle = f"{marker}  ({real_col})"
+            if info.get("cap_applied") is not None:
+                suptitle += (f"   [positive-rate cap {100 * info['cap_applied']:.0f}%: GMM cut "
+                             f"{info['gmm_threshold_before_cap']:,.1f} raised to {threshold:,.1f}]")
             fig.suptitle(suptitle, fontsize=12)
             for ax in (ax1, ax2, ax3):
                 ax.spines[["top", "right"]].set_visible(False)
@@ -2110,7 +2155,7 @@ def plot_grouped_by_group(adata, group_col: str, plot_dir: str, data_dir: str,
     """
     if "cell_type" not in adata.obs.columns or group_col not in adata.obs.columns:
         return
-    group_colors = ["#2f3c7e", "#c2185b", "#6b7280", "#e8a0bc", "#97a3d6", "#4a4f57"]
+    from spatia.analysis.plot_style import group_color
     for suffix, note, obs in _variants(adata):
         comp = pd.crosstab(obs["cell_type"].astype(str), obs[group_col], normalize="columns") * 100
         comp = comp.loc[obs["cell_type"].astype(str).value_counts().index]
@@ -2118,7 +2163,7 @@ def plot_grouped_by_group(adata, group_col: str, plot_dir: str, data_dir: str,
         comp.to_csv(os.path.join(data_dir, f"cell_type_by_{group_col}{suffix}_pct.csv"))
         fig, ax = plt.subplots(figsize=(9.5, max(5, 0.38 * len(comp) + 1.5)))
         comp.plot(kind="barh", ax=ax, width=0.78, edgecolor="white", linewidth=0.4,
-                  color=group_colors[:comp.shape[1]], zorder=3)
+                  color=[group_color(g) for g in comp.columns], zorder=3)
         ax.set_xlabel("% of cells within group")
         ax.set_ylabel("")
         ax.set_title(f"Cell Type % by {group_col}{note}", fontsize=13, pad=10)
@@ -2162,7 +2207,8 @@ def _qualitative_palette(categories, unassigned_gray=(0.82, 0.82, 0.82, 1.0)):
 
 
 def compute_and_plot_umaps(adata, plot_dir: str, data_dir: str, group_col: str, tissue_col: str,
-                            random_state: int = 42, formats=("png", "pdf")):
+                            random_state: int = 42, formats=("png", "pdf"),
+                            umap_cfg: Optional[dict] = None, column_map: Optional[dict] = None):
     """
     Computes PCA -> neighbors -> UMAP if not already present, then saves
     three colorings: cell_type (the "whole-TMA" map), group_col, tissue_col
@@ -2202,12 +2248,32 @@ def compute_and_plot_umaps(adata, plot_dir: str, data_dir: str, group_col: str, 
     runs PCA anyway. The earlier synthetic test (6 markers) never
     triggered this, since 6 < 50. Confirmed via the real run's own log.
     """
+    # cell_typing.umap.markers (optional, added 2026-11-05): build the
+    # embedding on a chosen marker subset (e.g. lineage markers only) instead
+    # of all ~80 channels. Functional/noisy channels add variation that has
+    # nothing to do with cell identity and smear cell types together.
+    umap_cfg = umap_cfg or {}
+    column_map = column_map or {}
+    use_rep = "X"
+    sel_markers = umap_cfg.get("markers")
+    if sel_markers:
+        cols = [column_map.get(m, m) for m in sel_markers]
+        cols = [c for c in cols if c in adata.var_names]
+        if len(cols) >= 3:
+            Xs = adata[:, cols].X
+            Xs = Xs.toarray() if hasattr(Xs, "toarray") else np.asarray(Xs)
+            adata.obsm["X_umap_input"] = Xs
+            use_rep = "X_umap_input"
+            print(f"  [diagnostics] UMAP on {len(cols)} selected markers (cell_typing.umap.markers)")
+        else:
+            print("  [diagnostics] cell_typing.umap.markers matched <3 columns -- using all markers")
     if "X_umap" not in adata.obsm:
-        print(f"  [diagnostics] Computing neighbors -> UMAP directly on the marker matrix "
-              f"({adata.n_vars} markers, {adata.n_obs:,} cells, no PCA/subsampling -- "
-              f"matches the reference notebook's approach)...")
-        sc.pp.neighbors(adata, n_neighbors=15, random_state=random_state, use_rep="X")
-        sc.tl.umap(adata, random_state=random_state)
+        print(f"  [diagnostics] Computing neighbors -> UMAP on '{use_rep}' "
+              f"({adata.obsm[use_rep].shape[1] if use_rep != 'X' else adata.n_vars} markers, "
+              f"{adata.n_obs:,} cells, no PCA)...")
+        sc.pp.neighbors(adata, n_neighbors=int(umap_cfg.get("n_neighbors", 15)),
+                        random_state=random_state, use_rep=use_rep)
+        sc.tl.umap(adata, random_state=random_state, min_dist=float(umap_cfg.get("min_dist", 0.5)))
     else:
         print("  [diagnostics] X_umap already present (semi_automatic clustering ran earlier) -- reusing it.")
 
@@ -2217,40 +2283,41 @@ def compute_and_plot_umaps(adata, plot_dir: str, data_dir: str, group_col: str, 
             coords[col] = adata.obs[col].values
     coords.to_csv(os.path.join(data_dir, "umap_coordinates.csv"))
 
-    colorings = [("cell_type", "UMAP — Cell Types (whole TMA)", "umap_cell_types_all")]
-    if group_col in adata.obs.columns:
-        colorings.append((group_col, f"UMAP — {group_col}", f"umap_by_{group_col}"))
-    if tissue_col in adata.obs.columns:
-        n_cores = adata.obs[tissue_col].nunique()
-        colorings.append((tissue_col, f"UMAP — {tissue_col} ({n_cores} cores)", f"umap_by_{tissue_col}"))
+    try:
+        plot_celltype_umap_suite(adata, plot_dir, formats)
+    except Exception as e:
+        plt.close("all")
+        print(f"  [diagnostics] Cell-type UMAP suite failed (non-fatal): {e}")
 
-    for color_key, title, fname in colorings:
+    from spatia.analysis.plot_style import group_palette
+    xy = np.asarray(adata.obsm["X_umap"])
+    s_pt = _umap_point_size(len(xy))
+    n_written = 0
+    for col, fname in ((group_col, f"umap_by_{group_col}"), (tissue_col, f"umap_by_{tissue_col}")):
+        if col not in adata.obs.columns:
+            continue
         try:
-            fig, ax = plt.subplots(figsize=(9, 8))
-            n_cats = adata.obs[color_key].nunique()
-            legend_loc = "right margin" if n_cats <= 30 else None
-
-            # Bigger, more distinguishable dots + an explicit high-contrast
-            # palette -- scanpy's auto point size (~120000/n_obs) goes
-            # sub-pixel at hundreds of thousands of cells, and its default
-            # categorical palette (tab20, 20 colors) runs out before this
-            # dataset's 23+ cell types, which together were making these
-            # UMAPs look faded/indistinct (Afrouz, 2026-10-20).
-            point_size = float(np.clip(120000.0 / max(adata.n_obs, 1) * 5, 14.0, 45.0))
-            cats = [str(c) for c in adata.obs[color_key].astype(str).unique()]
-            palette, ordered_cats = _qualitative_palette(cats)
-            adata.obs[color_key] = pd.Categorical(adata.obs[color_key].astype(str), categories=ordered_cats)
-
-            sc.pl.umap(adata, color=color_key, ax=ax, show=False, title=title,
-                       legend_loc=legend_loc, legend_fontsize=7,
-                       size=point_size, alpha=0.85, palette=palette)
+            labs = adata.obs[col].astype(str).values
+            counts = pd.Series(labs).value_counts()
+            if col == group_col:
+                pal = group_palette(counts.index)
+            else:
+                cyc = [mcolors.to_hex(c) for c in plt.cm.tab20.colors + plt.cm.tab20b.colors]
+                pal = {c: cyc[i % len(cyc)] for i, c in enumerate(counts.index)}
+            fig, ax = plt.subplots(figsize=(10.5, 8.5))
+            _scatter_cat(ax, xy, labs, pal, s=s_pt)
+            if len(counts) <= 30:
+                _legend_cats(ax, pal, counts)
+            ax.set_title(f"UMAP — {col} ({len(counts)} categories)", fontsize=12)
+            plt.tight_layout()
             _savefig(fig, os.path.join(plot_dir, fname), formats)
             plt.close(fig)
+            n_written += 1
         except Exception as e:
             plt.close("all")
-            print(f"  [diagnostics] UMAP coloring by '{color_key}' failed (non-fatal): {e}")
+            print(f"  [diagnostics] UMAP coloring by '{col}' failed (non-fatal): {e}")
 
-    print(f"  [diagnostics] UMAP: {len(colorings)} coloring(s) written, coordinates saved to "
+    print(f"  [diagnostics] UMAP: cell-type suite + {n_written} other coloring(s); coordinates in "
           f"{data_dir}/umap_coordinates.csv")
 
 
@@ -2301,10 +2368,24 @@ def plot_spatial_celltype_overlay(adata, plot_dir: str, tissue_col: str = "tissu
     pinned to a light neutral grey so it doesn't visually compete with real
     calls.
     """
-    if "centroid_x" not in adata.obs.columns or "centroid_y" not in adata.obs.columns:
-        print("  [diagnostics] Spatial cell-type overlay: skipped -- no centroid_x/centroid_y "
-              "in adata.obs (this h5ad wasn't built via segmentation + preprocessing)")
+    # 2026-11-05: preprocessing writes cell positions as obs "x"/"y" (or
+    # obsm["spatial"]), not centroid_x/centroid_y, so this plot was always
+    # skipped on the full pipeline. Accept any of those.
+    xcol = ycol = None
+    for cx, cy in (("centroid_x", "centroid_y"), ("x", "y"), ("X_centroid", "Y_centroid"), ("X", "Y")):
+        if cx in adata.obs.columns and cy in adata.obs.columns:
+            xcol, ycol = cx, cy
+            break
+    if xcol is None and "spatial" in adata.obsm:
+        adata.obs["centroid_x"] = np.asarray(adata.obsm["spatial"])[:, 0]
+        adata.obs["centroid_y"] = np.asarray(adata.obsm["spatial"])[:, 1]
+        xcol, ycol = "centroid_x", "centroid_y"
+    if xcol is None:
+        print("  [diagnostics] Spatial cell-type overlay: skipped -- no cell coordinates "
+              "(centroid_x/y, x/y or obsm['spatial']) in the h5ad")
         return
+    if tissue_col not in adata.obs.columns:
+        tissue_col = next((c for c in ("image_ID", "tissue_id", "sample_id") if c in adata.obs.columns), tissue_col)
     if tissue_col not in adata.obs.columns:
         print(f"  [diagnostics] Spatial cell-type overlay: skipped -- no '{tissue_col}' column "
               "in adata.obs (nothing to group cores by)")
@@ -2313,7 +2394,8 @@ def plot_spatial_celltype_overlay(adata, plot_dir: str, tissue_col: str = "tissu
     sub_dir = os.path.join(plot_dir, "celltype_overlays")
     os.makedirs(sub_dir, exist_ok=True)
 
-    df = adata.obs[["cell_type", tissue_col, "centroid_x", "centroid_y"]].copy()
+    df = adata.obs[["cell_type", tissue_col, xcol, ycol]].copy()
+    df = df.rename(columns={xcol: "centroid_x", ycol: "centroid_y"})
     cell_types = sorted(t for t in df["cell_type"].unique() if t != "Unassigned")
     # 2026-10-29: same lineage-grouped colors as every other cell-type plot.
     _order = adata.obs["cell_type"].astype(str).value_counts().index.tolist()
@@ -2326,17 +2408,19 @@ def plot_spatial_celltype_overlay(adata, plot_dir: str, tissue_col: str = "tissu
     for core in core_sizes.index:
         try:
             csub = df[df[tissue_col] == core]
-            fig, ax = plt.subplots(figsize=(10, 9))
-            for ct, s in csub.groupby("cell_type"):
-                ax.scatter(s["centroid_x"], s["centroid_y"], s=25,
+            fig, ax = plt.subplots(figsize=(12, 9))
+            pt = float(np.clip(150000.0 / max(len(csub), 1), 1.5, 25))
+            for ct, s in sorted(csub.groupby("cell_type", observed=True), key=lambda t: -len(t[1])):
+                ax.scatter(s["centroid_x"], s["centroid_y"], s=pt,
                            color=color_map.get(ct, "#646464"), linewidths=0, alpha=0.85,
                            label=f"{ct} ({len(s):,})")
             ax.invert_yaxis()
             ax.set_title(f"{core} (n={len(csub):,})", fontsize=11)
             ax.set_xlabel("X (px)")
             ax.set_ylabel("Y (px)")
-            ax.legend(fontsize=6, markerscale=0.6, ncol=2, framealpha=0.9,
-                      loc="upper right", borderpad=0.5)
+            ax.set_aspect("equal")
+            ax.legend(fontsize=7, markerscale=max(1.0, 6 / pt ** 0.5), ncol=1, frameon=False,
+                      loc="center left", bbox_to_anchor=(1.01, 0.5))
             ax.spines[["top", "right"]].set_visible(False)
             safe_core = str(core).replace("/", "_").replace(" ", "_")
             _savefig(fig, os.path.join(sub_dir, f"celltype_overlay_{safe_core}"), formats)
@@ -2414,68 +2498,248 @@ def plot_dotplot(adata, thresholds: dict, column_map: dict, plot_dir: str, forma
 # right). Requires compute_and_plot_umaps() to have already run (reuses
 # its X_umap embedding -- never recomputes it).
 
+# ── UMAP drawing helpers (2026-11-05) ───────────────────────────────────────
+# matplotlib scatter instead of sc.pl.umap: full control of point size,
+# draw order and colours. Points are rasterized so the PDFs stay small.
+
+EXPR_CMAP = mcolors.LinearSegmentedColormap.from_list(
+    "spatia_expr", ["#e3e3e3", "#fee391", "#fe9929", "#cc4c02", "#662506"])
+POS_UMAP_COLOR, NEG_UMAP_COLOR = "#1B7837", "#d4d4d4"
+
+_FAMILY_LABELS = {
+    "mixed": "Mixed / doublets", "dc": "Dendritic cells", "treg": "Tregs", "tcell": "T cells",
+    "nk": "NK cells", "bcell": "B / plasma cells", "myeloid": "Myeloid", "tumor": "Tumor",
+    "stroma": "Stroma / vasculature", "immune": "Other immune", "other": "Other",
+    "unassigned": "Unassigned",
+}
+
+
+def _umap_point_size(n: int) -> float:
+    return float(np.clip(60000.0 / max(n, 1), 0.15, 6.0))
+
+
+def _lineage_of(cell_type: str) -> str:
+    name = str(cell_type)
+    if name == "Unassigned":
+        return "unassigned"
+    low = name.lower()
+    for fam, keys, _ in _LINEAGE_FAMILIES:
+        if any(k in low for k in keys):
+            return fam
+    return "other"
+
+
+def _scatter_cat(ax, xy, labels, palette, order=None, s=1.0, alpha=0.8, rng=None,
+                 background=None):
+    """Categorical scatter. Shuffled draw order so no category hides another;
+    `background` labels (e.g. Unassigned) are drawn first, underneath."""
+    labels = np.asarray(labels).astype(str)
+    rng = rng or np.random.default_rng(0)
+    idx = rng.permutation(len(labels))
+    if background is not None:
+        bg = np.isin(labels[idx], list(background))
+        idx = np.concatenate([idx[bg], idx[~bg]])
+    cols = np.array([palette.get(l, "#888888") for l in labels[idx]])
+    ax.scatter(xy[idx, 0], xy[idx, 1], c=cols, s=s, alpha=alpha, linewidths=0, rasterized=True)
+    ax.set_xlabel("UMAP1")
+    ax.set_ylabel("UMAP2")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.spines[["top", "right"]].set_visible(False)
+
+
+def _label_centroids(ax, xy, labels, min_frac=0.003, fontsize=7, max_labels=15):
+    """Write each category's name at its median UMAP position."""
+    import matplotlib.patheffects as pe
+    labels = np.asarray(labels).astype(str)
+    n = len(labels)
+    xr = np.ptp(xy[:, 0]) or 1.0
+    yr = np.ptp(xy[:, 1]) or 1.0
+    placed = []
+    # biggest categories first; a label that would land on top of an
+    # earlier one is pushed down until it is clear (simple greedy repel)
+    for lab in pd.Series(labels).value_counts().index:
+        sel = labels == lab
+        if lab == "Unassigned" or sel.sum() < max(20, min_frac * n):
+            continue
+        mx, my0 = np.median(xy[sel, 0]), np.median(xy[sel, 1])
+        spot = None
+        for step in range(30):  # try 0, +1, -1, +2, -2 ... label heights away
+            my = my0 + ((step + 1) // 2) * (1 if step % 2 else -1) * 0.03 * yr
+            if not (xy[:, 1].min() <= my <= xy[:, 1].max()):
+                continue
+            if all(abs(mx - px) > 0.16 * xr or abs(my - py) > 0.03 * yr for px, py in placed):
+                spot = my
+                break
+        if spot is None or len(placed) >= max_labels:
+            continue  # no free spot nearby: the legend still names it
+        my = spot
+        placed.append((mx, my))
+        ax.text(mx, my, lab, fontsize=fontsize, ha="center", va="center", weight="bold",
+                color="#111111", path_effects=[pe.withStroke(linewidth=2.5, foreground="white")])
+
+
+def _legend_cats(ax, palette, counts, ncol=1, fontsize=7, loc="center left",
+                 anchor=(1.01, 0.5)):
+    handles = [plt.Line2D([0], [0], marker="o", linestyle="", markersize=6, color=palette[c])
+               for c in counts.index]
+    ax.legend(handles, [f"{c} ({counts[c]:,})" for c in counts.index], loc=loc,
+              bbox_to_anchor=anchor, fontsize=fontsize, frameon=False, ncol=ncol)
+
+
+def plot_celltype_umap_suite(adata, plot_dir: str, formats=("png", "pdf")):
+    """
+    Cell-type UMAPs that stay readable with ~30 categories:
+      umap_cell_types_all            every type, small dots, legend + in-plot labels
+      umap_major_lineages            one colour per major lineage (~10 colours)
+      umap_lineage_panels            one panel per lineage: its subtypes in colour,
+                                     everything else grey
+      umap_lineages/umap_lineage_<x> the same panels as single large figures
+    """
+    if "X_umap" not in adata.obsm or "cell_type" not in adata.obs.columns:
+        return
+    xy = np.asarray(adata.obsm["X_umap"])
+    ct = adata.obs["cell_type"].astype(str).values
+    counts = pd.Series(ct).value_counts()
+    pal = cell_type_palette([c for c in counts.index if c != "Unassigned"] + ["Unassigned"])
+    s = _umap_point_size(len(ct))
+
+    # 1. all categories
+    fig, ax = plt.subplots(figsize=(12, 9))
+    _scatter_cat(ax, xy, ct, pal, s=s, background=["Unassigned"])
+    _label_centroids(ax, xy, ct, min_frac=0.01)
+    _legend_cats(ax, pal, counts, ncol=1 if len(counts) <= 30 else 2)
+    ax.set_title(f"UMAP — all cell types ({len(ct):,} cells, {len(counts)} types)", fontsize=12)
+    plt.tight_layout()
+    _savefig(fig, os.path.join(plot_dir, "umap_cell_types_all"), formats)
+    plt.close(fig)
+
+    # 2. major lineages
+    fam = np.array([_lineage_of(c) for c in ct])
+    fam_lab = np.array([_FAMILY_LABELS.get(f, f) for f in fam])
+    fam_counts = pd.Series(fam_lab).value_counts()
+    fam_shade = {f: shades[0] for f, _, shades in _LINEAGE_FAMILIES}
+    fam_pal = {_FAMILY_LABELS.get(f, f): c for f, c in fam_shade.items()}
+    fam_pal["Unassigned"] = _UNASSIGNED_COLOR
+    fam_pal["Other"] = "#7f7f7f"
+    fig, ax = plt.subplots(figsize=(11, 9))
+    _scatter_cat(ax, xy, fam_lab, fam_pal, s=s, background=["Unassigned"])
+    _label_centroids(ax, xy, fam_lab, fontsize=9)
+    _legend_cats(ax, fam_pal, fam_counts)
+    ax.set_title("UMAP — major lineages", fontsize=12)
+    plt.tight_layout()
+    _savefig(fig, os.path.join(plot_dir, "umap_major_lineages"), formats)
+    plt.close(fig)
+
+    # 3. one panel per lineage (subtypes coloured, rest grey)
+    fams = [f for f in fam_counts.index if f not in ("Unassigned",)]
+    sub_dir = os.path.join(plot_dir, "umap_lineages")
+    os.makedirs(sub_dir, exist_ok=True)
+    ncols = 3
+    nrows = int(np.ceil(len(fams) / ncols)) or 1
+    gfig, gaxes = plt.subplots(nrows, ncols, figsize=(6.2 * ncols, 5.4 * nrows))
+    gaxes = np.atleast_1d(gaxes).flatten()
+    for gi, f in enumerate(fams):
+        sel = fam_lab == f
+        sub_counts = pd.Series(ct[sel]).value_counts()
+        local = {c: pal[c] for c in sub_counts.index}
+        for target_ax, big in ((gaxes[gi], False), (None, True)):
+            if big:
+                fig, ax = plt.subplots(figsize=(10, 8.5))
+            else:
+                ax = target_ax
+            ax.scatter(xy[~sel, 0], xy[~sel, 1], c="#e6e6e6", s=s, linewidths=0, rasterized=True)
+            _scatter_cat(ax, xy[sel], ct[sel], local, s=s * 2, alpha=0.9)
+            ax.set_title(f"{f}  ({int(sel.sum()):,} cells)", fontsize=11)
+            _legend_cats(ax, local, sub_counts, fontsize=7 if big else 6,
+                         loc="upper left" if not big else "center left",
+                         anchor=(0.0, 1.0) if not big else (1.01, 0.5))
+            if big:
+                _label_centroids(ax, xy[sel], ct[sel], min_frac=0.01, fontsize=8)
+                plt.tight_layout()
+                safe = f.replace(" / ", "_").replace(" ", "_").replace("/", "_")
+                _savefig(fig, os.path.join(sub_dir, f"umap_lineage_{safe}"), formats)
+                plt.close(fig)
+    for ax in gaxes[len(fams):]:
+        ax.axis("off")
+    gfig.suptitle("UMAP — each lineage highlighted (other cells grey)", fontsize=13)
+    gfig.tight_layout(rect=[0, 0, 1, 0.97])
+    _savefig(gfig, os.path.join(plot_dir, "umap_lineage_panels"), formats)
+    plt.close(gfig)
+    print(f"  [diagnostics] Cell-type UMAP suite: all types, {len(fams)} lineage panels -> {plot_dir}")
+
+
 def plot_marker_umaps(adata, thresholds: dict, column_map: dict, plot_dir: str,
                        fit_info: Optional[dict] = None, arcsinh_cofactor: float = 5.0,
                        formats=("png", "pdf")):
     """
-    Three panels per marker, left to right, all coloring the SAME fixed 2D
-    UMAP embedding (computed once on the untransformed marker matrix, per
-    this project's no-PCA convention -- only the point colors differ
-    across panels, never the embedding):
-      1. Raw expression.
-      2. This marker's own transformed-space expression -- reads
-         fit_info[marker]["transform"] (per_marker_transform_overrides-aware,
-         added 2026-09-11), i.e. the same space actually used to threshold
-         this marker. Falls back to "none" (identical to panel 1, just a
-         different colormap so it's visually distinguishable) if fit_info
-         has no entry for this marker.
-      3. Positive/negative call (unchanged from before 2026-09-11).
+    Three panels per marker on the same UMAP: raw expression, the marker's
+    own transformed expression, and the positive/negative call.
+
+    2026-11-05: colour scale clipped to the 1st-99th percentile (a few very
+    bright cells used to stretch the scale so everything else looked "low"),
+    a grey-to-dark-brown scale with strong contrast, high cells drawn on top,
+    and positive = green on top of grey negatives.
     """
-    if "X_umap" not in adata.obsm or not HAS_SCANPY:
-        print("  [diagnostics] Skipping per-marker UMAPs -- no UMAP embedding yet "
-              "(compute_and_plot_umaps() must run first).")
+    if "X_umap" not in adata.obsm:
+        print("  [diagnostics] Skipping per-marker UMAPs -- no UMAP embedding yet.")
         return
     column_map = column_map or {}
     fit_info = fit_info or {}
     sub_dir = os.path.join(plot_dir, "marker_umaps")
     os.makedirs(sub_dir, exist_ok=True)
+    xy = np.asarray(adata.obsm["X_umap"])
+    s = _umap_point_size(len(xy))
+
+    def _expr_panel(ax, v, title, fig):
+        v = np.asarray(v, dtype=float)
+        ok = np.isfinite(v)
+        lo, hi = np.nanpercentile(v[ok], [1, 99]) if ok.any() else (0, 1)
+        if hi <= lo:
+            hi = lo + 1e-9
+        order = np.argsort(np.where(ok, v, -np.inf))  # high values drawn last (on top)
+        sc_ = ax.scatter(xy[order, 0], xy[order, 1], c=np.clip(v[order], lo, hi), cmap=EXPR_CMAP,
+                         vmin=lo, vmax=hi, s=s, linewidths=0, rasterized=True)
+        cb = fig.colorbar(sc_, ax=ax, fraction=0.046, pad=0.02)
+        cb.set_label("expression (1st–99th pct, clipped)", fontsize=8)
+        ax.set_title(title, fontsize=11)
+        ax.set_xlabel("UMAP1"); ax.set_ylabel("UMAP2")
+        ax.set_xticks([]); ax.set_yticks([])
 
     n_done, skipped = 0, []
     for marker, threshold in thresholds.items():
-        real_col = column_map.get(marker, marker)
         pos_col = f"{marker}_pos"
-        if real_col not in adata.var_names or pos_col not in adata.obs.columns:
+        raw_vals, _ = _get_column(adata, marker, column_map)
+        if raw_vals is None or pos_col not in adata.obs.columns:
             skipped.append(marker)
             continue
-        tmp_col = f"__{marker}_transformed_tmp"
         try:
             info = fit_info.get(marker, {})
-            marker_transform = info.get("transform", "none")
-
-            fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, 6))
-            sc.pl.umap(adata, color=real_col, cmap="plasma", ax=ax1, show=False)
-            ax1.set_title(f"{marker} expression (raw)")
-
-            if marker_transform == "none":
-                sc.pl.umap(adata, color=real_col, cmap="viridis", ax=ax2, show=False)
-                ax2.set_title(f"{marker} expression (transform: none)")
+            mt = info.get("transform", "none")
+            if mt == "arcsinh":
+                t_vals = np.arcsinh(raw_vals / arcsinh_cofactor)
+            elif mt == "log1p":
+                t_vals = np.log1p(raw_vals)
+            elif mt == "yeojohnson":
+                t_vals = _yeojohnson_forward_local(raw_vals, info.get("transform_params", {}).get("lambda", 1.0))
             else:
-                raw_vals, _ = _get_column(adata, marker, column_map)
-                if marker_transform == "arcsinh":
-                    t_vals = np.arcsinh(raw_vals / arcsinh_cofactor)
-                elif marker_transform == "log1p":
-                    t_vals = np.log1p(raw_vals)
-                elif marker_transform == "yeojohnson":
-                    lam = info.get("transform_params", {}).get("lambda", 1.0)
-                    t_vals = _yeojohnson_forward_local(raw_vals, lam)
-                else:
-                    t_vals = raw_vals
-                adata.obs[tmp_col] = t_vals
-                sc.pl.umap(adata, color=tmp_col, cmap="viridis", ax=ax2, show=False)
-                ax2.set_title(f"{marker} expression (transform: {marker_transform})")
+                t_vals = raw_vals
 
-            sc.pl.umap(adata, color=pos_col, cmap="coolwarm", ax=ax3, show=False)
-            ax3.set_title(f"{marker}+ cells (threshold: {threshold:.3f})")
+            fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(21, 6.2))
+            _expr_panel(ax1, raw_vals, f"{marker} — raw intensity", fig)
+            _expr_panel(ax2, t_vals, f"{marker} — transformed ({mt})", fig)
+
+            pos = adata.obs[pos_col].to_numpy().astype(bool)
+            ax3.scatter(xy[~pos, 0], xy[~pos, 1], c=NEG_UMAP_COLOR, s=s, linewidths=0, rasterized=True,
+                        label=f"negative ({int((~pos).sum()):,})")
+            ax3.scatter(xy[pos, 0], xy[pos, 1], c=POS_UMAP_COLOR, s=s * 1.5, linewidths=0, rasterized=True,
+                        label=f"positive ({int(pos.sum()):,}, {100 * pos.mean():.1f}%)")
+            ax3.set_title(f"{marker}+ call (raw threshold {threshold:,.1f})", fontsize=11)
+            ax3.legend(markerscale=max(4, 12 / max(s, 0.1) ** 0.5), frameon=False, fontsize=9, loc="best")
+            ax3.set_xlabel("UMAP1"); ax3.set_ylabel("UMAP2")
+            ax3.set_xticks([]); ax3.set_yticks([])
+            for a in (ax1, ax2, ax3):
+                a.spines[["top", "right"]].set_visible(False)
             plt.tight_layout()
             safe_marker = marker.replace("/", "_").replace(" ", "_")
             _savefig(fig, os.path.join(sub_dir, f"{safe_marker}_umap"), formats)
@@ -2484,10 +2748,6 @@ def plot_marker_umaps(adata, thresholds: dict, column_map: dict, plot_dir: str,
         except Exception as e:
             plt.close("all")
             skipped.append(f"{marker} ({e})")
-        finally:
-            # Never leave the scratch column behind, success or failure.
-            if tmp_col in adata.obs.columns:
-                del adata.obs[tmp_col]
 
     print(f"  [diagnostics] Per-marker UMAPs: {n_done} written to {sub_dir}/"
           + (f"  -- skipped: {skipped}" if skipped else ""))
@@ -2502,43 +2762,87 @@ def plot_marker_umaps(adata, thresholds: dict, column_map: dict, plot_dir: str,
 # exactly 2 groups (matching the notebook exactly in that specific case).
 
 def plot_group_statistics(adata, group_col: str, plot_dir: str, data_dir: str, formats=("png", "pdf")):
+    """
+    Cell-type composition CLR vs DII (or any groups).
+
+    Rewritten 2026-11-05. The old version ran a chi-square test on pooled
+    cell counts: with ~300,000 cells almost any difference is "significant"
+    because every cell is treated as an independent sample (pseudoreplication).
+    Now the unit is the IMAGE (core / ROI): each image gets its own % of each
+    cell type, groups are compared with Mann-Whitney (2 groups) or
+    Kruskal-Wallis (>2), and p-values are BH-FDR corrected across cell types.
+    The pooled chi-square is still written to the CSV for reference only.
+    """
     if "cell_type" not in adata.obs.columns or group_col not in adata.obs.columns:
         return
-    from scipy.stats import chi2_contingency
+    from scipy.stats import chi2_contingency, mannwhitneyu, kruskal
+    from spatia.analysis.plot_style import group_color, p_to_stars, bh_fdr
 
-    groups = sorted(adata.obs[group_col].dropna().unique().tolist())
+    obs = adata.obs
+    groups = sorted(obs[group_col].dropna().astype(str).unique().tolist())
     if len(groups) < 2:
         print(f"  [diagnostics] Skipping group statistics -- only {len(groups)} group(s) in '{group_col}'.")
         return
+    img_col = next((c for c in ("image_ID", "tissue_id", "sample_id", "image_id") if c in obs.columns), None)
 
-    cell_types = adata.obs["cell_type"].value_counts().index.tolist()
-    pct = (pd.crosstab(adata.obs["cell_type"], adata.obs[group_col], normalize="columns") * 100)
-    pct = pct.reindex(index=cell_types, columns=groups)
+    cell_types = obs["cell_type"].astype(str).value_counts().index.tolist()
+    ct = obs["cell_type"].astype(str)
+    gr = obs[group_col].astype(str)
+    pct = (pd.crosstab(ct, gr, normalize="columns") * 100).reindex(index=cell_types, columns=groups)
 
-    results = {}
-    for ct in cell_types:
-        is_type = (adata.obs["cell_type"] == ct)
-        table = np.array([
-            [int((is_type & (adata.obs[group_col] == g)).sum()) for g in groups],
-            [int((~is_type & (adata.obs[group_col] == g)).sum()) for g in groups],
-        ])
+    per_img = None
+    if img_col is not None:
+        per_img = pd.crosstab(obs[img_col].astype(str), ct, normalize="index") * 100
+        img_group = obs.groupby(obs[img_col].astype(str))[group_col].agg(lambda s: s.astype(str).mode().iloc[0])
+        per_img[group_col] = img_group.reindex(per_img.index)
+        per_img.to_csv(os.path.join(data_dir, f"cell_type_pct_per_image_by_{group_col}.csv"))
+
+    rows = {}
+    for c in cell_types:
+        is_type = (ct == c)
+        table = np.array([[int((is_type & (gr == g)).sum()) for g in groups],
+                          [int((~is_type & (gr == g)).sum()) for g in groups]])
         try:
-            chi2, p, _, _ = chi2_contingency(table)
+            chi2, p_chi, _, _ = chi2_contingency(table)
         except ValueError:
-            chi2, p = np.nan, np.nan
-        results[ct] = {"chi2": chi2, "p_value": p,
-                       "significant": bool(p < 0.05) if pd.notna(p) else False}
+            chi2, p_chi = np.nan, np.nan
+        p_img = np.nan
+        if per_img is not None and c in per_img.columns:
+            samples = [per_img.loc[per_img[group_col] == g, c].dropna().values for g in groups]
+            if all(len(s) > 1 for s in samples):
+                try:
+                    p_img = (mannwhitneyu(samples[0], samples[1], alternative="two-sided").pvalue
+                             if len(groups) == 2 else kruskal(*samples).pvalue)
+                except ValueError:
+                    p_img = np.nan
+        rows[c] = {"chi2_pooled_cells": chi2, "p_chi2_pooled_cells": p_chi,
+                   "p_per_image": p_img,
+                   **{f"median_pct_{g}": (float(per_img.loc[per_img[group_col] == g, c].median())
+                                          if per_img is not None and c in per_img.columns else np.nan)
+                      for g in groups}}
+    stats = pd.DataFrame(rows).T
+    stats["q_per_image_bh"] = bh_fdr(stats["p_per_image"].values)
+    use_q = stats["q_per_image_bh"].notna().any()
+    stats["significant"] = (stats["q_per_image_bh"] < 0.05) if use_q else (stats["p_chi2_pooled_cells"] < 0.05)
+    stats["test_used"] = "per-image Mann-Whitney/Kruskal, BH" if use_q else "pooled chi-square (no image column)"
+    stats.to_csv(os.path.join(data_dir, f"cell_type_{group_col}_chi2_statistics.csv"))
+    qcol = "q_per_image_bh" if use_q else "p_chi2_pooled_cells"
+    test_note = ("per-image Mann-Whitney, BH q<0.05" if use_q else "pooled chi-square p<0.05")
+    colors = [group_color(g) for g in groups]
 
-    chi2_df = pd.DataFrame(results).T
-    chi2_df.to_csv(os.path.join(data_dir, f"cell_type_{group_col}_chi2_statistics.csv"))
-
-    sig = chi2_df[chi2_df["significant"]]
+    sig = stats[stats["significant"]]
     if not sig.empty:
         sig_pct = pct.loc[sig.index]
         fig, ax = plt.subplots(figsize=(11, max(4, 0.5 * len(sig) + 2)))
-        sig_pct.plot(kind="barh", ax=ax)
-        ax.set_title(f"Cell Types Significantly Different Across {group_col} (p<0.05)", fontsize=12)
-        ax.set_xlabel("% of cells")
+        sig_pct.plot(kind="barh", ax=ax, color=colors, edgecolor="white")
+        xmax = float(np.nanmax(sig_pct.values))
+        for yi, c in enumerate(sig_pct.index):
+            ax.text(xmax * 1.02, yi, f"{p_to_stars(stats.loc[c, qcol])} q={stats.loc[c, qcol]:.2g}",
+                    va="center", fontsize=8)
+        ax.set_xlim(0, xmax * 1.25)
+        ax.set_title(f"Cell types different across {group_col} ({test_note})", fontsize=12)
+        ax.set_xlabel("% of cells within group")
+        ax.set_ylabel("Cell type")
         ax.legend(title=group_col, bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=8)
         ax.spines[["top", "right"]].set_visible(False)
         plt.tight_layout()
@@ -2547,20 +2851,29 @@ def plot_group_statistics(adata, group_col: str, plot_dir: str, data_dir: str, f
 
     if len(groups) == 2:
         diff = (pct[groups[1]] - pct[groups[0]]).sort_values()
-        fig, ax = plt.subplots(figsize=(9, max(4, 0.35 * len(diff) + 2)))
-        colors = ["indianred" if v > 0 else "steelblue" for v in diff.values]
-        ax.barh(diff.index.astype(str), diff.values, color=colors)
+        fig, ax = plt.subplots(figsize=(9.5, max(4, 0.35 * len(diff) + 2)))
+        bar_c = [group_color(groups[1]) if v > 0 else group_color(groups[0]) for v in diff.values]
+        ax.barh(diff.index.astype(str), diff.values, color=bar_c)
+        span = float(np.nanmax(np.abs(diff.values))) if len(diff) else 1.0
+        for yi, (c, v) in enumerate(diff.items()):
+            q = stats.loc[c, qcol]
+            if pd.notna(q) and q < 0.05:
+                ax.text(v + (0.02 * span if v >= 0 else -0.02 * span), yi, p_to_stars(q),
+                        va="center", ha="left" if v >= 0 else "right", fontsize=9)
+        ax.set_xlim(-span * 1.2, span * 1.2)
         ax.axvline(0, color="black", linewidth=0.8)
-        ax.set_title(f"Cell Type % Difference: {groups[1]} vs {groups[0]}", fontsize=12)
+        ax.set_title(f"Cell type % difference: {groups[1]} − {groups[0]}\n"
+                     f"(bar colour = group with more; * = {test_note})", fontsize=12)
         ax.set_xlabel("Percentage-point difference")
+        ax.set_ylabel("Cell type")
         ax.spines[["top", "right"]].set_visible(False)
         plt.tight_layout()
         _savefig(fig, os.path.join(plot_dir, f"cell_type_{group_col}_difference"), formats)
         plt.close(fig)
 
-    n_sig = int(chi2_df["significant"].sum())
-    print(f"  [diagnostics] Group statistics ({group_col}, {len(groups)} groups): "
-          f"{n_sig}/{len(cell_types)} cell types significant (p<0.05) -- "
+    n_sig = int(stats["significant"].sum())
+    print(f"  [diagnostics] Group statistics ({group_col}, {len(groups)} groups, {test_note}): "
+          f"{n_sig}/{len(cell_types)} cell types significant -- "
           f"{data_dir}/cell_type_{group_col}_chi2_statistics.csv")
 
 
@@ -3113,7 +3426,8 @@ def generate_cell_typing_diagnostics(adata, thresholds: dict, fit_info: dict, co
                                       transform: str = "none", arcsinh_cofactor: float = 5.0,
                                       group_col: str = "experiment_group",
                                       tissue_col: str = "tissue_id",
-                                      random_state: int = 42, formats=("png", "pdf")):
+                                      random_state: int = 42, formats=("png", "pdf"),
+                                      umap_cfg: Optional[dict] = None):
     """
     Full diagnostic plot suite for a completed cell_typing run. Called once
     from run_cell_typing() after _save_and_plot(), for both automatic and
@@ -3154,7 +3468,8 @@ def generate_cell_typing_diagnostics(adata, thresholds: dict, fit_info: dict, co
         print(f"  WARNING: grouped cell-type-by-group plot failed (non-fatal): {e}")
 
     try:
-        compute_and_plot_umaps(adata, plot_dir, data_dir, group_col, tissue_col, random_state, formats)
+        compute_and_plot_umaps(adata, plot_dir, data_dir, group_col, tissue_col, random_state, formats,
+                               umap_cfg=umap_cfg, column_map=column_map)
     except Exception as e:
         print(f"  WARNING: UMAP diagnostics failed (non-fatal): {e}")
 

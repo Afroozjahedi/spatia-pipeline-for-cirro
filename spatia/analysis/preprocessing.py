@@ -1083,11 +1083,13 @@ def run_qupath_export(cfg: dict) -> str:
     os.makedirs(qcviz_dir,  exist_ok=True)
 
     COLOR_MAP = {
-        "Included":             "#00D200",
-        "Excl_SmallArea":       "#FF3C3C",
-        "Excl_LowDAPI":         "#FFA500",
-        "Excl_SmallArea_LowDAPI": "#B400B4",
-        "Excl_Noise":           "#1E90FF",
+        # Darker, saturated colours (2026-11-05): the old neon green at
+        # s=1 / alpha 0.6 was almost invisible on white.
+        "Included":             "#006D2C",
+        "Excl_SmallArea":       "#CB181D",
+        "Excl_LowDAPI":         "#D95F02",
+        "Excl_SmallArea_LowDAPI": "#6A3D9A",
+        "Excl_Noise":           "#08519C",
     }
 
     slide_folders = [
@@ -1219,12 +1221,22 @@ def run_qupath_export(cfg: dict) -> str:
             ]:
                 if overlay_img is not None:
                     ax.imshow(overlay_img, cmap="gray")
-                colors = [COLOR_MAP.get(c, "grey") for c in subset["classification"]]
-                ax.scatter(subset["x"], subset["y"], c=colors, s=1, alpha=0.6)
-                ax.set_title(title, fontsize=12)
+                # Point size scales with cell count so small and large cores
+                # are both readable; one legend entry per class with counts.
+                pt = float(np.clip(150000.0 / max(len(df_raw), 1), 3.0, 30.0))
+                for cls, grp in subset.groupby("classification"):
+                    ax.scatter(grp["x"], grp["y"], color=COLOR_MAP.get(cls, "#444444"),
+                               s=pt, alpha=0.95, linewidths=0, label=f"{cls} ({len(grp):,})")
+                if overlay_img is None:
+                    ax.invert_yaxis()
+                ax.set_aspect("equal")
+                ax.set_title(f"{title} ({len(subset):,} cells)", fontsize=12)
+                if len(subset):
+                    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.01), ncol=2,
+                              fontsize=9, markerscale=max(1.0, 8 / pt ** 0.5), frameon=False)
                 ax.axis("off")
             plt.tight_layout()
-            plt.savefig(os.path.join(qcviz_dir, f"{safe_id}_QC_spatial.png"), dpi=120, bbox_inches="tight")
+            plt.savefig(os.path.join(qcviz_dir, f"{safe_id}_QC_spatial.png"), dpi=150, bbox_inches="tight")
             plt.close()
             # Release this image overlay now that its QC plot is done --
             # this loop loads every slide overlay upfront (see the loading

@@ -1213,7 +1213,8 @@ def plot_trajectory(all_triads_combined, output_dir, radius_um, experiment_group
     if all_triads_combined is None or all_triads_combined.empty:
         return
 
-    colors     = {c: col for c, col in zip(experiment_groups, ["steelblue", "tomato", "seagreen", "darkorange"])}
+    from spatia.analysis.plot_style import group_palette
+    colors     = group_palette(experiment_groups)  # shared CLR/DII colours
     linestyles = {c: ls  for c, ls  in zip(experiment_groups, ["-", "--", "-.", ":"])}
     thresholds = np.linspace(trajectory_min_um, radius_um, 300)
 
@@ -1344,9 +1345,52 @@ def compute_triad_group_significance(summary_df: pd.DataFrame, experiment_groups
     return pd.DataFrame(rows)
 
 
+
+def plot_permutation_enrichment(perm_df, pooled, experiment_groups, out_dir):
+    """Per-image triad enrichment (observed / permutation expected), one dot
+    per image, by experiment group, with the pooled cohort enrichment and the
+    between-group Mann-Whitney p (added 2026-11-05)."""
+    from scipy.stats import mannwhitneyu
+    from spatia.analysis.plot_style import group_color, add_sig_bracket
+    e = perm_df[perm_df["experiment_group"].isin(experiment_groups)].copy()
+    if e.empty:
+        return
+    e["log2_enrichment"] = np.log2((e["observed"] + 0.5) / (e["expected"] + 0.5))
+    groups = [g for g in experiment_groups if (e["experiment_group"] == g).any()]
+    fig, ax = plt.subplots(figsize=(1.9 * len(groups) + 3, 5.5))
+    rng = np.random.default_rng(0)
+    data, data_labels = [], []
+    for i, g in enumerate(groups):
+        d = e.loc[e["experiment_group"] == g, "log2_enrichment"].values
+        data.append(d)
+        bp = ax.boxplot([d], positions=[i], widths=0.55, patch_artist=True, showfliers=False,
+                        medianprops=dict(color="black", linewidth=2))
+        bp["boxes"][0].set_facecolor(group_color(g)); bp["boxes"][0].set_alpha(0.75)
+        sig = e.loc[e["experiment_group"] == g, "p_enriched"].values < 0.05
+        ax.scatter(i + rng.uniform(-0.13, 0.13, len(d)), d, s=18,
+                   c=np.where(sig, "black", "#777777"), zorder=3, linewidths=0)
+        row = pooled[pooled["group"] == g]
+        lab = (f"{g}\n{len(d)} images\npooled {row['enrichment'].iloc[0]:.2f}×  p={row['p_enriched'].iloc[0]:.3g}"
+               if not row.empty else f"{g}\n{len(d)} images")
+        data_labels.append(lab)
+    ax.axhline(0, color="black", linestyle="--", linewidth=1)
+    ax.set_xticks(range(len(groups)))
+    ax.set_xticklabels(data_labels, fontsize=8)
+    ax.set_ylabel("log2(observed / expected triads)\n(> 0 = more than chance)")
+    if len(groups) == 2 and all(len(d) > 1 for d in data):
+        p = mannwhitneyu(data[0], data[1], alternative="two-sided").pvalue
+        add_sig_bracket(ax, 0, 1, max(np.max(data[0]), np.max(data[1])) + 0.2, p,
+                        label_fmt="{stars} per-image Mann-Whitney p={p:.2g}", fontsize=8)
+    ax.set_title("Triad enrichment vs label-shuffle null\n(black dot = image p<0.05)", fontsize=11)
+    ax.spines[["top", "right"]].set_visible(False)
+    plt.tight_layout()
+    fig.savefig(os.path.join(out_dir, "triad_permutation_enrichment_by_group.png"), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
 def plot_experiment_group_comparison(summary_df, all_triads_combined, output_dir, radius_um, experiment_group_areas, experiment_groups,
                               report_radius_um=None, trajectory_min_um=0, significance_df=None):
-    colors = {c: col for c, col in zip(experiment_groups, ["steelblue", "tomato", "seagreen", "darkorange"])}
+    from spatia.analysis.plot_style import group_palette
+    colors = group_palette(experiment_groups)  # shared CLR/DII colours (plot_style)
     summary_df = summary_df[summary_df["experiment_group"].isin(experiment_groups)].copy()
     if summary_df.empty:
         return
@@ -1741,12 +1785,29 @@ def run_triad_analysis(cfg: dict) -> None:
         image_triad_dfs = []
         image_summary   = []
 
+        def _zero_row(at, p1t, p2t):
+            # 2026-11-05: images with no triads now get an explicit 0 row
+            # (configured combo only), so per-image group tests and
+            # densities include them instead of silently dropping zeros.
+            return {
+                "image_id": image_id, "experiment_group": experiment_group,
+                "anchor_type": at, "partner1_type": p1t, "partner2_type": p2t,
+                "combo_label": f"{at}__{p1t}__{p2t}", "n_triads": 0,
+                "radius_um": radius_um, "radius_px": round(radius_px, 3),
+                "mean_dist_anchor_p1_um": np.nan, "mean_dist_anchor_p2_um": np.nan,
+                "mean_dist_p1_p2_um": np.nan,
+            }
+
         for (at, p1t, p2t) in combos:
             if at not in cell_types or p1t not in cell_types or p2t not in cell_types:
+                if len(combos) == 1:
+                    image_summary.append(_zero_row(at, p1t, p2t))
                 continue
             triad_df = find_triads(df, at, p1t, p2t, radius_px, tree, mpp)
             n = len(triad_df)
             if n < min_triad_size:
+                if len(combos) == 1:
+                    image_summary.append(_zero_row(at, p1t, p2t))
                 continue
 
             combo_label = f"{at}__{p1t}__{p2t}"
@@ -1795,6 +1856,12 @@ def run_triad_analysis(cfg: dict) -> None:
             )
         else:
             print(f"  ⚠️  No triads found at radius={radius_um} µm")
+            # Still write the flags file (all False) so the functional step
+            # can use this image's cells as out-of-triad comparison cells.
+            # No triad_pairs file is written, so caching is unaffected.
+            for _c in ("is_triad_anchor", "is_triad_partner1", "is_triad_partner2", "in_any_triad"):
+                df[_c] = False
+            df.to_csv(os.path.join(triad_data_dir, f"{image_id}_cells_with_triad_flags.csv"), index=False)
 
         all_summary_rows.extend(image_summary)
         print()
@@ -1818,6 +1885,11 @@ def run_triad_analysis(cfg: dict) -> None:
         pooled.to_csv(os.path.join(triad_data_dir, "triad_permutation_pooled.csv"), index=False)
         print("\n[SPATIA] Permutation null — pooled enrichment (observed / expected):")
         print(pooled.to_string(index=False))
+        try:
+            plot_permutation_enrichment(perm_df, pooled, experiment_groups, triad_data_dir)
+        except Exception as e:
+            plt.close("all")
+            print(f"  ⚠️  permutation enrichment plot failed (non-fatal): {e}")
         # carry per-image enrichment into the summary for downstream steps
         summary_df = summary_df.merge(perm_df[["image_id", "expected", "enrichment", "z", "p_enriched"]]
                                       .rename(columns={"expected": "perm_expected", "enrichment": "triad_enrichment",

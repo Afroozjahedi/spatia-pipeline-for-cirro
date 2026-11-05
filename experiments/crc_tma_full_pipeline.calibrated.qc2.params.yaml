@@ -102,6 +102,12 @@
 # update it (and this note) once it is.
 # ============================================================
 
+# Same colour for each experiment group in every step's plots (plot_style.py)
+plotting:
+  experiment_group_colors:
+    CLR: "#2166AC"   # blue
+    DII: "#B2182B"   # red
+
 experiment:
   name: "CRC_TMA_full"
   description: "CRC TMA — full pipeline demo from raw core images through triads"

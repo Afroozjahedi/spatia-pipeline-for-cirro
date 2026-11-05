@@ -589,6 +589,13 @@ def main():
         print("Make sure the spatia package is on your PYTHONPATH.", file=sys.stderr)
         sys.exit(1)
 
+    # One colour per experiment group for every step (plotting.experiment_group_colors)
+    try:
+        from spatia.analysis.plot_style import set_group_colors
+        print(f"[plot_style] experiment group colours: {set_group_colors(cfg)}")
+    except Exception as exc:
+        print(f"[plot_style] WARNING: could not load group colours: {exc}")
+
     # ── Execute steps ─────────────────────────────────────────────────────
     pipeline_start = time.time()
     results        = {}

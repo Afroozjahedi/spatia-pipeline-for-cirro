@@ -80,19 +80,14 @@ except ImportError:
     ad = None
 
 
-GROUP_COLORS = {
-    # Falls back to matplotlib's default cycle for any group name not listed
-    # here, so this isn't a hard dependency on exactly two groups named
-    # CLR/DII -- it degrades gracefully for other configs.
-}
-_DEFAULT_CYCLE = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+# Shared with every step via plot_style (2026-11-05): CLR/DII colours come
+# from plotting.experiment_group_colors in the config, defaulting to
+# CLR blue / DII red.
+from spatia.analysis.plot_style import GROUP_COLORS, group_color, add_sig_bracket, bh_fdr, p_to_stars
 
 
 def _color_for(group: str, groups_in_order: list) -> str:
-    if group in GROUP_COLORS:
-        return GROUP_COLORS[group]
-    idx = groups_in_order.index(group) if group in groups_in_order else 0
-    return _DEFAULT_CYCLE[idx % len(_DEFAULT_CYCLE)]
+    return group_color(group, groups_in_order)
 
 
 def _all_stats_csvs(log_dir: str) -> list:
@@ -224,7 +219,9 @@ def make_group_comparison_report(stats: pd.DataFrame, groups_in_order: list, out
         labels = [g for g in groups_in_order if g in done["experiment_group"].unique()]
         colors = [_color_for(g, groups_in_order) for g in labels]
 
-        bp = ax.boxplot(data_by_group, labels=labels, patch_artist=True, showmeans=True)
+        bp = ax.boxplot(data_by_group, patch_artist=True, showmeans=True)
+        ax.set_xticks(range(1, len(labels) + 1))
+        ax.set_xticklabels(labels)  # works on old and new matplotlib (labels= was removed in 3.10)
         for patch, color in zip(bp["boxes"], colors):
             patch.set_facecolor(color)
             patch.set_alpha(0.6)
@@ -232,8 +229,15 @@ def make_group_comparison_report(stats: pd.DataFrame, groups_in_order: list, out
             jitter = np.random.default_rng(0).normal(0, 0.04, size=len(d))
             ax.scatter(np.full(len(d), i) + jitter, d, s=8, color="black", alpha=0.4, zorder=3)
 
+        if len(data_by_group) == 2 and all(len(d) > 1 for d in data_by_group):
+            from scipy.stats import mannwhitneyu
+            p = mannwhitneyu(data_by_group[0], data_by_group[1], alternative="two-sided").pvalue
+            ymax = max(np.nanmax(d) for d in data_by_group)
+            add_sig_bracket(ax, 1, 2, ymax * 1.05 if ymax > 0 else ymax + 1, p,
+                            label_fmt="{stars}  Mann-Whitney p={p:.2g}")
         ax.set_title(metric.replace("_", " "))
         ax.set_ylabel(metric)
+        ax.set_xlabel("experiment group (one dot = one image)")
 
     n_tissues = done.groupby("experiment_group")["tissue_id"].nunique()
     n_images = done.groupby("experiment_group").size()
@@ -463,13 +467,35 @@ def make_marker_level_report(tissues_dir: str, groups_in_order: list, out_dir: s
     if len(present_groups) == 2:
         g1, g2 = present_groups
         diff = (group_marker_means.loc[g1] - group_marker_means.loc[g2]).sort_values()
-        bar_colors = ["#C1666B" if v < 0 else "#4C9F70" for v in diff.values]
-        fig, ax = plt.subplots(figsize=(7, max(8, len(diff) * 0.22)))
+        # Per-marker Mann-Whitney on the per-image means (one value per
+        # image x group), BH-FDR across markers (added 2026-11-05).
+        from scipy.stats import mannwhitneyu
+        pvals = {}
+        for mk in diff.index:
+            a = means_df.loc[means_df["experiment_group"] == g1, mk].dropna().values
+            b = means_df.loc[means_df["experiment_group"] == g2, mk].dropna().values
+            pvals[mk] = (mannwhitneyu(a, b, alternative="two-sided").pvalue
+                         if len(a) > 1 and len(b) > 1 else np.nan)
+        qvals = dict(zip(diff.index, bh_fdr([pvals[m] for m in diff.index])))
+        pd.DataFrame({"diff": diff, "p_mannwhitney": pd.Series(pvals), "q_bh": pd.Series(qvals)}
+                     ).to_csv(os.path.join(out_dir, "marker_level_by_group_stats.csv"))
+        bar_colors = [group_color(g2) if v < 0 else group_color(g1) for v in diff.values]
+        fig, ax = plt.subplots(figsize=(7.5, max(8, len(diff) * 0.22)))
         ax.barh(diff.index, diff.values, color=bar_colors)
+        span = float(np.nanmax(np.abs(diff.values))) if len(diff) else 1.0
+        for yi, (mk, v) in enumerate(diff.items()):
+            q = qvals.get(mk, np.nan)
+            if np.isfinite(q) and q < 0.05:
+                ax.text(v + (0.02 * span if v >= 0 else -0.02 * span), yi, p_to_stars(q),
+                        va="center", ha="left" if v >= 0 else "right", fontsize=7)
         ax.axvline(0, color="black", linewidth=0.8)
+        ax.set_xlim(-span * 1.2, span * 1.2)
         ax.set_xlabel(f"Δ mean per-cell z-score ({g1} − {g2})")
+        ax.set_ylabel("Marker")
         ax.set_title(f"Marker expression difference by experiment_group\n"
-                     f"({g1} higher →       ← {g2} higher)")
+                     f"({g1} higher →       ← {g2} higher)   * BH q<0.05 (per-image Mann-Whitney)\n"
+                     f"Note: values are per-image z-scores, so between-image level\n"
+                     f"differences are removed by construction")
         ax.tick_params(axis="y", labelsize=7)
         plt.tight_layout()
     else:

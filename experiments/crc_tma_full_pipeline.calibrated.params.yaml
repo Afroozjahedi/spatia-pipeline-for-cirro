@@ -100,6 +100,12 @@
 # update it (and this note) once it is.
 # ============================================================
 
+# Same colour for each experiment group in every step's plots (plot_style.py)
+plotting:
+  experiment_group_colors:
+    CLR: "#2166AC"   # blue
+    DII: "#B2182B"   # red
+
 experiment:
   name: "CRC_TMA_full"
   description: "CRC TMA — full pipeline demo from raw core images through triads"
@@ -248,6 +254,11 @@ preprocessing:
     enabled: true
 
 cell_typing:
+  # UMAP on lineage markers only (optional). Uncomment to try:
+  # umap:
+  #   markers: [CD45, CD3, CD4, CD8, FOXP3, CD20, CD138, CD68, CD163, CD11c, CD15, CD56, CK, CDX2, aSMA, CD31, Podoplanin, Vimentin]
+  #   n_neighbors: 15
+  #   min_dist: 0.5
   mode: "automatic"
   # This is a TMA: preprocessing.py pools per-region (each reg069/reg070/...
   # core is its own tissue_id after coordinate/group stripping -- see
