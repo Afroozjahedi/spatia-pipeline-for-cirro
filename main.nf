@@ -162,13 +162,20 @@ process run_spatia_pipeline {
 workflow {
     config_ch      = Channel.fromPath(params.config)
     samplesheet_ch = Channel.fromPath(params.samplesheet)
-    // No previous segmentation -> pass a tiny placeholder FILE; the process
-    // only copies when the staged input is a DIRECTORY.
+    // No previous results -> pass a tiny placeholder FILE; the process only
+    // copies when the staged input is a DIRECTORY. 2026-11-09: placeholders
+    // are now written to the work dir at run time -- the repo's .gitignore
+    // ignores everything outside spatia/ etc., so assets/NO_FILE was never
+    // pushed and Nextflow failed with "Can't stage file .../assets/NO_FILE".
+    def noSeg = file("${workflow.workDir}/spatia_placeholders/NO_PREVIOUS_SEGMENTATION")
+    def noPre = file("${workflow.workDir}/spatia_placeholders/NO_PREVIOUS_PREPROCESSING")
+    if( !noSeg.exists() ) { noSeg.parent.mkdirs(); noSeg.text = 'none\n' }
+    if( !noPre.exists() ) { noPre.parent.mkdirs(); noPre.text = 'none\n' }
     prev_seg_ch    = params.previous_segmentation
                        ? Channel.fromPath(params.previous_segmentation, type: 'dir', checkIfExists: true)
-                       : Channel.fromPath("${projectDir}/assets/NO_FILE")
+                       : Channel.value(noSeg)
     prev_pre_ch    = params.previous_preprocessing
                        ? Channel.fromPath(params.previous_preprocessing, type: 'dir', checkIfExists: true)
-                       : Channel.fromPath("${projectDir}/assets/NO_FILE_2")
+                       : Channel.value(noPre)
     run_spatia_pipeline(config_ch, samplesheet_ch, prev_seg_ch, prev_pre_ch)
 }
