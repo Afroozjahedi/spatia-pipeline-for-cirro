@@ -21,8 +21,18 @@
    },
    "previous_run_dataset_id": {
     "type": "string",
-    "title": "Reuse segmentation from run (optional)",
-    "description": "Paste the dataset ID of a previous COMPLETED run in this project (the long ID in its URL after /dataset/, e.g. 5fdb13f8-54f1-4f16-b337-133204287fad), or the full s3:// path to its results/segmentation_results folder. Segmentation is then copied from that run instead of being redone (~1.5 h saved), and the raw images are not downloaded. Leave blank to segment from scratch."
+    "title": "Reuse results from run (optional)",
+    "description": "Paste the dataset ID of a previous COMPLETED run in this project (the long ID in its URL after /dataset/, e.g. fbbce745-4fd9-47f6-a9d9-27b2d175563f), or the s3:// path to that run's results folder. The steps chosen in 'Reuse through' are copied from that run instead of being redone. Leave blank to run everything."
+   },
+   "reuse_through": {
+    "type": "string",
+    "title": "Reuse through step",
+    "enum": [
+     "segmentation",
+     "preprocessing"
+    ],
+    "default": "segmentation",
+    "description": "Only used when 'Reuse results from run' is filled. segmentation = reuse segmentation, redo preprocessing onward. preprocessing = reuse segmentation AND preprocessing, start at cell typing (use only if preprocessing settings are unchanged)."
    }
   },
   "required": [

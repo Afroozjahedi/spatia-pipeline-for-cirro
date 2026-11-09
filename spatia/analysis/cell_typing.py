@@ -1253,6 +1253,22 @@ def run_cell_typing(cfg: dict) -> None:
     print(f"[cell_typing] Transform  : {gmm_transform}")
 
     # ── Load data ─────────────────────────────────────────────
+    # 2026-11-09: when preprocessing was skipped (results reused from a
+    # previous run), the pooled cohort file isn't there -- it was written
+    # outside results/ and never published. Rebuild it from the per-tissue
+    # h5ads in results/combined_processed_data/individual_processed_data,
+    # exactly as preprocessing does.
+    if not os.path.exists(input_file):
+        tissues_dir = os.path.join(output_dir, "combined_processed_data", "individual_processed_data")
+        if glob.glob(os.path.join(tissues_dir, "*_combined_all_experiment_groups.h5ad")):
+            print(f"[cell_typing] {input_file} not found -- pooling per-tissue h5ads from {tissues_dir}")
+            import sys as _sys
+            _repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            if _repo_root not in _sys.path:
+                _sys.path.insert(0, _repo_root)
+            from pool_tissues_for_celltyping import pool_tissues
+            os.makedirs(os.path.dirname(os.path.abspath(input_file)), exist_ok=True)
+            pool_tissues(tissues_dir, input_file, "*_combined_all_experiment_groups.h5ad", "inner")
     adata = sc.read(input_file)
     print(f"[cell_typing] Loaded {adata.n_obs:,} cells × {adata.n_vars} markers")
     use_raw = _resolve_intensity_source(adata, ct_cfg.get("intensity_source", "auto"))

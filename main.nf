@@ -86,6 +86,11 @@ params.skip_steps   = params.skip_steps   ?: ''
 // results/segmentation_results, and preprocess.py has already added
 // segmentation to skip_steps. Empty = segment from scratch (old behaviour).
 params.previous_segmentation = params.previous_segmentation ?: ''
+// previous_preprocessing -- added 2026-11-09. S3 folder with a previous run's
+// results/combined_processed_data (per-tissue h5ads). Set by preprocess.py
+// when "Reuse through step" = preprocessing; copied to
+// results/combined_processed_data so cell typing can start directly.
+params.previous_preprocessing = params.previous_preprocessing ?: ''
 
 process run_spatia_pipeline {
     tag "${params.config}"
@@ -122,6 +127,7 @@ process run_spatia_pipeline {
     path config_file
     path samplesheet_file
     path prev_seg, stageAs: 'prev_segmentation_input'
+    path prev_pre, stageAs: 'prev_preprocessing_input'
 
     output:
     path "results/**", emit: results
@@ -143,6 +149,12 @@ process run_spatia_pipeline {
         cp -rL prev_segmentation_input/. results/segmentation_results/
         echo "  copied \$(find results/segmentation_results -name '*_mesmer_result.csv' | wc -l) mesmer result files"
     fi
+    if [ -d prev_preprocessing_input ]; then
+        echo "Reusing previous preprocessing from ${params.previous_preprocessing}"
+        mkdir -p results/combined_processed_data
+        cp -rL prev_preprocessing_input/. results/combined_processed_data/
+        echo "  copied \$(find results/combined_processed_data -name '*_combined_all_experiment_groups.h5ad' | wc -l) tissue h5ad files"
+    fi
     python /app/run_pipeline.py --config ${config_file} --samplesheet ${samplesheet_file} --expected-commit ${workflow.commitId ?: ''} ${steps_arg} ${skip_arg}
     """
 }
@@ -155,5 +167,8 @@ workflow {
     prev_seg_ch    = params.previous_segmentation
                        ? Channel.fromPath(params.previous_segmentation, type: 'dir', checkIfExists: true)
                        : Channel.fromPath("${projectDir}/assets/NO_FILE")
-    run_spatia_pipeline(config_ch, samplesheet_ch, prev_seg_ch)
+    prev_pre_ch    = params.previous_preprocessing
+                       ? Channel.fromPath(params.previous_preprocessing, type: 'dir', checkIfExists: true)
+                       : Channel.fromPath("${projectDir}/assets/NO_FILE_2")
+    run_spatia_pipeline(config_ch, samplesheet_ch, prev_seg_ch, prev_pre_ch)
 }

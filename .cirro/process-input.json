@@ -5,5 +5,6 @@
   "outdir": "$.dataset.dataPath",
   "steps_to_run": "$.dataset.params.steps_to_run",
   "skip_steps": "$.dataset.params.skip_steps",
-  "previous_run_dataset_id": "$.dataset.params.previous_run_dataset_id"
+  "previous_run_dataset_id": "$.dataset.params.previous_run_dataset_id",
+  "reuse_through": "$.dataset.params.reuse_through"
 }
