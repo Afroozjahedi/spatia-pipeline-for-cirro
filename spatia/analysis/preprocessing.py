@@ -723,7 +723,25 @@ def run_preprocessing(cfg: dict) -> dict:
                     })
                     import traceback; traceback.print_exc()
 
-            print(f"  Generating marker visualisations for {slide_folder}...")
+            # Speed-up 2026-11-05: this loop took ~27 min per slide folder
+            # (~1h50m of the 1h57m preprocessing step on the 130-core CRC
+            # run) because every one of ~80 panels re-drew the full-resolution
+            # core image. The image is now downsampled ONCE per core to at
+            # most marker_viz_max_px on its long side (coordinates scaled to
+            # match), scatter points are rasterized, and dpi is 100.
+            # preprocessing.marker_visualizations: false skips it entirely;
+            # preprocessing.marker_viz_markers: [..] limits it to a subset.
+            viz_on = bool(pp_cfg.get("marker_visualizations", True))
+            viz_max_px = int(pp_cfg.get("marker_viz_max_px", 800))
+            viz_subset = pp_cfg.get("marker_viz_markers")
+            if not viz_on:
+                print(f"  Marker visualisations off (preprocessing.marker_visualizations: false)")
+                for _tid, _ti in this_folder_tinfo:
+                    overlay_mapping.pop(_ti["image_id"], None)
+                    overlay_mapping.pop(_ti["image_id"] + "_", None)
+                this_folder_tinfo = []
+            else:
+                print(f"  Generating marker visualisations for {slide_folder}...")
             for tissue_id, tinfo in this_folder_tinfo:
                 image_id = tinfo["image_id"]
                 try:
@@ -752,8 +770,17 @@ def run_preprocessing(cfg: dict) -> dict:
                         tinfo.get("nuclei_col", "DAPI"),
                     }
                     all_markers = [c for c in df_tissue.columns if c not in METADATA]
+                    if viz_subset:
+                        all_markers = [c for c in all_markers
+                                       if c in viz_subset or c.split(" (")[0] in viz_subset]
                     if not all_markers:
                         continue
+
+                    img_full = np.asarray(overlay["img"])
+                    step = max(1, int(np.ceil(max(img_full.shape[:2]) / viz_max_px)))
+                    img_small = img_full[::step, ::step]
+                    xs = df_tissue["x"].to_numpy() / step
+                    ys = df_tissue["y"].to_numpy() / step
 
                     n_cols = 5
                     n_rows = int(np.ceil(len(all_markers) / n_cols))
@@ -763,12 +790,13 @@ def run_preprocessing(cfg: dict) -> dict:
 
                     for i, marker in enumerate(all_markers):
                         ax = axes_flat[i]
-                        ax.imshow(overlay["img"], cmap="gray")
+                        ax.imshow(img_small, cmap="gray", interpolation="nearest")
                         sc = ax.scatter(
-                            df_tissue["x"], df_tissue["y"],
+                            xs, ys,
                             c=df_tissue[marker], s=2, cmap="viridis", alpha=0.7,
                             vmin=df_tissue[marker].quantile(0.01),
                             vmax=df_tissue[marker].quantile(0.99),
+                            rasterized=True, linewidths=0,
                         )
                         plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
                         ax.set_title(marker, fontsize=10)
@@ -778,7 +806,7 @@ def run_preprocessing(cfg: dict) -> dict:
                         axes_flat[j].axis("off")
 
                     plt.tight_layout()
-                    plt.savefig(viz_path, dpi=150, bbox_inches="tight")
+                    plt.savefig(viz_path, dpi=100, bbox_inches="tight")
                     plt.close()
                     print(f"  ✓ Saved viz: {viz_path}")
                 finally:

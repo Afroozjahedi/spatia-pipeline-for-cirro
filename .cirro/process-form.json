@@ -1,27 +1,32 @@
 {
-  "_comment": "UPDATED 2026-09-29 -- samplesheet removed from this form. Per Cirro admin (Dima): the samplesheet now lives on the DATASET itself via Cirro's native \"Upload Samplesheet\" feature (see the Samples/Datasets docs), not as a per-run browser upload here. process-input.json now reads it straight from the dataset's own S3 prefix instead of decoding an uploaded blob. This form now carries only the pipeline params YAML, which still goes through preprocess.py's data-URI decode step (see .cirro/preprocess.py) since it is still a raw browser upload, not a native Cirro object.",
-  "form": {
-    "type": "object",
-    "properties": {
-      "config_file": {
-        "type": "string",
-        "format": "file",
-        "title": "SPATIA pipeline params (.yaml)",
-        "description": "Pipeline parameters only -- thresholds, which steps run, marker panel, etc. No sample paths or metadata (those come from the dataset's own samplesheet, uploaded via Cirro's native Samples/Upload Samplesheet feature)."
-      },
-      "steps_to_run": {
-        "type": "string",
-        "title": "Steps to run (optional)",
-        "description": "Comma-separated list of steps to run, e.g. 'cell_typing' or 'cell_typing,triads' to skip everything upstream of cell typing. Leave blank to run every step enabled in the config YAML (default, unchanged behavior). Valid names: tif_conversion, roi_masking, segmentation, preprocessing, cell_typing, triads, functional, survival. An invalid name fails the run immediately with a clear error rather than running the wrong thing. If you restrict to a downstream step like cell_typing, make sure the config's input path (e.g. cell_typing.input_file) already points at a completed prior run's output -- skipping a step does not fetch its input for you."
-      },
-      "skip_steps": {
-        "type": "string",
-        "title": "Steps to skip (optional)",
-        "description": "Comma-separated list of steps to skip even though they're enabled in the config YAML, e.g. 'tif_conversion,roi_masking,segmentation' to start from preprocessing. Leave blank to skip nothing beyond what the config already disables (default, unchanged behavior). Same valid names and same input-path caveat as 'Steps to run' above. If both fields are set, 'Steps to run' is narrowed further by 'Steps to skip' (skip wins for any step named in both)."
-      }
-    },
-    "required": [
-      "config_file"
-    ]
-  }
+ "_comment": "UPDATED 2026-09-29 -- samplesheet removed from this form. Per Cirro admin (Dima): the samplesheet now lives on the DATASET itself via Cirro's native \"Upload Samplesheet\" feature (see the Samples/Datasets docs), not as a per-run browser upload here. process-input.json now reads it straight from the dataset's own S3 prefix instead of decoding an uploaded blob. This form now carries only the pipeline params YAML, which still goes through preprocess.py's data-URI decode step (see .cirro/preprocess.py) since it is still a raw browser upload, not a native Cirro object.",
+ "form": {
+  "type": "object",
+  "properties": {
+   "config_file": {
+    "type": "string",
+    "format": "file",
+    "title": "SPATIA pipeline params (.yaml)",
+    "description": "Pipeline parameters only -- thresholds, which steps run, marker panel, etc. No sample paths or metadata (those come from the dataset's own samplesheet, uploaded via Cirro's native Samples/Upload Samplesheet feature)."
+   },
+   "steps_to_run": {
+    "type": "string",
+    "title": "Steps to run (optional)",
+    "description": "Comma-separated list of steps to run, e.g. 'cell_typing' or 'cell_typing,triads' to skip everything upstream of cell typing. Leave blank to run every step enabled in the config YAML (default, unchanged behavior). Valid names: tif_conversion, roi_masking, segmentation, preprocessing, cell_typing, triads, functional, survival. An invalid name fails the run immediately with a clear error rather than running the wrong thing. If you restrict to a downstream step like cell_typing, make sure the config's input path (e.g. cell_typing.input_file) already points at a completed prior run's output -- skipping a step does not fetch its input for you."
+   },
+   "skip_steps": {
+    "type": "string",
+    "title": "Steps to skip (optional)",
+    "description": "Comma-separated list of steps to skip even though they're enabled in the config YAML, e.g. 'tif_conversion,roi_masking,segmentation' to start from preprocessing. Leave blank to skip nothing beyond what the config already disables (default, unchanged behavior). Same valid names and same input-path caveat as 'Steps to run' above. If both fields are set, 'Steps to run' is narrowed further by 'Steps to skip' (skip wins for any step named in both)."
+   },
+   "previous_run_dataset_id": {
+    "type": "string",
+    "title": "Reuse segmentation from run (optional)",
+    "description": "Paste the dataset ID of a previous COMPLETED run in this project (the long ID in its URL after /dataset/, e.g. 5fdb13f8-54f1-4f16-b337-133204287fad), or the full s3:// path to its results/segmentation_results folder. Segmentation is then copied from that run instead of being redone (~1.5 h saved), and the raw images are not downloaded. Leave blank to segment from scratch."
+   }
+  },
+  "required": [
+   "config_file"
+  ]
+ }
 }

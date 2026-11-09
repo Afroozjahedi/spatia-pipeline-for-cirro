@@ -207,10 +207,9 @@ def run_functional_analysis(cfg: dict) -> None:
 
         # Recompute in-triad flags at func_radius (tighter than search radius)
         if not triad_pairs.empty and "dist_anchor_p1_um" in triad_pairs.columns:
-            pairs_report = triad_pairs[
-                triad_pairs[["dist_anchor_p1_um", "dist_anchor_p2_um"]].max(axis=1)
-                <= func_radius
-            ]
+            # triadic interaction distance = mean(anchor→p1, anchor→p2) (2026-11-09)
+            from spatia.analysis.triads import triad_distance_um
+            pairs_report = triad_pairs[triad_distance_um(triad_pairs) <= func_radius]
         else:
             pairs_report = pd.DataFrame()
 

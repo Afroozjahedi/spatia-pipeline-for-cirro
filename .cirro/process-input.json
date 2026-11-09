@@ -4,5 +4,6 @@
   "config_file_upload": "$.dataset.params.config_file",
   "outdir": "$.dataset.dataPath",
   "steps_to_run": "$.dataset.params.steps_to_run",
-  "skip_steps": "$.dataset.params.skip_steps"
+  "skip_steps": "$.dataset.params.skip_steps",
+  "previous_run_dataset_id": "$.dataset.params.previous_run_dataset_id"
 }

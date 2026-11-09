@@ -327,7 +327,7 @@ def _common_dir(paths: list) -> str:
     return "/".join(common)
 
 
-def _apply_samplesheet(cfg: dict, samplesheet_path: Path) -> dict:
+def _apply_samplesheet(cfg: dict, samplesheet_path: Path, stage_images: bool = True) -> dict:
     """
     Overrides cfg["experiment"]["image_experiment_group_map"] and
     cfg["paths"]["masked_roi_dir"] with sample metadata read from a
@@ -369,7 +369,14 @@ def _apply_samplesheet(cfg: dict, samplesheet_path: Path) -> dict:
         print(f"ERROR: {samplesheet_path} has no sample rows.", file=sys.stderr)
         sys.exit(2)
 
-    _stage_s3_files(rows, file_col, samplesheet_path.parent / "_staged_s3_images")
+    # 2026-11-05: raw images are only needed by tif_conversion / roi_masking /
+    # segmentation. When those are skipped (e.g. reusing a previous run's
+    # segmentation), don't download ~130 large TIFFs for nothing; the
+    # samplesheet is still read for the sample -> group map.
+    if stage_images:
+        _stage_s3_files(rows, file_col, samplesheet_path.parent / "_staged_s3_images")
+    else:
+        print("Samplesheet : segmentation not requested -- raw images NOT downloaded")
 
     # WIDENED 2026-09-30: this used to require every row's file to share the
     # EXACT SAME immediate parent directory, which broke the moment a
@@ -540,7 +547,10 @@ def main():
         sys.exit(2)
 
     if args.samplesheet:
-        cfg = _apply_samplesheet(cfg, Path(args.samplesheet))
+        _req = args.steps if args.steps else ALL_STEPS
+        _needs_images = any(s in _req and s not in set(args.skip)
+                            for s in ("tif_conversion", "roi_masking", "segmentation"))
+        cfg = _apply_samplesheet(cfg, Path(args.samplesheet), stage_images=_needs_images)
 
     exp_name = cfg.get("experiment", {}).get("name", config_path.stem)
 

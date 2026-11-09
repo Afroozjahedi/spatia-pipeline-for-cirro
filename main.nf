@@ -79,6 +79,13 @@ params.container    = params.container ?: "spatia-pipeline:latest"  // default f
 // cell_typing.input_file) already pointing at a completed prior run's output.
 params.steps_to_run = params.steps_to_run ?: ''
 params.skip_steps   = params.skip_steps   ?: ''
+// previous_segmentation -- added 2026-11-05. S3 folder holding a previous
+// run's results/segmentation_results (*_mesmer_result.csv + *_seg_output.pickle
+// per slide folder). Set by .cirro/preprocess.py from the "Reuse segmentation
+// from run" form field. When set, it is staged into this task and copied to
+// results/segmentation_results, and preprocess.py has already added
+// segmentation to skip_steps. Empty = segment from scratch (old behaviour).
+params.previous_segmentation = params.previous_segmentation ?: ''
 
 process run_spatia_pipeline {
     tag "${params.config}"
@@ -114,6 +121,7 @@ process run_spatia_pipeline {
     input:
     path config_file
     path samplesheet_file
+    path prev_seg, stageAs: 'prev_segmentation_input'
 
     output:
     path "results/**", emit: results
@@ -129,6 +137,12 @@ process run_spatia_pipeline {
     def steps_arg = params.steps_to_run?.trim() ? "--steps " + params.steps_to_run.trim().replaceAll(/\s*,\s*/, ' ') : ''
     def skip_arg   = params.skip_steps?.trim()   ? "--skip "  + params.skip_steps.trim().replaceAll(/\s*,\s*/, ' ')  : ''
     """
+    if [ -d prev_segmentation_input ]; then
+        echo "Reusing previous segmentation from ${params.previous_segmentation}"
+        mkdir -p results/segmentation_results
+        cp -rL prev_segmentation_input/. results/segmentation_results/
+        echo "  copied \$(find results/segmentation_results -name '*_mesmer_result.csv' | wc -l) mesmer result files"
+    fi
     python /app/run_pipeline.py --config ${config_file} --samplesheet ${samplesheet_file} --expected-commit ${workflow.commitId ?: ''} ${steps_arg} ${skip_arg}
     """
 }
@@ -136,5 +150,10 @@ process run_spatia_pipeline {
 workflow {
     config_ch      = Channel.fromPath(params.config)
     samplesheet_ch = Channel.fromPath(params.samplesheet)
-    run_spatia_pipeline(config_ch, samplesheet_ch)
+    // No previous segmentation -> pass a tiny placeholder FILE; the process
+    // only copies when the staged input is a DIRECTORY.
+    prev_seg_ch    = params.previous_segmentation
+                       ? Channel.fromPath(params.previous_segmentation, type: 'dir', checkIfExists: true)
+                       : Channel.fromPath("${projectDir}/assets/NO_FILE")
+    run_spatia_pipeline(config_ch, samplesheet_ch, prev_seg_ch)
 }

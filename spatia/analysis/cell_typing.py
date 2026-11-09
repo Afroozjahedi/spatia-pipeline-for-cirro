@@ -1486,6 +1486,9 @@ def run_cell_typing(cfg: dict) -> None:
                 transform=gmm_transform, arcsinh_cofactor=arcsinh_cofactor,
                 random_state=random_state,
                 umap_cfg=ct_cfg.get("umap"),
+                # cell_typing.plot_formats (2026-11-05): ["png"] roughly halves
+                # diagnostic-plot time (no PDF copy of every per-marker figure).
+                formats=tuple(ct_cfg.get("plot_formats", ["png", "pdf"])),
             )
         except Exception as e:
             print(f"WARNING: cell-typing diagnostic plots failed (non-fatal -- "

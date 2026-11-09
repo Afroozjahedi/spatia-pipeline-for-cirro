@@ -183,3 +183,50 @@ if __name__ == "__main__":
         f"columns={list(samplesheet_df.columns)}) to {samplesheet_s3_path}"
     )
     ds.add_param("samplesheet", samplesheet_s3_path, overwrite=True)
+
+    # ── Reuse a previous run's segmentation (added 2026-11-05) ──────────────
+    # Form field "Reuse segmentation from run": paste the previous run's Cirro
+    # dataset ID (the long ID in that dataset's URL, after /dataset/), or a
+    # full s3:// path to its results/segmentation_results folder. Its
+    # segmentation outputs are handed to Nextflow as `previous_segmentation`
+    # (main.nf copies them into results/segmentation_results), and the
+    # image-reading steps are skipped -- segmentation (~1.5 h on 130 cores)
+    # is not redone and the raw TIFFs are not downloaded.
+    prev = (ds.params.get("previous_run_dataset_id") or "").strip()
+    if prev:
+        s3 = boto3.client("s3")
+
+        def _has_seg(uri: str) -> bool:
+            p = S3Path(uri.rstrip("/") + "/")
+            if not p.valid:
+                return False
+            resp = s3.list_objects_v2(Bucket=p.bucket, Prefix=p.key, MaxKeys=1000)
+            return any(o["Key"].endswith("_mesmer_result.csv") for o in resp.get("Contents", []))
+
+        if prev.startswith("s3://"):
+            candidates = [prev.rstrip("/"), prev.rstrip("/") + "/data/results/segmentation_results",
+                          prev.rstrip("/") + "/results/segmentation_results"]
+        else:
+            root = str(ds.dataset_root).rstrip("/")
+            if "/datasets/" not in root:
+                raise ValueError(
+                    f"Can't work out the previous run's location from this dataset's root "
+                    f"({root}). Paste the full s3:// path to the previous run's "
+                    f"results/segmentation_results folder instead of the dataset ID.")
+            base = root.rsplit("/datasets/", 1)[0] + "/datasets/" + prev
+            candidates = [base + "/data/results/segmentation_results",
+                          base + "/results/segmentation_results"]
+        found = next((c for c in candidates if _has_seg(c)), None)
+        if found is None:
+            raise ValueError(
+                "Reuse segmentation: no *_mesmer_result.csv files found in any of "
+                f"{candidates}. Check the dataset ID (it must be a COMPLETED run in this "
+                "same Cirro project whose results include segmentation_results).")
+        ds.logger.info(f"Reusing segmentation from {found}")
+        ds.add_param("previous_segmentation", found, overwrite=True)
+        skip = [s.strip() for s in (ds.params.get("skip_steps") or "").split(",") if s.strip()]
+        for s in ("tif_conversion", "roi_masking", "segmentation"):
+            if s not in skip:
+                skip.append(s)
+        ds.add_param("skip_steps", ",".join(skip), overwrite=True)
+        ds.logger.info(f"skip_steps set to: {','.join(skip)}")

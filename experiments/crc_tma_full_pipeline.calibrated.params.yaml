@@ -237,6 +237,11 @@ segmentation:
   channel_check: true
 
 preprocessing:
+  # Per-core all-marker overview PNGs (marker_visualizations/). Now drawn on a
+  # downsampled image (~10x faster). Set false to skip them entirely, or list
+  # marker_viz_markers: [CD3, CD8, ...] to draw only some markers.
+  marker_visualizations: true
+  marker_viz_max_px: 800
   last_marker: "DRAQ5"   # last channel in the real 92-channel panel (channelNames.txt)
   qc_filter:
     size_percentile: 1
@@ -254,6 +259,9 @@ preprocessing:
     enabled: true
 
 cell_typing:
+  # Diagnostic plot formats. PNG only saves ~half the plotting time; add "pdf"
+  # back when you need vector figures for a paper.
+  plot_formats: ["png"]
   # UMAP on lineage markers only (optional). Uncomment to try:
   # umap:
   #   markers: [CD45, CD3, CD4, CD8, FOXP3, CD20, CD138, CD68, CD163, CD11c, CD15, CD56, CK, CDX2, aSMA, CD31, Podoplanin, Vimentin]

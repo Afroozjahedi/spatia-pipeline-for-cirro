@@ -984,6 +984,21 @@ def apply_triad_type_groups(df: pd.DataFrame, t_cfg: dict) -> pd.DataFrame:
 
 # ── Core detection ────────────────────────────────────────────────────────────
 
+def triad_distance_um(pairs: pd.DataFrame) -> pd.Series:
+    """Triadic interaction distance of each triad (2026-11-09):
+    the MEAN of anchor->partner1 and anchor->partner2 distances (µm).
+
+    Used wherever triads are filtered by distance -- report radius
+    (functional, survival marker exposure, QC panel) and the trajectory
+    plot. The candidate search is unchanged: each partner must still be
+    within the search radius (radius_um) of the anchor. Previously the
+    filters used max(anchor->p1, anchor->p2), i.e. "both partners within X".
+    Computed from the two distance columns, so old *_triad_pairs.csv files
+    (without a triad_distance_um column) work too.
+    """
+    return pairs[["dist_anchor_p1_um", "dist_anchor_p2_um"]].mean(axis=1)
+
+
 def find_triads(
     df: pd.DataFrame,
     anchor_type: str,
@@ -1058,6 +1073,7 @@ def find_triads(
                     "partner2_y":        coords[p2_idx, 1],
                     "dist_anchor_p2_um": p2_dist * microns_per_pixel,
                     "dist_p1_p2_um":     p1p2_dist_px * microns_per_pixel,
+                    "triad_distance_um": 0.5 * (p1_dist + p2_dist) * microns_per_pixel,
                     "partner2_type":     partner2_type,
                     "triad_combo_label": combo_label,
                     "n_p1_neighbors":    int(p1_mask.sum()),
@@ -1085,15 +1101,11 @@ def plot_triad_qc(df, triad_df, image_id, combo_label, save_path, radius_um,
     PARTNER1_COLOR = "#1f77b4"   # bright blue
     PARTNER2_COLOR = "#d62728"   # vivid red
 
-    # Filter triads to the reporting threshold for the right-hand panel.
-    # Use max(anchor→p1, anchor→p2) — "both partners within X µm of DC".
-    # The p1↔p2 distance is NOT included: two T cells can be far apart while
-    # both sitting within contact range of the same DC.
+    # Filter triads to the reporting threshold for the right-hand panel,
+    # using the triadic interaction distance = mean(anchor→p1, anchor→p2).
+    # The p1↔p2 distance is NOT included.
     if report_radius_um is not None and not triad_df.empty:
-        triad_df_report = triad_df[
-            triad_df[["dist_anchor_p1_um", "dist_anchor_p2_um"]].max(axis=1)
-            <= report_radius_um
-        ].copy()
+        triad_df_report = triad_df[triad_distance_um(triad_df) <= report_radius_um].copy()
         panel_radius = report_radius_um
     else:
         triad_df_report = triad_df.copy()
@@ -1219,9 +1231,9 @@ def plot_trajectory(all_triads_combined, output_dir, radius_um, experiment_group
     thresholds = np.linspace(trajectory_min_um, radius_um, 300)
 
     atc = all_triads_combined.copy()
-    # "Triad at distance d" = both partners within d µm of the anchor DC.
-    # We use max(anchor→p1, anchor→p2), not the p1↔p2 distance.
-    atc["max_anchor_dist_um"] = atc[["dist_anchor_p1_um", "dist_anchor_p2_um"]].max(axis=1)
+    # "Triad at distance d" = triadic interaction distance <= d, where the
+    # triad distance is mean(anchor→p1, anchor→p2) (changed 2026-11-09 from max).
+    atc["triad_distance_um"] = triad_distance_um(atc)
 
     fig, axes = plt.subplots(2, 1, figsize=(10, 12))
 
@@ -1230,7 +1242,7 @@ def plot_trajectory(all_triads_combined, output_dir, radius_um, experiment_group
         if sub.empty:
             continue
         area_mm2 = experiment_group_areas.get(cond, np.nan) / 1e6
-        raw_counts = [int((sub["max_anchor_dist_um"] <= t).sum()) for t in thresholds]
+        raw_counts = [int((sub["triad_distance_um"] <= t).sum()) for t in thresholds]
         densities  = [c / area_mm2 if area_mm2 > 0 else 0 for c in raw_counts]
         axes[0].plot(thresholds, raw_counts,  color=colors.get(cond, "gray"), linestyle=linestyles.get(cond, "-"), linewidth=2.5, label=f"{cond}  (n={len(sub)})")
         axes[1].plot(thresholds, densities,   color=colors.get(cond, "gray"), linestyle=linestyles.get(cond, "-"), linewidth=2.5, label=f"{cond}  (area={area_mm2:.4f} mm²)")
@@ -1484,7 +1496,9 @@ def plot_experiment_group_comparison(summary_df, all_triads_combined, output_dir
     partner1_name = _role_name("partner1_type", "Partner1")
     partner2_name = _role_name("partner2_type", "Partner2")
 
+    atc["triad_distance_um"] = triad_distance_um(atc)
     dist_pairs = {
+        "Triad distance\n(mean of anchor–partner 1\nand anchor–partner 2)": "triad_distance_um",
         f"{anchor_name} – {partner1_name}": "dist_anchor_p1_um",
         f"{anchor_name} – {partner2_name}": "dist_anchor_p2_um",
         f"{partner1_name} – {partner2_name}": "dist_p1_p2_um",
@@ -1492,7 +1506,7 @@ def plot_experiment_group_comparison(summary_df, all_triads_combined, output_dir
     pair_labels, dist_cols = list(dist_pairs.keys()), list(dist_pairs.values())
     xd = np.arange(len(pair_labels))
 
-    fig2, ax2 = plt.subplots(figsize=(10, 7))
+    fig2, ax2 = plt.subplots(figsize=(12, 7))
     for i, cond in enumerate(experiment_groups):
         sub   = atc[atc["experiment_group"] == cond]
         means = [sub[col].mean() if not sub[col].empty else 0 for col in dist_cols]
@@ -1561,6 +1575,7 @@ def _load_cached_triad_results(image_id: str, triad_data_dir: str, radius_um: fl
             "mean_dist_anchor_p1_um": round(grp["dist_anchor_p1_um"].mean(), 3),
             "mean_dist_anchor_p2_um": round(grp["dist_anchor_p2_um"].mean(), 3),
             "mean_dist_p1_p2_um":     round(grp["dist_p1_p2_um"].mean(), 3),
+            "mean_triad_distance_um": round(triad_distance_um(grp).mean(), 3),
         })
     return image_summary, triads_df
 
@@ -1795,7 +1810,7 @@ def run_triad_analysis(cfg: dict) -> None:
                 "combo_label": f"{at}__{p1t}__{p2t}", "n_triads": 0,
                 "radius_um": radius_um, "radius_px": round(radius_px, 3),
                 "mean_dist_anchor_p1_um": np.nan, "mean_dist_anchor_p2_um": np.nan,
-                "mean_dist_p1_p2_um": np.nan,
+                "mean_dist_p1_p2_um": np.nan, "mean_triad_distance_um": np.nan,
             }
 
         for (at, p1t, p2t) in combos:
@@ -1830,6 +1845,7 @@ def run_triad_analysis(cfg: dict) -> None:
                 "mean_dist_anchor_p1_um":  round(triad_df["dist_anchor_p1_um"].mean(), 3),
                 "mean_dist_anchor_p2_um":  round(triad_df["dist_anchor_p2_um"].mean(), 3),
                 "mean_dist_p1_p2_um":      round(triad_df["dist_p1_p2_um"].mean(), 3),
+                "mean_triad_distance_um":  round(triad_distance_um(triad_df).mean(), 3),
             })
 
         if image_triad_dfs:

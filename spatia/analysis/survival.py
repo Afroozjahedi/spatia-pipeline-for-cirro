@@ -328,9 +328,9 @@ def _compute_in_triad_ids(output_dir: str, image_id: str, report_radius_um: floa
         return set()
     if pairs.empty or "dist_anchor_p1_um" not in pairs.columns:
         return set()
-    pairs_report = pairs[
-        pairs[["dist_anchor_p1_um", "dist_anchor_p2_um"]].max(axis=1) <= report_radius_um
-    ]
+    # triadic interaction distance = mean(anchor→p1, anchor→p2) (2026-11-09)
+    from spatia.analysis.triads import triad_distance_um
+    pairs_report = pairs[triad_distance_um(pairs) <= report_radius_um]
     ids = set()
     for col in ["anchor_cell_id", "partner1_cell_id", "partner2_cell_id"]:
         if col in pairs_report.columns:
